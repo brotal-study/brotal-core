@@ -1,23 +1,96 @@
-import { ChevronDown, Home } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { ChevronDown, Home, Settings } from 'lucide-react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import ThemeToggle from './ThemeToggle'
+import CommandPalette from './CommandPalette'
+import { selectCourses, useAppStore } from '../../store/useAppStore'
 
-// TODO(#5): el desplegable lista solo ramos con status 'active' (GET /api/v1/courses?status=active) + Ctrl+K.
 export default function TopBar() {
+  const navigate = useNavigate()
+  const { pathname } = useLocation()
+  const { career, profile, manualCourses, statuses, setActiveCourse, loadCareer } = useAppStore()
+  const [menu, setMenu] = useState(false)
+  const [palette, setPalette] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (profile && !career && profile.mode === 'career') void loadCareer()
+  }, [profile, career, loadCareer])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setMenu(false)
+        setPalette((p) => !p)
+      }
+    }
+    const onClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setMenu(false)
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('mousedown', onClick)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('mousedown', onClick)
+    }
+  }, [])
+
+  const all = useMemo(() => selectCourses({ career, profile, manualCourses }), [career, profile, manualCourses])
+  const active = all.filter((c) => statuses[c.id] === 'active')
+  const routeId = pathname.startsWith('/course/') ? decodeURIComponent(pathname.slice(8)) : null
+  const current = all.find((c) => c.id === routeId)
+
+  const item = 'rounded px-2 py-1 hover:bg-slate-200 dark:hover:bg-slate-800'
   return (
     <header className="flex items-center gap-3 border-b border-slate-200 px-4 py-2 dark:border-slate-800">
-      <Link to="/" className="flex items-center gap-2 rounded px-2 py-1 hover:bg-slate-200 dark:hover:bg-slate-800">
+      <Link to="/" className={`flex items-center gap-2 ${item}`}>
         <Home size={18} />
         <span>Malla</span>
       </Link>
       <span className="text-slate-400">|</span>
-      <button type="button" className="flex items-center gap-2 rounded px-2 py-1 hover:bg-slate-200 dark:hover:bg-slate-800">
-        <span>Sin ramo activo</span>
-        <ChevronDown size={16} />
+      <div ref={ref} className="relative">
+        <button type="button" onClick={() => setMenu((m) => !m)} aria-expanded={menu} className={`flex items-center gap-2 ${item}`}>
+          <span>{current ? current.name : 'Sin ramo activo'}</span>
+          <ChevronDown size={16} />
+        </button>
+        {menu && (
+          <div className="absolute left-0 top-full z-30 mt-1 w-72 rounded-lg border border-slate-200 bg-white p-1 shadow-lg dark:border-slate-700 dark:bg-slate-900">
+            {active.length === 0 && <p className="px-3 py-2 text-sm text-slate-500">No tienes ramos en estado Cursando.</p>}
+            {active.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => {
+                  setActiveCourse(c.id)
+                  setMenu(false)
+                  navigate(`/course/${encodeURIComponent(c.id)}`)
+                }}
+                className={`flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm hover:bg-slate-100 dark:hover:bg-slate-800 ${c.id === routeId ? 'bg-slate-100 dark:bg-slate-800' : ''}`}
+              >
+                <span className="font-mono text-xs text-slate-500">{c.code}</span>
+                <span className="truncate">{c.name}</span>
+              </button>
+            ))}
+            <div className="mt-1 border-t border-slate-200 pt-1 dark:border-slate-700">
+              <Link to="/" onClick={() => setMenu(false)} className="block rounded px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800">
+                + Gestionar ramos / Ir a Malla
+              </Link>
+            </div>
+          </div>
+        )}
+      </div>
+      <button type="button" onClick={() => setPalette(true)} className="hidden items-center gap-1 rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-500 sm:flex dark:border-slate-700">
+        Ctrl+K
       </button>
-      <div className="ml-auto">
+      <div className="ml-auto flex items-center gap-1">
+        {profile && <span className="hidden text-sm text-slate-500 sm:inline">{profile.name}</span>}
+        <Link to="/onboarding" aria-label="Editar perfil local" className="rounded p-2 hover:bg-slate-200 dark:hover:bg-slate-800">
+          <Settings size={18} />
+        </Link>
         <ThemeToggle />
       </div>
+      <CommandPalette open={palette} onClose={() => setPalette(false)} />
     </header>
   )
 }
