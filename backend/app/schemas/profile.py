@@ -9,6 +9,8 @@ CurriculumMode = Literal["realistic", "free"]
 CooldownMode = Literal["semester", "urgency"]
 Theme = Literal["dark", "light"]
 AiProvider = Literal["auto", "groq", "gemini", "ollama"]
+ExplanationStyle = Literal["narrative", "direct", "structured"]
+QuestionStyle = Literal["direct", "scenario"]
 
 
 class ProvidersStatus(BaseModel):
@@ -25,6 +27,8 @@ class Profile(BaseModel):
     cooldown_mode: CooldownMode = "semester"
     theme: Theme = "dark"
     ai_provider: AiProvider = "auto"
+    explanation_style: ExplanationStyle = "narrative"
+    question_style: QuestionStyle = "direct"
     created_at: str
     providers: ProvidersStatus
 
@@ -38,3 +42,5 @@ class ProfilePatch(BaseModel):
     cooldown_mode: CooldownMode | None = None
     theme: Theme | None = None
     ai_provider: AiProvider | None = None
+    explanation_style: ExplanationStyle | None = None
+    question_style: QuestionStyle | None = None

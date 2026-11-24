@@ -397,6 +397,38 @@ def _strip_bullets(story: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", prose).strip()
 
 
+def explanation_style_instruction(explanation_style: str, world_metaphor: str) -> str:
+    if explanation_style == "direct":
+        return (
+            "ESTILO DIRECTO (`direct`): Escribe una explicacion tecnica directa, precisa y clara en 2 a 3 parrafos "
+            "fluidos (~180 a 240 palabras). PROHIBIDO usar 'Imagina...', 'Situemonos en...' o metaforas forzadas. "
+            "Ve directo a la definicion operativa, el mecanismo tecnico y que problema concreto resuelve."
+        )
+    if explanation_style == "structured":
+        return (
+            "ESTILO ESTRUCTURADO (`structured`): Escribe 3 parrafos claros y bien encadenados (~180 a 240 palabras) "
+            "siguiendo el orden exacto: (1) Concepto central y funcion tecnica -> (2) Relacion de causa-efecto y mecanismo "
+            "interno -> (3) Ejemplo concreto de aplicacion real. Sin listas secas telegraficas ni vinetas."
+        )
+    return (
+        f"ESTILO NARRATIVO (`narrative`): Escribe una historia conversada continua en 2 a 3 parrafos (~180 a 240 palabras) "
+        f"usando la metafora del mundo (`{world_metaphor}`), explicando causa-efecto y que problema real resuelve. "
+        "PROHIBIDO usar listas con vinetas o numeraciones."
+    )
+
+
+def question_style_instruction(question_style: str, world_metaphor: str) -> str:
+    if question_style == "scenario":
+        return (
+            f"ESTILO ESCENARIO (`scenario`): Formula preguntas basadas en un caso o situacion aplicada con contexto "
+            f"(diagnostico de fallos, toma de decision o escenario dentro de `{world_metaphor}` o de la ingenieria real)."
+        )
+    return (
+        "ESTILO DIRECTO (`direct`): Formula preguntas breves, precisas y directas de 1 a 2 lineas (tipo examen real), "
+        "sin rodeos narrativos ni introducciones largas."
+    )
+
+
 def regenerate_story_with_ai(
     *,
     course_title: str,
@@ -406,11 +438,12 @@ def regenerate_story_with_ai(
     current_story: str,
     eval_prompts: list[dict[str, Any]],
     preferred_provider: str = "auto",
+    explanation_style: str = "narrative",
 ) -> tuple[str, str]:
-    """Genera una explicacion conversada alternativa manteniendo el world_metaphor del ramo.
+    """Genera una explicacion alternativa respetando explanation_style ('narrative' | 'direct' | 'structured').
 
-    Siempre 2 a 3 parrafos conversados continuos (~180-240 palabras en total), sin listas con vinetas.
-    Si no hay IA configurada, genera una analogia conversada determinista alternativa para no fallar offline.
+    Siempre 2 a 3 parrafos continuos (~180-240 palabras en total), sin listas con vinetas.
+    Si no hay IA configurada, genera una version determinista alternativa segun el estilo elegido.
     Devuelve (new_story_script, provider_used).
     """
     rubric_points = [
@@ -419,22 +452,23 @@ def regenerate_story_with_ai(
         for pt in q.get("rubric_points", [])
     ]
     metaphor_hint = world_metaphor or f"Taller practico de {course_title}"
+    style_rule = explanation_style_instruction(explanation_style, metaphor_hint)
 
     try:
         system_prompt = (
-            "Eres el narrador pedagogico de Brotal. Tu tarea es explicar un concepto universitario "
-            "como una historia conversada continua en espanol de 2 a 3 parrafos (~180 a 240 palabras en total), "
-            "usando otro angulo o caso dentro de la metafora del mundo (`world_metaphor`) del ramo, explicando "
-            "causa-efecto y que problema real resuelve. PROHIBIDO usar listas con vinetas, numeraciones o saltos "
-            "bruscos de extension: entrega unicamente los 2 a 3 parrafos conversados naturales que cubran todos "
-            "los conceptos clave de la rubrica."
+            "Eres el autor pedagogico de Brotal. Tu tarea es explicar un concepto universitario "
+            "en espanol en 2 a 3 parrafos continuos (~180 a 240 palabras en total).\n"
+            f"{style_rule}\n"
+            "PROHIBIDO usar listas con vinetas, numeraciones o encabezados markdown: entrega unicamente los 2 a 3 parrafos "
+            "que cubran todos los conceptos clave de la rubrica."
         )
         user_prompt = (
             f"Ramo: {course_title}\n"
-            f"Metafora del mundo: {metaphor_hint}\n"
+            f"Estilo solicitado: {explanation_style}\n"
+            f"Metafora del mundo (solo si el estilo es narrative): {metaphor_hint}\n"
             f"Nodo: {node_title} ({node_summary})\n"
-            f"Conceptos que deben quedar claros en la narrativa: {', '.join(rubric_points)}\n"
-            f"Historia anterior (usa otro enfoque/ejemplo distinto manteniendo ~180-240 palabras en 2 a 3 parrafos):\n"
+            f"Conceptos que deben quedar claros: {', '.join(rubric_points)}\n"
+            f"Explicacion anterior (usa otro enfoque/ejemplo distinto manteniendo ~180-240 palabras en 2 a 3 parrafos):\n"
             f"{current_story}\n"
         )
         comp = complete_chat(
@@ -444,23 +478,42 @@ def regenerate_story_with_ai(
             ],
             preferred_provider=preferred_provider,
             json_mode=False,
-            temperature=0.6,
+            temperature=0.55,
         )
         return (_strip_bullets(comp.text), comp.provider)
     except AiProviderError:
-        # Fallback local conversado alternativo (2-3 parrafos, ~190-220 palabras)
-        concepts_prose = ". Ademas, observa como ".join(rubric_points) if rubric_points else node_summary
-        alt = _strip_bullets(
-            f"Miralo ahora desde otro angulo operativo dentro de {metaphor_hint}. Cuando nos enfrentamos a {node_title} "
-            f"en {course_title}, el error tipico es quedarse en la definicion de memoria en vez de seguir el flujo real "
-            f"del sistema y entender que problema concreto resuelve: {node_summary}.\n\n"
-            f"Imagina que tienes que diagnosticarlo en vivo paso a paso cuando algo falla en {metaphor_hint}: primero "
-            f"confirmas la causa y efecto verificando que {concepts_prose}. Cada una de estas piezas cumple un rol "
-            f"especifico para mantener la estabilidad del diseno.\n\n"
-            f"Al conectar cada mecanismo con su consecuencia practica dentro de {metaphor_hint}, ya no necesitas "
-            f"memorizar definiciones aisladas, porque puedes anticipar que ocurre si una condicion cambia y justificar "
-            f"tu decision tecnica con claridad."
-        )
+        concepts_prose = ". Asimismo, ".join(rubric_points) if rubric_points else node_summary
+        if explanation_style == "direct":
+            alt = _strip_bullets(
+                f"{node_title} en {course_title} define un mecanismo tecnico fundamental cuyo objetivo directo es "
+                f"resolver: {node_summary}. Su operacion se basa en reglas verificables que determinan el comportamiento "
+                f"exacto del sistema sin ambiguedades.\n\n"
+                f"En terminos técnicos, el funcionamiento exige cumplir que {concepts_prose}. Cada parametro y condicion "
+                f"afecta de forma directa la eficiencia, correccion y estabilidad de la implementacion.\n\n"
+                f"Para validar {node_title} en la practica, se comprueba directamente que se cumplan estas propiedades "
+                f"tecnicas ante entradas normales y casos de borde."
+            )
+        elif explanation_style == "structured":
+            alt = _strip_bullets(
+                f"Concepto central: {node_title} dentro de {course_title} establece la base estructural para abordar "
+                f"{node_summary}, definiendo los limites y responsabilidades del componente en el sistema.\n\n"
+                f"Causa y efecto: El mecanismo opera garantizando que {concepts_prose}. Cuando una de estas condiciones "
+                f"varia, el efecto directo se propaga sobre el rendimiento y la consistencia del resultado.\n\n"
+                f"Ejemplo concreto: En una implementacion real de {course_title}, aplicar {node_title} permite verificar "
+                f"paso a paso cada criterio tecnico y diagnosticar con exactitud cualquier desviacion."
+            )
+        else:
+            alt = _strip_bullets(
+                f"Miralo ahora desde otro angulo operativo dentro de {metaphor_hint}. Cuando nos enfrentamos a {node_title} "
+                f"en {course_title}, el error tipico es quedarse en la definicion de memoria en vez de seguir el flujo real "
+                f"del sistema y entender que problema concreto resuelve: {node_summary}.\n\n"
+                f"Imagina que tienes que diagnosticarlo en vivo paso a paso cuando algo falla en {metaphor_hint}: primero "
+                f"confirmas la causa y efecto verificando que {concepts_prose}. Cada una de estas piezas cumple un rol "
+                f"especifico para mantener la estabilidad del diseno.\n\n"
+                f"Al conectar cada mecanismo con su consecuencia practica dentro de {metaphor_hint}, ya no necesitas "
+                f"memorizar definiciones aisladas, porque puedes anticipar que ocurre si una condicion cambia y justificar "
+                f"tu decision tecnica con claridad."
+            )
         return (alt, "local_fallback")
 
 
@@ -473,9 +526,11 @@ def regenerate_questions_with_ai(
     story_script: str,
     eval_prompts: list[dict[str, Any]],
     preferred_provider: str = "auto",
+    question_style: str = "direct",
 ) -> tuple[list[dict[str, Any]], str]:
-    """Redacta preguntas socraticas nuevas y distintas evaluando exactamente los mismos rubric_points del nodo."""
+    """Redacta preguntas nuevas y distintas evaluando exactamente los mismos rubric_points segun question_style."""
     metaphor_hint = world_metaphor or f"Taller practico de {course_title}"
+    q_rule = question_style_instruction(question_style, metaphor_hint)
     source_prompts = eval_prompts or [
         {
             "id": "q1",
@@ -486,18 +541,19 @@ def regenerate_questions_with_ai(
 
     try:
         system_prompt = (
-            "Eres el Evaluador Socratico de Brotal. Tu tarea es redactar PREGUNTAS SOCRATICAS NUEVAS Y DISTINTAS "
-            "(planteando casos practicos, diagnosticos de fallos o comparaciones aplicadas dentro de la metafora del ramo) "
+            "Eres el Evaluador Socratico de Brotal. Tu tarea es redactar PREGUNTAS NUEVAS Y DISTINTAS "
             "que evaluen EXACTAMENTE los mismos `rubric_points` de cada pregunta original.\n"
+            f"{q_rule}\n"
             "REGLAS OBLIGATORIAS:\n"
             "1. Conserva los mismos `id` y los mismos `rubric_points` de cada item.\n"
-            "2. Cambia por completo la formulacion de cada `question` para que el estudiante deba razonar desde otro caso o escenario.\n"
+            "2. Cambia por completo la formulacion de cada `question` respetando el estilo solicitado.\n"
             "3. Responde UNICAMENTE un objeto JSON valido con la clave `eval_prompts`:\n"
-            '{"eval_prompts": [{"id": "q1", "question": "Nueva pregunta socratica...", "rubric_points": ["..."]}]}'
+            '{"eval_prompts": [{"id": "q1", "question": "Nueva pregunta...", "rubric_points": ["..."]}]}'
         )
         user_prompt = json.dumps(
             {
                 "course_title": course_title,
+                "question_style": question_style,
                 "world_metaphor": metaphor_hint,
                 "node_title": node_title,
                 "node_summary": node_summary,
@@ -513,7 +569,7 @@ def regenerate_questions_with_ai(
             ],
             preferred_provider=preferred_provider,
             json_mode=True,
-            temperature=0.7,
+            temperature=0.65,
         )
         parsed = extract_json_object(comp.text)
         raw_list = parsed.get("eval_prompts")
@@ -530,19 +586,30 @@ def regenerate_questions_with_ai(
                 candidate_q = str(raw_list[idx].get("question") or "").strip()
             if not candidate_q or candidate_q == str(orig.get("question") or "").strip():
                 focus = "; ".join(pts[:2]) if pts else node_summary
-                candidate_q = (
-                    f"En un escenario de diagnostico dentro de {metaphor_hint}, ¿como aplicarias {node_title} "
-                    f"para resolver un caso real considerando: {focus}?"
-                )
+                if question_style == "scenario":
+                    candidate_q = (
+                        f"En un escenario aplicado dentro de {metaphor_hint}, ¿como utilizarias {node_title} "
+                        f"para resolver un caso considerando: {focus}?"
+                    )
+                else:
+                    candidate_q = f"En {node_title}, explica de forma precisa como opera y por que es clave que: {focus}."
             updated.append({"id": qid, "question": candidate_q, "rubric_points": pts})
         return (updated, comp.provider)
     except (AiProviderError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-        templates = [
-            "Imagina una falla en vivo dentro de {metaphor}: ¿como diagnosticarias y justificarias {node} asegurando que {focus}?",
-            "Si tuvieras que defender una decision de diseno en {metaphor} sobre {node}, ¿como conectarias en la practica que {focus}?",
-            "Plantea un caso concreto de {course} dentro de {metaphor}: ¿que ocurriria paso a paso con {node} respecto a {focus}?",
-            "Comparando alternativas dentro de {metaphor}, ¿por que es determinante en {node} tener en cuenta que {focus}?",
-        ]
+        if question_style == "scenario":
+            templates = [
+                "En un escenario de falla en vivo dentro de {metaphor}: ¿como diagnosticarias y justificarias {node} asegurando que {focus}?",
+                "Si tuvieras que defender una decision de diseno en {metaphor} sobre {node}, ¿como conectarias en la practica que {focus}?",
+                "Ante un caso concreto de {course} dentro de {metaphor}: ¿que ocurriria paso a paso con {node} respecto a {focus}?",
+                "Comparando alternativas dentro de {metaphor}, ¿por que es determinante en {node} tener en cuenta que {focus}?",
+            ]
+        else:
+            templates = [
+                "Explica de forma directa en {node} como se cumple y por que es necesario que {focus}.",
+                "Define con precision tecnica el mecanismo de {node} respecto a: {focus}.",
+                "¿Cual es la relacion tecnica exacta en {node} ({course}) cuando se evalua que {focus}?",
+                "Justifica brevemente en 2 lineas por que en {node} resulta clave que {focus}.",
+            ]
         updated_fallback: list[dict[str, Any]] = []
         for idx, orig in enumerate(source_prompts):
             qid = str(orig.get("id") or f"q{idx+1}")

@@ -1,14 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+export interface StoryWord {
+  globalWordIndex: number
+  sentenceIndex: number
+  wordInSentenceIndex: number
+  text: string
+}
+
 export interface StorySentence {
   globalIndex: number
   paragraphIndex: number
   text: string
+  words: StoryWord[]
 }
 
 export function splitStoryParagraphSentences(rawText: string): {
   paragraphs: StorySentence[][]
   flat: StorySentence[]
+  flatWords: StoryWord[]
 } {
   const rawParagraphs = rawText
     .split(/\n{2,}/)
@@ -17,7 +26,9 @@ export function splitStoryParagraphSentences(rawText: string): {
 
   const paragraphs: StorySentence[][] = []
   const flat: StorySentence[] = []
+  const flatWords: StoryWord[] = []
   let globalIndex = 0
+  let globalWordIndex = 0
 
   rawParagraphs.forEach((p, paragraphIndex) => {
     const parts =
@@ -27,10 +38,24 @@ export function splitStoryParagraphSentences(rawText: string): {
         .filter(Boolean) ?? []
     const sentenceTexts = parts.length > 0 ? parts : [p]
     const pSentences: StorySentence[] = sentenceTexts.map((sText) => {
+      const sIdx = globalIndex
+      const tokens = sText.split(/\s+/).filter(Boolean)
+      const words: StoryWord[] = tokens.map((wText, wIdx) => {
+        const wItem: StoryWord = {
+          globalWordIndex,
+          sentenceIndex: sIdx,
+          wordInSentenceIndex: wIdx,
+          text: wText,
+        }
+        globalWordIndex += 1
+        flatWords.push(wItem)
+        return wItem
+      })
       const item: StorySentence = {
-        globalIndex,
+        globalIndex: sIdx,
         paragraphIndex,
         text: sText,
+        words,
       }
       globalIndex += 1
       flat.push(item)
@@ -39,7 +64,7 @@ export function splitStoryParagraphSentences(rawText: string): {
     paragraphs.push(pSentences)
   })
 
-  return { paragraphs, flat }
+  return { paragraphs, flat, flatWords }
 }
 
 // Fallback offline con window.speechSynthesis + seguimiento de oracion activa y salto por clic.

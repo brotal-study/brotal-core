@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS user_profile (
   cooldown_mode     TEXT NOT NULL DEFAULT 'semester'  CHECK (cooldown_mode IN ('semester', 'urgency')),
   theme             TEXT NOT NULL DEFAULT 'dark'      CHECK (theme IN ('dark', 'light')),
   ai_provider       TEXT NOT NULL DEFAULT 'auto', -- auto | groq | gemini | ollama
+  explanation_style TEXT NOT NULL DEFAULT 'narrative' CHECK (explanation_style IN ('narrative', 'direct', 'structured')),
+  question_style    TEXT NOT NULL DEFAULT 'direct'    CHECK (question_style IN ('direct', 'scenario')),
   created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

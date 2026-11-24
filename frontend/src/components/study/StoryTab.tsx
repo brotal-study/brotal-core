@@ -12,13 +12,21 @@ import {
   Swords,
   Volume2,
 } from 'lucide-react'
+import type { ExplanationStyle } from '../../api/curriculum'
 import {
   fetchNodeTtsBlob,
-  fetchNodeTtsTimings,
+  fetchNodeTtsTimingsData,
   type PackNode,
   type TtsSentenceTiming,
+  type TtsWordTiming,
 } from '../../api/study'
-import { splitStoryParagraphSentences, useSpeech } from './useSpeech'
+import { useStudyStore } from '../../store/useStudyStore'
+import {
+  splitStoryParagraphSentences,
+  useSpeech,
+  type StorySentence,
+  type StoryWord,
+} from './useSpeech'
 
 interface Props {
   courseId: string
@@ -46,7 +54,8 @@ function buildSentenceWindows(
   if (serverTimings.length === sentences.length) {
     return serverTimings.map((t, idx) => {
       const nextStart = idx < serverTimings.length - 1 ? serverTimings[idx + 1].start : undefined
-      const endVal = nextStart !== undefined ? Math.max(t.end, nextStart) : Math.max(t.end, audioDuration || t.end)
+      const endVal =
+        nextStart !== undefined ? Math.max(t.end, nextStart) : Math.max(t.end, audioDuration || t.end)
       return { start: t.start, end: endVal }
     })
   }
@@ -72,6 +81,77 @@ function buildSentenceWindows(
   })
 }
 
+function buildWordWindows(
+  sentences: StorySentence[],
+  flatWords: StoryWord[],
+  sentenceWindows: { start: number; end: number }[],
+  serverWords: TtsWordTiming[],
+): { start: number; end: number; sentenceIndex: number }[] {
+  if (flatWords.length === 0) return []
+
+  if (serverWords.length === flatWords.length) {
+    return flatWords.map((fw, idx) => {
+      const sw = serverWords[idx]
+      const nextStart = idx < serverWords.length - 1 ? serverWords[idx + 1].start : undefined
+      const endVal = nextStart !== undefined ? Math.max(sw.end, nextStart) : sw.end
+      return {
+        start: sw.start,
+        end: Math.max(sw.start + 0.04, endVal),
+        sentenceIndex: fw.sentenceIndex,
+      }
+    })
+  }
+
+  if (serverWords.length > 0) {
+    // Mapear cada palabra del DOM proporcionalmente sobre los eventos WordBoundary reales de edge-tts
+    const totalServer = serverWords.length
+    const totalDom = flatWords.length
+    return flatWords.map((fw, idx) => {
+      const mappedIdx = Math.min(
+        totalServer - 1,
+        Math.floor((idx / Math.max(1, totalDom)) * totalServer),
+      )
+      const nextMappedIdx = Math.min(
+        totalServer - 1,
+        Math.floor(((idx + 1) / Math.max(1, totalDom)) * totalServer),
+      )
+      const start = serverWords[mappedIdx].start
+      const rawEnd =
+        nextMappedIdx > mappedIdx
+          ? serverWords[nextMappedIdx].start
+          : serverWords[mappedIdx].end
+      return {
+        start,
+        end: Math.max(start + 0.04, rawEnd),
+        sentenceIndex: fw.sentenceIndex,
+      }
+    })
+  }
+
+  // Fallback proporcional por palabra dentro de cada ventana de oracion
+  const out: { start: number; end: number; sentenceIndex: number }[] = []
+  sentences.forEach((sent, sIdx) => {
+    const sWin = sentenceWindows[sIdx] ?? { start: sIdx * 3, end: (sIdx + 1) * 3 }
+    const sWords = sent.words
+    if (sWords.length === 0) return
+    const sDur = Math.max(0.15, sWin.end - sWin.start)
+    const weights = sWords.map((w) => Math.max(1, w.text.length))
+    const totalW = weights.reduce((a, b) => a + b, 0)
+    let acc = 0
+    sWords.forEach((w, wIdx) => {
+      const wStart = sWin.start + (acc / totalW) * sDur
+      acc += weights[wIdx]
+      const wEnd = wIdx === sWords.length - 1 ? sWin.end : sWin.start + (acc / totalW) * sDur
+      out.push({
+        start: Math.round(wStart * 1000) / 1000,
+        end: Math.round(Math.max(wStart + 0.04, wEnd) * 1000) / 1000,
+        sentenceIndex: w.sentenceIndex,
+      })
+    })
+  })
+  return out
+}
+
 export default function StoryTab({
   courseId,
   node,
@@ -80,10 +160,13 @@ export default function StoryTab({
   onRegenerateStory,
   onAskTutor,
 }: Props) {
+  const explanationStyle = useStudyStore((s) => s.explanationStyle)
+  const setExplanationStyle = useStudyStore((s) => s.setExplanationStyle)
   const speech = useSpeech(node.story_script)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const blobUrlRef = useRef<string | null>(null)
   const sentenceRefs = useRef<Record<number, HTMLSpanElement | null>>({})
+  const wordRefs = useRef<Record<number, HTMLSpanElement | null>>({})
   const lastManualScrollRef = useRef<number>(0)
 
   const [mode, setMode] = useState<'neural' | 'fallback'>('neural')
@@ -93,17 +176,40 @@ export default function StoryTab({
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [serverTimings, setServerTimings] = useState<TtsSentenceTiming[]>([])
+  const [serverWords, setServerWords] = useState<TtsWordTiming[]>([])
   const [regenerating, setRegenerating] = useState(false)
 
-  const { paragraphs: structuredParagraphs, flat: flatSentences } = useMemo(
-    () => splitStoryParagraphSentences(node.story_script),
-    [node.story_script],
-  )
+  const {
+    paragraphs: structuredParagraphs,
+    flat: flatSentences,
+    flatWords,
+  } = useMemo(() => splitStoryParagraphSentences(node.story_script), [node.story_script])
 
   const sentenceWindows = useMemo(
     () => buildSentenceWindows(flatSentences, serverTimings, duration),
     [flatSentences, serverTimings, duration],
   )
+
+  const wordWindows = useMemo(
+    () => buildWordWindows(flatSentences, flatWords, sentenceWindows, serverWords),
+    [flatSentences, flatWords, sentenceWindows, serverWords],
+  )
+
+  // Loop de alta frecuencia (requestAnimationFrame) mientras el audio neural esta reproduciendose
+  useEffect(() => {
+    if (!playing || mode !== 'neural') return
+    let rafId = 0
+    const tick = () => {
+      if (audioRef.current && !audioRef.current.paused) {
+        setCurrentTime(audioRef.current.currentTime)
+        rafId = window.requestAnimationFrame(tick)
+      }
+    }
+    rafId = window.requestAnimationFrame(tick)
+    return () => {
+      if (rafId) window.cancelAnimationFrame(rafId)
+    }
+  }, [playing, mode])
 
   // Detectar scroll manual del usuario para no secuestrar el scroll durante auto-seguimiento
   useEffect(() => {
@@ -132,6 +238,7 @@ export default function StoryTab({
     setCurrentTime(0)
     setDuration(0)
     setServerTimings([])
+    setServerWords([])
     setMode('neural')
     return () => {
       if (audioRef.current) {
@@ -145,12 +252,13 @@ export default function StoryTab({
     }
   }, [courseId, node.id, node.story_script])
 
-  const loadNeuralAudio = async (seekToSentenceIdx?: number) => {
+  const loadNeuralAudio = async (opts?: { seekToWordIdx?: number; seekToSentenceIdx?: number }) => {
     setLoadingAudio(true)
     try {
       const blob = await fetchNodeTtsBlob(courseId, node.id)
-      const fetchedTimings = await fetchNodeTtsTimings(courseId, node.id)
-      setServerTimings(fetchedTimings)
+      const fetchedData = await fetchNodeTtsTimingsData(courseId, node.id)
+      setServerTimings(fetchedData.sentences)
+      setServerWords(fetchedData.words)
 
       const url = URL.createObjectURL(blob)
       blobUrlRef.current = url
@@ -160,9 +268,14 @@ export default function StoryTab({
       audio.addEventListener('loadedmetadata', () => {
         const dur = audio.duration || 0
         setDuration(dur)
-        if (seekToSentenceIdx !== undefined) {
-          const wins = buildSentenceWindows(flatSentences, fetchedTimings, dur)
-          const target = wins[seekToSentenceIdx]?.start ?? 0
+        const sWins = buildSentenceWindows(flatSentences, fetchedData.sentences, dur)
+        const wWins = buildWordWindows(flatSentences, flatWords, sWins, fetchedData.words)
+        if (opts?.seekToWordIdx !== undefined) {
+          const target = wWins[opts.seekToWordIdx]?.start ?? 0
+          audio.currentTime = target
+          setCurrentTime(target)
+        } else if (opts?.seekToSentenceIdx !== undefined) {
+          const target = sWins[opts.seekToSentenceIdx]?.start ?? 0
           audio.currentTime = target
           setCurrentTime(target)
         }
@@ -179,8 +292,8 @@ export default function StoryTab({
       // Fallback offline a speechSynthesis del navegador
       setMode('fallback')
       speech.setRate(rate)
-      if (seekToSentenceIdx !== undefined) {
-        speech.playFromSentence(seekToSentenceIdx)
+      if (opts?.seekToSentenceIdx !== undefined) {
+        speech.playFromSentence(opts.seekToSentenceIdx)
       } else {
         speech.play()
       }
@@ -208,14 +321,15 @@ export default function StoryTab({
     await loadNeuralAudio()
   }
 
-  const handleSentenceClick = async (sentenceIdx: number) => {
+  const handleWordClick = async (globalWordIdx: number, sentenceIdx: number) => {
     if (mode === 'fallback') {
       speech.playFromSentence(sentenceIdx)
       return
     }
 
     if (audioRef.current) {
-      const targetStart = sentenceWindows[sentenceIdx]?.start ?? 0
+      const targetStart =
+        wordWindows[globalWordIdx]?.start ?? sentenceWindows[sentenceIdx]?.start ?? 0
       audioRef.current.currentTime = targetStart
       setCurrentTime(targetStart)
       if (!playing) {
@@ -224,7 +338,7 @@ export default function StoryTab({
       return
     }
 
-    await loadNeuralAudio(sentenceIdx)
+    await loadNeuralAudio({ seekToWordIdx: globalWordIdx, seekToSentenceIdx: sentenceIdx })
   }
 
   const stopAudio = () => {
@@ -273,9 +387,28 @@ export default function StoryTab({
 
   const isPlaying = mode === 'fallback' ? speech.state === 'playing' : playing
 
+  const activeWordIndex = useMemo(() => {
+    if (mode === 'fallback') return null
+    if (!playing && currentTime <= 0) return null
+    if (wordWindows.length === 0) return null
+    for (let i = 0; i < wordWindows.length; i++) {
+      const w = wordWindows[i]
+      if (currentTime >= w.start && currentTime < w.end) {
+        return i
+      }
+    }
+    if (currentTime >= wordWindows[wordWindows.length - 1].start) {
+      return wordWindows.length - 1
+    }
+    return 0
+  }, [currentTime, mode, playing, wordWindows])
+
   const activeSentenceIndex = useMemo(() => {
     if (mode === 'fallback') {
       return speech.activeSentenceIndex
+    }
+    if (activeWordIndex !== null && wordWindows[activeWordIndex]) {
+      return wordWindows[activeWordIndex].sentenceIndex
     }
     if (!playing && currentTime <= 0) return null
     if (sentenceWindows.length === 0) return null
@@ -289,17 +422,44 @@ export default function StoryTab({
       return sentenceWindows.length - 1
     }
     return 0
-  }, [currentTime, mode, playing, sentenceWindows, speech.activeSentenceIndex])
+  }, [activeWordIndex, currentTime, mode, playing, sentenceWindows, speech.activeSentenceIndex, wordWindows])
 
-  // Auto-scroll suave a la oracion activa sin secuestrar el scroll manual
+  // Auto-scroll suave a la palabra/oracion activa sin secuestrar el scroll manual
   useEffect(() => {
-    if (!isPlaying || activeSentenceIndex === null) return
+    if (!isPlaying) return
     if (Date.now() - lastManualScrollRef.current < 2500) return
-    const el = sentenceRefs.current[activeSentenceIndex]
-    if (el && typeof el.scrollIntoView === 'function') {
-      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    const targetEl =
+      (activeWordIndex !== null ? wordRefs.current[activeWordIndex] : null) ??
+      (activeSentenceIndex !== null ? sentenceRefs.current[activeSentenceIndex] : null)
+    if (targetEl && typeof targetEl.scrollIntoView === 'function') {
+      targetEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
     }
-  }, [activeSentenceIndex, isPlaying])
+  }, [activeWordIndex, activeSentenceIndex, isPlaying])
+
+  const regenerateControls = (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <select
+        aria-label="Estilo de explicación"
+        value={explanationStyle}
+        onChange={(e) => setExplanationStyle(e.target.value as ExplanationStyle)}
+        className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
+      >
+        <option value="narrative">Estilo: Narrativo</option>
+        <option value="direct">Estilo: Directo</option>
+        <option value="structured">Estilo: Estructurado</option>
+      </select>
+      <button
+        type="button"
+        disabled={regenerating}
+        onClick={handleRegenerate}
+        title="Genera otra explicación usando el estilo pedagógico seleccionado"
+        className="inline-flex shrink-0 items-center gap-1.5 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:hover:bg-slate-800"
+      >
+        <RefreshCw size={13} className={regenerating ? 'animate-spin' : ''} />
+        {regenerating ? 'Re-explicando...' : 'Otra explicación'}
+      </button>
+    </div>
+  )
 
   return (
     <div className="flex min-w-0 max-w-full flex-col gap-4">
@@ -311,16 +471,7 @@ export default function StoryTab({
             </span>
             <div className="break-words font-medium">{worldMetaphor}</div>
           </div>
-          <button
-            type="button"
-            disabled={regenerating}
-            onClick={handleRegenerate}
-            title="Genera otra explicación conversada manteniendo la metáfora del ramo"
-            className="inline-flex shrink-0 items-center gap-1.5 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:hover:bg-slate-800"
-          >
-            <RefreshCw size={13} className={regenerating ? 'animate-spin' : ''} />
-            {regenerating ? 'Re-explicando...' : 'Otra explicación'}
-          </button>
+          {regenerateControls}
         </div>
       )}
 
@@ -329,15 +480,7 @@ export default function StoryTab({
           <p className="min-w-0 flex-1 break-words text-sm text-slate-600 dark:text-slate-300">
             {node.summary}
           </p>
-          <button
-            type="button"
-            disabled={regenerating}
-            onClick={handleRegenerate}
-            className="inline-flex shrink-0 items-center gap-1.5 rounded border border-slate-300 px-2.5 py-1 text-xs font-medium hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:hover:bg-slate-800"
-          >
-            <RefreshCw size={13} className={regenerating ? 'animate-spin' : ''} />
-            {regenerating ? 'Re-explicando...' : 'Otra explicación'}
-          </button>
+          {regenerateControls}
         </div>
       )}
 
@@ -350,9 +493,9 @@ export default function StoryTab({
           role="status"
           className="flex items-center gap-2 rounded-md border border-indigo-200 bg-indigo-50/70 px-3 py-2 text-xs text-indigo-950 dark:border-indigo-800/70 dark:bg-indigo-950/40 dark:text-indigo-200"
         >
-          <Loader2 size={14} className=" shrink-0 animate-spin text-indigo-600 dark:text-indigo-400" />
+          <Loader2 size={14} className="shrink-0 animate-spin text-indigo-600 dark:text-indigo-400" />
           <span>
-            Redactando otra explicación conversada (~200 palabras) con nuevo enfoque sobre la metáfora del ramo...
+            Redactando otra explicación (~200 palabras) con el estilo seleccionado...
           </span>
         </div>
       )}
@@ -439,7 +582,7 @@ export default function StoryTab({
               type="range"
               min={0}
               max={duration > 0 ? duration : 100}
-              step={0.5}
+              step={0.1}
               value={currentTime}
               disabled={!audioRef.current || duration === 0}
               onChange={(e) => onSeekSlider(Number(e.target.value))}
@@ -452,8 +595,8 @@ export default function StoryTab({
 
         <span className="text-[11px] text-slate-500 dark:text-slate-400">
           {mode === 'neural'
-            ? 'Voz neural edge-tts en español · Haz clic en cualquier oración para saltar en el audio.'
-            : 'Fallback offline: síntesis de voz local del navegador · Haz clic en cualquier oración para escucharla.'}
+            ? 'Voz neural edge-tts en español · Haz clic en cualquier palabra para saltar a ese instante del audio.'
+            : 'Fallback offline: síntesis de voz local del navegador · Haz clic en cualquier palabra u oración para escucharla.'}
         </span>
       </div>
 
@@ -461,31 +604,49 @@ export default function StoryTab({
         {structuredParagraphs.map((pSentences, pIdx) => (
           <p key={pIdx} className="break-words">
             {pSentences.map((s, sIdx) => {
-              const isActive = activeSentenceIndex === s.globalIndex
+              const isActiveSentence = activeSentenceIndex === s.globalIndex
               return (
-                <span key={s.globalIndex}>
-                  <span
-                    ref={(el) => {
-                      sentenceRefs.current[s.globalIndex] = el
-                    }}
-                    role="button"
-                    tabIndex={0}
-                    title="Clic para saltar a esta oración en el audio"
-                    onClick={() => void handleSentenceClick(s.globalIndex)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault()
-                        void handleSentenceClick(s.globalIndex)
-                      }
-                    }}
-                    className={`cursor-pointer rounded px-1 py-0.5 transition-colors ${
-                      isActive
-                        ? 'bg-amber-100/95 font-medium text-slate-950 ring-1 ring-amber-300/90 dark:bg-indigo-950/90 dark:text-indigo-100 dark:ring-indigo-600/80'
-                        : 'hover:bg-slate-100 dark:hover:bg-slate-800/70'
-                    }`}
-                  >
-                    {s.text}
-                  </span>
+                <span
+                  key={s.globalIndex}
+                  ref={(el) => {
+                    sentenceRefs.current[s.globalIndex] = el
+                  }}
+                  className={`rounded px-0.5 py-0.5 transition-colors ${
+                    isActiveSentence
+                      ? 'bg-amber-100/45 underline decoration-amber-400/70 decoration-1 underline-offset-4 dark:bg-indigo-950/45 dark:decoration-indigo-500/70'
+                      : ''
+                  }`}
+                >
+                  {s.words.map((w, wIdx) => {
+                    const isActiveWord = activeWordIndex === w.globalWordIndex
+                    return (
+                      <span key={w.globalWordIndex}>
+                        <span
+                          ref={(el) => {
+                            wordRefs.current[w.globalWordIndex] = el
+                          }}
+                          role="button"
+                          tabIndex={0}
+                          title="Clic para saltar a esta palabra en el audio"
+                          onClick={() => void handleWordClick(w.globalWordIndex, s.globalIndex)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              void handleWordClick(w.globalWordIndex, s.globalIndex)
+                            }
+                          }}
+                          className={`cursor-pointer rounded px-0.5 transition-colors ${
+                            isActiveWord
+                              ? 'bg-amber-300 font-semibold text-slate-950 ring-1 ring-amber-400 dark:bg-indigo-500 dark:text-white dark:ring-indigo-400'
+                              : 'hover:bg-slate-200/70 dark:hover:bg-slate-800'
+                          }`}
+                        >
+                          {w.text}
+                        </span>
+                        {wIdx < s.words.length - 1 ? ' ' : ''}
+                      </span>
+                    )
+                  })}
                   {sIdx < pSentences.length - 1 ? ' ' : ''}
                 </span>
               )

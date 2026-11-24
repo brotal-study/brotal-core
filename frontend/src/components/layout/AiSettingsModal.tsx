@@ -1,11 +1,16 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Check, Cpu, KeyRound, Server, ShieldCheck, User, X } from 'lucide-react'
+import { BookOpen, Check, Cpu, HelpCircle, KeyRound, Server, ShieldCheck, User, X } from 'lucide-react'
 import {
+  getProfile,
   getProvidersSettings,
+  patchProfile,
   putProvidersSettings,
+  type ExplanationStyle,
   type ProvidersSettings,
+  type QuestionStyle,
 } from '../../api/curriculum'
+import { useStudyStore } from '../../store/useStudyStore'
 
 interface Props {
   open: boolean
@@ -23,9 +28,52 @@ const PROVIDERS: {
   { id: 'ollama', label: 'Ollama 100% Local', desc: 'Modelos locales en http://127.0.0.1:11434' },
 ]
 
+const EXPLANATION_STYLES: {
+  id: ExplanationStyle
+  label: string
+  desc: string
+}[] = [
+  {
+    id: 'narrative',
+    label: 'Narrativo (Metáfora)',
+    desc: 'Historia conversada usando la metáfora del mundo del ramo',
+  },
+  {
+    id: 'direct',
+    label: 'Directo y Técnico',
+    desc: 'Explicación técnica directa al grano, sin "Imagina..." ni metáforas',
+  },
+  {
+    id: 'structured',
+    label: 'Estructurado',
+    desc: 'Concepto central -> causa-efecto -> ejemplo concreto',
+  },
+]
+
+const QUESTION_STYLES: {
+  id: QuestionStyle
+  label: string
+  desc: string
+}[] = [
+  {
+    id: 'direct',
+    label: 'Directas de examen',
+    desc: 'Preguntas breves, precisas y directas de 1 a 2 líneas',
+  },
+  {
+    id: 'scenario',
+    label: 'Caso aplicado / Escenario',
+    desc: 'Preguntas basadas en un caso o situación práctica con contexto',
+  },
+]
+
 export default function AiSettingsModal({ open, onClose }: Props) {
+  const storeExpStyle = useStudyStore((s) => s.explanationStyle)
+  const storeQStyle = useStudyStore((s) => s.questionStyle)
   const [settings, setSettings] = useState<ProvidersSettings | null>(null)
   const [provider, setProvider] = useState<'auto' | 'groq' | 'gemini' | 'ollama'>('auto')
+  const [explanationStyle, setExplanationStyle] = useState<ExplanationStyle>(storeExpStyle)
+  const [questionStyle, setQuestionStyle] = useState<QuestionStyle>(storeQStyle)
   const [groqKey, setGroqKey] = useState('')
   const [geminiKey, setGeminiKey] = useState('')
   const [ollamaUrl, setOllamaUrl] = useState('http://127.0.0.1:11434')
@@ -40,12 +88,17 @@ export default function AiSettingsModal({ open, onClose }: Props) {
     setErrMsg(null)
     setGroqKey('')
     setGeminiKey('')
-    void getProvidersSettings()
-      .then((res) => {
+    void Promise.all([getProvidersSettings(), getProfile()])
+      .then(([res, prof]) => {
         setSettings(res)
         setProvider(res.ai_provider)
         setOllamaUrl(res.models.ollama_url || 'http://127.0.0.1:11434')
         setOllamaModel(res.models.ollama || 'llama3.2')
+        const exp = prof.explanation_style ?? 'narrative'
+        const qst = prof.question_style ?? 'direct'
+        setExplanationStyle(exp)
+        setQuestionStyle(qst)
+        useStudyStore.setState({ explanationStyle: exp, questionStyle: qst })
       })
       .catch(() => setErrMsg('No se pudo cargar la configuración de IA.'))
   }, [open])
@@ -66,11 +119,18 @@ export default function AiSettingsModal({ open, onClose }: Props) {
       if (groqKey.trim()) payload.groq_api_key = groqKey.trim()
       if (geminiKey.trim()) payload.gemini_api_key = geminiKey.trim()
 
-      const updated = await putProvidersSettings(payload)
+      const [updated] = await Promise.all([
+        putProvidersSettings(payload),
+        patchProfile({
+          explanation_style: explanationStyle,
+          question_style: questionStyle,
+        }),
+      ])
+      useStudyStore.setState({ explanationStyle, questionStyle })
       setSettings(updated)
       setGroqKey('')
       setGeminiKey('')
-      setSavedMsg('Guardado en ~/.brotal/.env (permisos 0600).')
+      setSavedMsg('Preferencias pedagógicas y claves guardadas localmente.')
     } catch {
       setErrMsg('No se pudo guardar la configuración.')
     } finally {
@@ -159,6 +219,66 @@ export default function AiSettingsModal({ open, onClose }: Props) {
                   </span>
                 </button>
               ))}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-3 rounded-md border border-slate-200 p-3 dark:border-slate-800">
+            <div>
+              <label className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                <BookOpen size={13} /> Estilo de explicación
+              </label>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {EXPLANATION_STYLES.map((st) => (
+                  <button
+                    key={st.id}
+                    type="button"
+                    onClick={() => setExplanationStyle(st.id)}
+                    className={`flex flex-col items-start rounded-md border p-2 text-left text-xs ${
+                      explanationStyle === st.id
+                        ? 'border-indigo-600 bg-indigo-600 text-white dark:border-indigo-500 dark:bg-indigo-500'
+                        : 'border-slate-300 hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    <span className="font-semibold">{st.label}</span>
+                    <span
+                      className={`mt-0.5 text-[11px] leading-snug ${
+                        explanationStyle === st.id ? 'opacity-90' : 'text-slate-500'
+                      }`}
+                    >
+                      {st.desc}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                <HelpCircle size={13} /> Estilo de preguntas
+              </label>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {QUESTION_STYLES.map((qs) => (
+                  <button
+                    key={qs.id}
+                    type="button"
+                    onClick={() => setQuestionStyle(qs.id)}
+                    className={`flex flex-col items-start rounded-md border p-2 text-left text-xs ${
+                      questionStyle === qs.id
+                        ? 'border-indigo-600 bg-indigo-600 text-white dark:border-indigo-500 dark:bg-indigo-500'
+                        : 'border-slate-300 hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    <span className="font-semibold">{qs.label}</span>
+                    <span
+                      className={`mt-0.5 text-[11px] leading-snug ${
+                        questionStyle === qs.id ? 'opacity-90' : 'text-slate-500'
+                      }`}
+                    >
+                      {qs.desc}
+                    </span>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 

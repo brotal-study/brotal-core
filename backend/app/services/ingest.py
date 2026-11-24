@@ -23,7 +23,12 @@ from typing import Any, Literal
 
 from app.schemas.pack import CoursePack, PackMetadata
 from app.services import ai_router
-from app.services.ai_router import AiProviderError, extract_json_object
+from app.services.ai_router import (
+    AiProviderError,
+    explanation_style_instruction,
+    extract_json_object,
+    question_style_instruction,
+)
 from app.services.pack_manager import (
     append_nodes_to_course,
     install_pack,
@@ -287,11 +292,69 @@ def _strip_bullet_lists(story: str) -> str:
     return prose
 
 
+def _build_fallback_story(
+    *,
+    explanation_style: str,
+    title: str,
+    course_title: str,
+    world_metaphor: str,
+    text_snippet: str,
+    key_phrases: list[str],
+) -> str:
+    if explanation_style == "direct":
+        return _strip_bullet_lists(
+            f"{title} en {course_title} aborda directamente los fundamentos tecnicos extraidos de tus apuntes: "
+            f"{text_snippet[:480]}.\n\n"
+            f"El mecanismo principal establece que {key_phrases[0]}. Ademas, para garantizar una operacion "
+            f"correcta del sistema se requiere que {key_phrases[1]}.\n\n"
+            f"Al evaluar {title} en {course_title}, verifica que invariante protege este componente y que "
+            f"consecuencia tecnica ocurre si esa condicion deja de cumplirse."
+        )
+    if explanation_style == "structured":
+        return _strip_bullet_lists(
+            f"Concepto central: {title} dentro de {course_title} estructura los principios descritos en tus apuntes: "
+            f"{text_snippet[:480]}.\n\n"
+            f"Causa y efecto: La relacion causal principal determina que {key_phrases[0]}. Como consecuencia directa, "
+            f"{key_phrases[1]} cuando el sistema opera bajo condiciones reales.\n\n"
+            f"Ejemplo concreto: En una aplicacion practica o evaluacion de {course_title}, comprobar las propiedades "
+            f"de {title} permite diagnosticar fallos y justificar la solucion tecnica paso a paso."
+        )
+    return _strip_bullet_lists(
+        f"Situemonos en {world_metaphor} para entender por que {title} es una pieza fundamental dentro de "
+        f"{course_title}. Cuando observamos el sistema en operacion real, lo primero que salta a la vista es como "
+        f"se encadenan las decisiones tecnicas a partir de tus apuntes: {text_snippet[:480]}.\n\n"
+        f"Si lo llevas a un escenario concreto dentro de {world_metaphor}, no basta con repetir definiciones "
+        f"de memoria. Lo decisivo es seguir la relacion de causa y efecto paso a paso: {key_phrases[0]}. "
+        f"Ademas, ten siempre presente que {key_phrases[1]}, porque esa conexion explica como interactuan "
+        f"los componentes cuando la carga o la complejidad aumentan.\n\n"
+        f"Por eso, al enfrentarte a un caso practico o examen de {course_title} dentro de {world_metaphor}, "
+        f"preguntate primero que invariante protege {title} y que ocurriria si esa pieza fallara; asi podras "
+        f"diagnosticar y justificar tu solucion con criterio propio."
+    )
+
+
+def _build_fallback_question(
+    *,
+    question_style: str,
+    title: str,
+    course_title: str,
+    world_metaphor: str,
+) -> str:
+    if question_style == "scenario":
+        return (
+            f"En un caso aplicado dentro de {world_metaphor}, ¿como funciona {title} y como diagnosticarias "
+            f"un problema real en {course_title}?"
+        )
+    return f"Explica con precision tecnica como funciona {title} y que problema concreto resuelve en {course_title}."
+
+
 def _fallback_nodes_from_chunks(
     *,
     course_title: str,
     world_metaphor: str,
     chunks: list[ExtractedChunk],
+    explanation_style: str = "narrative",
+    question_style: str = "direct",
 ) -> list[dict[str, Any]]:
     """Construye de 6 a 8 nodos reales (theory + practice) a partir de los apuntes cuando no hay IA externa."""
     # Agrupar o expandir chunks para tener al menos 6 segmentos tematicos
@@ -335,17 +398,19 @@ def _fallback_nodes_from_chunks(
         while len(key_phrases) < 2:
             key_phrases.append(f"Explica el rol de {title} dentro de {course_title}")
 
-        story_script = _strip_bullet_lists(
-            f"Situemonos en {world_metaphor} para entender por que {title} es una pieza fundamental dentro de "
-            f"{course_title}. Cuando observamos el sistema en operacion real, lo primero que salta a la vista es como "
-            f"se encadenan las decisiones tecnicas a partir de tus apuntes: {text_snippet[:480]}.\n\n"
-            f"Si lo llevas a un escenario concreto dentro de {world_metaphor}, no basta con repetir definiciones "
-            f"de memoria. Lo decisivo es seguir la relacion de causa y efecto paso a paso: {key_phrases[0]}. "
-            f"Ademas, ten siempre presente que {key_phrases[1]}, porque esa conexion explica como interactuan "
-            f"los componentes cuando la carga o la complejidad aumentan.\n\n"
-            f"Por eso, al enfrentarte a un caso practico o examen de {course_title} dentro de {world_metaphor}, "
-            f"preguntate primero que invariante protege {title} y que ocurriria si esa pieza fallara; asi podras "
-            f"diagnosticar y justificar tu solucion con criterio propio."
+        story_script = _build_fallback_story(
+            explanation_style=explanation_style,
+            title=title,
+            course_title=course_title,
+            world_metaphor=world_metaphor,
+            text_snippet=text_snippet,
+            key_phrases=key_phrases,
+        )
+        q_text = _build_fallback_question(
+            question_style=question_style,
+            title=title,
+            course_title=course_title,
+            world_metaphor=world_metaphor,
         )
 
         nodes.append(
@@ -360,7 +425,7 @@ def _fallback_nodes_from_chunks(
                 "eval_prompts": [
                     {
                         "id": "q1",
-                        "question": f"Con tus propias palabras y usando la logica de {world_metaphor}, ¿como funciona {title} y que problema resuelve en {course_title}?",
+                        "question": q_text,
                         "rubric_points": [p[:160] for p in key_phrases[:3]],
                     }
                 ],
@@ -417,10 +482,14 @@ def _generate_nodes_with_ai(
     world_metaphor: str,
     chunks: list[ExtractedChunk],
     preferred_provider: str = "auto",
+    explanation_style: str = "narrative",
+    question_style: str = "direct",
 ) -> tuple[list[dict[str, Any]], str]:
     """Usa ai_router para sintetizar un arbol profundo de 8..16 nodos (copa theory + raices practice/examenes)."""
     digest_text = _sample_chunks_balanced(chunks)
     files_list = sorted({c.source_file for c in chunks})
+    exp_rule = explanation_style_instruction(explanation_style, world_metaphor)
+    q_rule = question_style_instruction(question_style, world_metaphor)
 
     system_prompt = (
         "Eres el Arquitecto Pedagogico de Brotal. Convierte apuntes universitarios en un Arbol de Habilidades "
@@ -430,13 +499,11 @@ def _generate_nodes_with_ai(
         "(ej. 'Examen Parcial 1 · ...', 'Caso Practico / Debugging · ...', 'Simulacro Examen Final'), "
         "conectados en `parent_ids` a los nodos 'theory' que ponen a prueba.\n"
         "REGLAS OBLIGATORIAS:\n"
-        "1. `story_script` DEBE ser una historia conversada continua de 2 a 3 parrafos (~180 a 240 palabras en total) "
-        "usando la metafora del mundo (`world_metaphor`), explicando causa-efecto y que problema real resuelve cada concepto. "
-        "PROHIBIDO listas con vinetas y saltos bruscos de extension.\n"
+        f"1. `story_script` DEBE seguir esta preferencia del estudiante: {exp_rule}\n"
         "2. Ningun titulo (`title`) puede ser una linea separadora (`---`, `===`, `***`) ni tener menos de 3 caracteres alfanumericos.\n"
         "3. El primer nodo 'theory' lleva `parent_ids: []`. Todos los demas conectan `parent_ids` formando un DAG valido.\n"
-        "4. Cada nodo DEBE incluir `eval_prompts` con 3 a 4 PREGUNTAS SOCRATICAS A CIEGAS (aplicadas, comparativas o de diagnostico, "
-        "nunca triviales) y cada pregunta lleva 2 a 3 `rubric_points` concretos y verificables.\n"
+        f"4. Cada nodo DEBE incluir `eval_prompts` con 3 a 4 preguntas a ciegas siguiendo este estilo: {q_rule} "
+        "Cada pregunta lleva 2 a 3 `rubric_points` concretos y verificables.\n"
         "5. Cubre TODOS los archivos entregados, no solo el primero.\n"
         "Responde UNICAMENTE JSON valido con la clave `nodes`:\n"
         "{\n"
@@ -449,7 +516,7 @@ def _generate_nodes_with_ai(
         '      "block": "Bloque 1 · Fundamentos",\n'
         '      "title": "...",\n'
         '      "summary": "...",\n'
-        '      "story_script": "Parrafo 1 conversado...\\n\\nParrafo 2 conversado...",\n'
+        '      "story_script": "Parrafo 1...\\n\\nParrafo 2...",\n'
         '      "eval_prompts": [\n'
         '        {"id": "q1", "question": "...", "rubric_points": ["...", "..."]},\n'
         '        {"id": "q2", "question": "...", "rubric_points": ["...", "..."]},\n'
@@ -462,6 +529,8 @@ def _generate_nodes_with_ai(
     user_prompt = (
         f"Codigo: {course_code}\n"
         f"Ramo: {course_title}\n"
+        f"Estilo de explicacion: {explanation_style}\n"
+        f"Estilo de preguntas: {question_style}\n"
         f"Metafora del mundo sugerida: {world_metaphor}\n"
         f"Archivos subidos ({len(files_list)}): {', '.join(files_list)}\n\n"
         f"Apuntes muestreados de todos los archivos:\n{digest_text}"
@@ -548,6 +617,8 @@ def _generate_nodes_with_ai(
             course_title=course_title,
             world_metaphor=world_metaphor,
             chunks=chunks,
+            explanation_style=explanation_style,
+            question_style=question_style,
         )
         return (fallback, "local_fallback")
 
@@ -567,6 +638,8 @@ def _fallback_append_nodes_from_chunks(
     world_metaphor: str,
     chunks: list[ExtractedChunk],
     existing_nodes: list[dict[str, Any]],
+    explanation_style: str = "narrative",
+    question_style: str = "direct",
 ) -> list[dict[str, Any]]:
     """Construye de 2 a 4 nodos nuevos conectados al arbol existente cuando no hay IA externa."""
     existing_ids = {str(n["id"]) for n in existing_nodes}
@@ -615,15 +688,19 @@ def _fallback_append_nodes_from_chunks(
         while len(key_phrases) < 2:
             key_phrases.append(f"Explica el rol de {title} dentro de {course_title}")
 
-        story_script = _strip_bullet_lists(
-            f"Continuando en {world_metaphor}, incorporamos {title} al recorrido de {course_title}. "
-            f"Este nuevo material profundiza lo visto en los bloques previos a partir de tus apuntes: "
-            f"{text_snippet[:480]}.\n\n"
-            f"Al conectarlo con el resto del arbol en {world_metaphor}, observa la secuencia causal: "
-            f"{key_phrases[0]}. Ademas, considera que {key_phrases[1]} para anticipar su comportamiento "
-            f"en situaciones reales.\n\n"
-            f"En evaluaciones o proyectos de {course_title}, verifica que invariante sostiene {title} "
-            f"y como se integra con las bases anteriores del ramo."
+        story_script = _build_fallback_story(
+            explanation_style=explanation_style,
+            title=title,
+            course_title=course_title,
+            world_metaphor=world_metaphor,
+            text_snippet=text_snippet,
+            key_phrases=key_phrases,
+        )
+        q_text = _build_fallback_question(
+            question_style=question_style,
+            title=title,
+            course_title=course_title,
+            world_metaphor=world_metaphor,
         )
 
         nodes.append(
@@ -638,7 +715,7 @@ def _fallback_append_nodes_from_chunks(
                 "eval_prompts": [
                     {
                         "id": "q1",
-                        "question": f"Usando la logica de {world_metaphor}, ¿como se conecta {title} con lo aprendido antes en {course_title}?",
+                        "question": q_text,
                         "rubric_points": [p[:160] for p in key_phrases[:3]],
                     }
                 ],
@@ -657,6 +734,8 @@ def _generate_append_nodes_with_ai(
     chunks: list[ExtractedChunk],
     existing_nodes: list[dict[str, Any]],
     preferred_provider: str = "auto",
+    explanation_style: str = "narrative",
+    question_style: str = "direct",
 ) -> tuple[list[dict[str, Any]], str]:
     """Genera entre 2 y 6 nodos nuevos conectados al arbol existente sin tocar los nodos previos."""
     digest_text = _sample_chunks_balanced(chunks)
@@ -664,6 +743,8 @@ def _generate_append_nodes_with_ai(
     existing_ids = {str(n["id"]) for n in existing_nodes}
     theory_anchors = [str(n["id"]) for n in existing_nodes if n.get("branch") == "theory"]
     anchor_id = theory_anchors[-1] if theory_anchors else str(existing_nodes[-1]["id"])
+    exp_rule = explanation_style_instruction(explanation_style, world_metaphor)
+    q_rule = question_style_instruction(question_style, world_metaphor)
 
     system_prompt = (
         "Eres el Arquitecto Pedagogico de Brotal en MODO INCREMENTAL (`append`).\n"
@@ -674,8 +755,8 @@ def _generate_append_nodes_with_ai(
         "2. Cada nodo nuevo DEBE tener un `id` unico que NO colisione con ningun `id` existente (ej. 'A1', 'A2', 'P_NEW1').\n"
         "3. `parent_ids` de cada nodo nuevo DEBE conectarse al menos a un nodo existente del arbol (o a otro nodo nuevo recien creado) "
         "para que quede integrado en el DAG.\n"
-        "4. `story_script` DEBE ser una historia conversada continua de 2 a 3 parrafos (~180 a 240 palabras) usando la metafora del mundo (`world_metaphor`).\n"
-        "5. Cada nodo nuevo DEBE incluir `eval_prompts` con 2 a 4 preguntas socraticas a ciegas y 2 a 3 `rubric_points` verificables.\n"
+        f"4. `story_script` DEBE seguir esta preferencia: {exp_rule}\n"
+        f"5. Cada nodo nuevo DEBE incluir `eval_prompts` con 2 a 4 preguntas a ciegas ({q_rule}) y 2 a 3 `rubric_points` verificables.\n"
         "Responde UNICAMENTE JSON valido con la clave `nodes`."
     )
     user_prompt = (
@@ -787,6 +868,8 @@ def _generate_append_nodes_with_ai(
             world_metaphor=world_metaphor,
             chunks=chunks,
             existing_nodes=existing_nodes,
+            explanation_style=explanation_style,
+            question_style=question_style,
         )
         return (fallback, "local_fallback")
 
@@ -801,6 +884,8 @@ def ingest_local_files(
     files: list[tuple[str, bytes]],
     preferred_provider: str = "auto",
     mode: Literal["append", "replace"] = "replace",
+    explanation_style: str = "narrative",
+    question_style: str = "direct",
 ) -> dict[str, Any]:
     """Procesa 1..N archivos locales, indexa en FTS5 y reemplaza o agrega nodos al ramo ('replace' | 'append')."""
     if not files:
@@ -861,6 +946,8 @@ def ingest_local_files(
             chunks=all_chunks,
             existing_nodes=existing_summary,
             preferred_provider=preferred_provider,
+            explanation_style=explanation_style,
+            question_style=question_style,
         )
         added_count = append_nodes_to_course(conn, real_course_id, new_nodes)
         total_chunks = append_chunks_in_fts(conn, real_course_id, all_chunks)
@@ -892,6 +979,8 @@ def ingest_local_files(
         world_metaphor=metaphor,
         chunks=all_chunks,
         preferred_provider=preferred_provider,
+        explanation_style=explanation_style,
+        question_style=question_style,
     )
 
     year_now = datetime.now(UTC).year

@@ -24,6 +24,9 @@ import {
   type NodeProgress,
   type PackNode,
 } from '../../api/study'
+import type { QuestionStyle } from '../../api/curriculum'
+import { useStudyStore } from '../../store/useStudyStore'
+import MarkdownView from '../common/MarkdownView'
 import { formatRemaining, useNow } from './studyUtils'
 
 interface Props {
@@ -69,6 +72,8 @@ export default function EvalTab({
   onAskTutor,
   onInProgressChange,
 }: Props) {
+  const questionStyle = useStudyStore((s) => s.questionStyle)
+  const setQuestionStyle = useStudyStore((s) => s.setQuestionStyle)
   const [order, setOrder] = useState(() => shuffled(node.id, node.eval_prompts))
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [phase, setPhase] = useState<Phase>('answering')
@@ -177,16 +182,27 @@ export default function EvalTab({
             {PASS_SCORE.toFixed(1)} o más.
           </span>
         </span>
-        <button
-          type="button"
-          disabled={busy || regeneratingQuestions}
-          onClick={handleRegenerateQuestions}
-          title="Genera nuevas preguntas socráticas evaluando la misma rúbrica"
-          className="inline-flex shrink-0 items-center gap-1.5 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-        >
-          <RefreshCw size={12} className={regeneratingQuestions ? 'animate-spin' : ''} />
-          {regeneratingQuestions ? 'Generando preguntas...' : 'Nuevas preguntas (IA)'}
-        </button>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <select
+            aria-label="Estilo de preguntas"
+            value={questionStyle}
+            onChange={(e) => setQuestionStyle(e.target.value as QuestionStyle)}
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
+          >
+            <option value="direct">Estilo: Directas (examen)</option>
+            <option value="scenario">Estilo: Caso aplicado</option>
+          </select>
+          <button
+            type="button"
+            disabled={busy || regeneratingQuestions}
+            onClick={handleRegenerateQuestions}
+            title="Genera nuevas preguntas evaluando la misma rúbrica"
+            className="inline-flex shrink-0 items-center gap-1.5 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            <RefreshCw size={12} className={regeneratingQuestions ? 'animate-spin' : ''} />
+            {regeneratingQuestions ? 'Generando preguntas...' : 'Nuevas preguntas (IA)'}
+          </button>
+        </div>
       </div>
 
       {regeneratingQuestions && (
@@ -491,9 +507,10 @@ function Result({
           <div className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">
             <MessageCircle size={13} /> Re-explicación focalizada
           </div>
-          <p className="break-words leading-relaxed text-slate-700 dark:text-slate-200">
-            {result.re_explanation}
-          </p>
+          <MarkdownView
+            content={result.re_explanation}
+            className="text-slate-700 dark:text-slate-200"
+          />
         </div>
       )}
 

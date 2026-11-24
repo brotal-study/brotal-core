@@ -56,8 +56,54 @@ def test_get_profile_defaults_and_never_exposes_keys(
     assert body["cooldown_mode"] == "semester"
     assert body["theme"] == "dark"
     assert body["ai_provider"] == "auto"
+    assert body["explanation_style"] == "narrative"
+    assert body["question_style"] == "direct"
     assert body["providers"] == {"groq": True, "gemini": False, "ollama": False}
     assert secret_key not in res.text
+
+
+def test_idempotent_migration_adds_style_columns_to_existing_db(isolated_brotal_home: Path) -> None:
+    # Crear una tabla user_profile antigua (v1.0.2) sin explanation_style ni question_style
+    db_file = db_path()
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_file))
+    try:
+        conn.execute("DROP TABLE IF EXISTS user_profile;")
+        conn.execute(
+            """
+            CREATE TABLE user_profile (
+              id              INTEGER PRIMARY KEY CHECK (id = 1),
+              display_name    TEXT NOT NULL DEFAULT 'Estudiante',
+              career_id       TEXT,
+              curriculum_mode TEXT NOT NULL DEFAULT 'realistic',
+              cooldown_mode   TEXT NOT NULL DEFAULT 'semester',
+              theme           TEXT NOT NULL DEFAULT 'dark',
+              ai_provider     TEXT NOT NULL DEFAULT 'auto',
+              created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        conn.execute("INSERT INTO user_profile (id, display_name) VALUES (1, 'Veterano');")
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Ejecutar init_db() dos veces para verificar migracion idempotente
+    init_db()
+    init_db()
+
+    conn = sqlite3.connect(str(db_file))
+    conn.row_factory = sqlite3.Row
+    try:
+        cols = {str(r["name"]) for r in conn.execute("PRAGMA table_info(user_profile);").fetchall()}
+        assert "explanation_style" in cols
+        assert "question_style" in cols
+        row = conn.execute("SELECT * FROM user_profile WHERE id = 1;").fetchone()
+        assert row["display_name"] == "Veterano"
+        assert row["explanation_style"] == "narrative"
+        assert row["question_style"] == "direct"
+    finally:
+        conn.close()
 
 
 def test_patch_profile_persists_across_reinit(client: TestClient) -> None:
@@ -70,6 +116,8 @@ def test_patch_profile_persists_across_reinit(client: TestClient) -> None:
             "cooldown_mode": "urgency",
             "theme": "light",
             "ai_provider": "groq",
+            "explanation_style": "structured",
+            "question_style": "scenario",
         },
     )
     assert res.status_code == 200
@@ -80,6 +128,8 @@ def test_patch_profile_persists_across_reinit(client: TestClient) -> None:
     assert data["cooldown_mode"] == "urgency"
     assert data["theme"] == "light"
     assert data["ai_provider"] == "groq"
+    assert data["explanation_style"] == "structured"
+    assert data["question_style"] == "scenario"
 
     # Re-run init_db() to simulate server restart
     init_db()
@@ -100,6 +150,8 @@ def test_patch_profile_persists_across_reinit(client: TestClient) -> None:
         {"cooldown_mode": "daily"},
         {"theme": "blue"},
         {"ai_provider": "openai"},
+        {"explanation_style": "poetic"},
+        {"question_style": "multiple_choice"},
         {"display_name": ""},
         {"unknown_field": "x"},
     ],

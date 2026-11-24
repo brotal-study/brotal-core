@@ -2,6 +2,9 @@
 import { api } from './client'
 import type { CareerManifest, CareerSummary, CourseStatus, PackSummary } from './types'
 
+export type ExplanationStyle = 'narrative' | 'direct' | 'structured'
+export type QuestionStyle = 'direct' | 'scenario'
+
 export interface ApiProfile {
   id: number
   display_name: string
@@ -10,6 +13,8 @@ export interface ApiProfile {
   cooldown_mode: 'semester' | 'urgency'
   theme: 'dark' | 'light'
   ai_provider: 'auto' | 'groq' | 'gemini' | 'ollama'
+  explanation_style: ExplanationStyle
+  question_style: QuestionStyle
   created_at: string
   providers: { groq: boolean; gemini: boolean; ollama: boolean }
 }
@@ -21,6 +26,8 @@ export interface ApiProfilePatch {
   cooldown_mode?: 'semester' | 'urgency'
   theme?: 'dark' | 'light'
   ai_provider?: 'auto' | 'groq' | 'gemini' | 'ollama'
+  explanation_style?: ExplanationStyle
+  question_style?: QuestionStyle
 }
 
 export interface CareerDetail extends CareerManifest {

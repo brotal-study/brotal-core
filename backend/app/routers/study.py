@@ -37,7 +37,7 @@ from app.services.pack_manager import resolve_course_row
 from app.services.tts import (
     TtsSynthesisError,
     clear_node_tts_cache,
-    get_node_tts_timings,
+    get_node_tts_timings_data,
     synthesize_node_tts,
 )
 
@@ -341,8 +341,15 @@ def post_regenerate_story(
         raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found in course '{course_id}'")
 
     conn.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1);")
-    prof_row = conn.execute("SELECT ai_provider FROM user_profile WHERE id = 1;").fetchone()
+    prof_row = conn.execute(
+        "SELECT ai_provider, explanation_style FROM user_profile WHERE id = 1;"
+    ).fetchone()
     ai_provider = prof_row["ai_provider"] if prof_row else "auto"
+    explanation_style = (
+        prof_row["explanation_style"]
+        if (prof_row and "explanation_style" in set(prof_row.keys()))
+        else "narrative"
+    )
 
     eval_prompts: list[dict[str, Any]] = json.loads(node_row["eval_prompts_json"] or "[]")
     world_metaphor = _extract_world_metaphor(course_row)
@@ -356,6 +363,7 @@ def post_regenerate_story(
         current_story=old_story,
         eval_prompts=eval_prompts,
         preferred_provider=ai_provider,
+        explanation_style=explanation_style,
     )
 
     clear_node_tts_cache(real_course_id, old_story)
@@ -392,8 +400,15 @@ def post_regenerate_questions(
         raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found in course '{course_id}'")
 
     conn.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1);")
-    prof_row = conn.execute("SELECT ai_provider FROM user_profile WHERE id = 1;").fetchone()
+    prof_row = conn.execute(
+        "SELECT ai_provider, question_style FROM user_profile WHERE id = 1;"
+    ).fetchone()
     ai_provider = prof_row["ai_provider"] if prof_row else "auto"
+    question_style = (
+        prof_row["question_style"]
+        if (prof_row and "question_style" in set(prof_row.keys()))
+        else "direct"
+    )
 
     eval_prompts: list[dict[str, Any]] = json.loads(node_row["eval_prompts_json"] or "[]")
     world_metaphor = _extract_world_metaphor(course_row)
@@ -406,6 +421,7 @@ def post_regenerate_questions(
         story_script=node_row["story_script"] or "",
         eval_prompts=eval_prompts,
         preferred_provider=ai_provider,
+        question_style=question_style,
     )
     validated_prompts = [EvalPrompt.model_validate(p) for p in new_prompts_raw]
 
@@ -486,7 +502,7 @@ def get_node_tts_timings_endpoint(
         raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found in course '{course_id}'")
 
     story_script = (node_row["story_script"] or "").strip()
-    timings = get_node_tts_timings(
+    data = get_node_tts_timings_data(
         course_id=real_course_id,
         text=story_script,
         voice=voice,
@@ -494,7 +510,9 @@ def get_node_tts_timings_endpoint(
     return {
         "course_id": real_course_id,
         "node_id": node_id,
-        "timings": timings,
+        "sentences": data["sentences"],
+        "words": data["words"],
+        "timings": data["sentences"],
     }
 
 

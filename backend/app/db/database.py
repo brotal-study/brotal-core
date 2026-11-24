@@ -25,11 +25,30 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _migrate_user_profile(conn: sqlite3.Connection) -> None:
+    """Agrega columnas nuevas a user_profile de forma idempotente en bases existentes."""
+    cols = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(user_profile);").fetchall()
+    }
+    if "explanation_style" not in cols:
+        conn.execute(
+            "ALTER TABLE user_profile ADD COLUMN explanation_style TEXT NOT NULL DEFAULT 'narrative' "
+            "CHECK (explanation_style IN ('narrative', 'direct', 'structured'));"
+        )
+    if "question_style" not in cols:
+        conn.execute(
+            "ALTER TABLE user_profile ADD COLUMN question_style TEXT NOT NULL DEFAULT 'direct' "
+            "CHECK (question_style IN ('direct', 'scenario'));"
+        )
+
+
 def init_db() -> None:
     conn = _connect()
     try:
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         conn.execute("PRAGMA foreign_keys = ON;")
+        _migrate_user_profile(conn)
         conn.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1);")
         conn.commit()
     finally:

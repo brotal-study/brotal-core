@@ -82,6 +82,11 @@ export interface RegenerateQuestionsResponse {
   provider: string
 }
 
+export interface SuggestedNode {
+  id: string
+  title: string
+}
+
 export interface ChatMessage {
   id: number
   course_id: string
@@ -95,6 +100,7 @@ export interface ChatResponse {
   user_message: ChatMessage
   assistant_message: ChatMessage
   provider: string
+  suggested_nodes?: SuggestedNode[]
 }
 
 export const PASS_SCORE = 7.0
@@ -166,10 +172,23 @@ export interface TtsSentenceTiming {
   end: number
 }
 
+export interface TtsWordTiming {
+  text: string
+  start: number
+  end: number
+}
+
 export interface TtsTimingsResponse {
   course_id: string
   node_id: string
-  timings: TtsSentenceTiming[]
+  sentences?: TtsSentenceTiming[]
+  words?: TtsWordTiming[]
+  timings?: TtsSentenceTiming[]
+}
+
+export interface TtsTimingsData {
+  sentences: TtsSentenceTiming[]
+  words: TtsWordTiming[]
 }
 
 /** POST /api/v1/study/{course_id}/{node_id}/tts -> Blob MP3 */
@@ -183,18 +202,32 @@ export async function fetchNodeTtsBlob(courseId: string, nodeId: string): Promis
 }
 
 /** GET /api/v1/study/{course_id}/{node_id}/tts-timings */
-export async function fetchNodeTtsTimings(
+export async function fetchNodeTtsTimingsData(
   courseId: string,
   nodeId: string,
-): Promise<TtsSentenceTiming[]> {
+): Promise<TtsTimingsData> {
   try {
     const res = await api<TtsTimingsResponse>(
       `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/tts-timings`,
     )
-    return Array.isArray(res.timings) ? res.timings : []
+    const sentences = Array.isArray(res.sentences)
+      ? res.sentences
+      : Array.isArray(res.timings)
+        ? res.timings
+        : []
+    const words = Array.isArray(res.words) ? res.words : []
+    return { sentences, words }
   } catch {
-    return []
+    return { sentences: [], words: [] }
   }
+}
+
+export async function fetchNodeTtsTimings(
+  courseId: string,
+  nodeId: string,
+): Promise<TtsSentenceTiming[]> {
+  const data = await fetchNodeTtsTimingsData(courseId, nodeId)
+  return data.sentences
 }
 
 /** GET /api/v1/chat/{course_id} */

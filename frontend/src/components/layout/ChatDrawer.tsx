@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { Info, Loader2, MessageSquare, Send, Trash2, X } from 'lucide-react'
+import { ArrowRight, Info, Loader2, MessageSquare, Send, Trash2, X } from 'lucide-react'
 import {
   clearChatHistory,
   getChatHistory,
   sendChatMessage,
   type ChatMessage,
+  type SuggestedNode,
 } from '../../api/study'
+import { useStudyStore } from '../../store/useStudyStore'
+import MarkdownView from '../common/MarkdownView'
 
 interface Props {
   open: boolean
@@ -16,6 +19,23 @@ interface Props {
   nodeTitle: string | null
   initialPrompt?: string | null
   contextBanner?: string | null
+  onSelectNode?: (nodeId: string) => void
+}
+
+const NODE_MENTION_RE = /\[\[node:([^|\]]+)\|([^\]]+)\]\]/g
+
+function extractNodesFromText(text: string): SuggestedNode[] {
+  const seen = new Set<string>()
+  const out: SuggestedNode[] = []
+  for (const match of text.matchAll(NODE_MENTION_RE)) {
+    const id = match[1]?.trim()
+    const title = match[2]?.trim()
+    if (id && !seen.has(id)) {
+      seen.add(id)
+      out.push({ id, title: title || id })
+    }
+  }
+  return out
 }
 
 export default function ChatDrawer({
@@ -27,14 +47,25 @@ export default function ChatDrawer({
   nodeTitle,
   initialPrompt = null,
   contextBanner = null,
+  onSelectNode,
 }: Props) {
+  const selectInStore = useStudyStore((s) => s.select)
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [suggestedByMsg, setSuggestedByMsg] = useState<Record<number, SuggestedNode[]>>({})
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [provider, setProvider] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  const handleGoToNode = (targetNodeId: string) => {
+    if (onSelectNode) {
+      onSelectNode(targetNodeId)
+    } else {
+      selectInStore(targetNodeId)
+    }
+  }
 
   useEffect(() => {
     if (!open || !courseId) return
@@ -73,6 +104,12 @@ export default function ChatDrawer({
     try {
       const res = await sendChatMessage(courseId, payloadText, nodeId)
       setMessages((prev) => [...prev, res.user_message, res.assistant_message])
+      if (res.suggested_nodes && res.suggested_nodes.length > 0) {
+        setSuggestedByMsg((prev) => ({
+          ...prev,
+          [res.assistant_message.id]: res.suggested_nodes ?? [],
+        }))
+      }
       setProvider(res.provider)
     } catch {
       setErr('No se pudo enviar el mensaje al tutor.')
@@ -148,18 +185,45 @@ export default function ChatDrawer({
               el índice FTS5 local y las últimas 10 interacciones sin salir de tu pantalla.
             </div>
           )}
-          {messages.map((m) => (
-            <div
-              key={m.id}
-              className={`flex flex-col rounded-lg px-3 py-2 text-sm ${
-                m.role === 'user'
-                  ? 'ml-8 bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
-                  : 'mr-6 border border-slate-200 bg-slate-50 text-slate-800 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-100'
-              }`}
-            >
-              <div className="whitespace-pre-wrap break-words leading-relaxed">{m.content}</div>
-            </div>
-          ))}
+          {messages.map((m) => {
+            const suggestions =
+              m.role === 'assistant'
+                ? (suggestedByMsg[m.id] ?? extractNodesFromText(m.content))
+                : []
+            return (
+              <div
+                key={m.id}
+                className={`flex flex-col rounded-lg px-3 py-2 text-sm ${
+                  m.role === 'user'
+                    ? 'ml-8 bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
+                    : 'mr-6 border border-slate-200 bg-slate-50 text-slate-800 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-100'
+                }`}
+              >
+                {m.role === 'assistant' ? (
+                  <MarkdownView content={m.content} onSelectNode={handleGoToNode} />
+                ) : (
+                  <div className="whitespace-pre-wrap break-words leading-relaxed">{m.content}</div>
+                )}
+                {suggestions.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5 border-t border-slate-200/80 pt-2 dark:border-slate-700/80">
+                    {suggestions.map((sn) => (
+                      <button
+                        key={sn.id}
+                        type="button"
+                        onClick={() => handleGoToNode(sn.id)}
+                        className="inline-flex items-center gap-1 rounded-md border border-indigo-300 bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-900 transition-colors hover:bg-indigo-100 dark:border-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-200 dark:hover:bg-indigo-900/80"
+                      >
+                        <span>
+                          Ir a {sn.id} · {sn.title}
+                        </span>
+                        <ArrowRight size={12} className="shrink-0" />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })}
           {busy && (
             <div className="mr-6 inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800/60">
               <Loader2 size={13} className="animate-spin" />
