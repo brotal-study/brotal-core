@@ -70,7 +70,7 @@ export default function CourseFilesPanel({
           className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
         >
           <FilePlus2 size={13} />
-          Subir / reemplazar archivos
+          {files.length > 0 ? 'Agregar o reemplazar archivos' : 'Subir archivos'}
         </button>
       </div>
 
@@ -156,7 +156,7 @@ export function CourseFilesModal({
           <div className="min-w-0">
             <h2 className="truncate text-base font-semibold">Archivos del ramo · {courseTitle}</h2>
             <p className="text-xs text-slate-500">
-              Gestiona los apuntes indexados en SQLite FTS5 o sube nuevos archivos para regenerar el árbol.
+              Agrega nuevos apuntes semana a semana conservando tu progreso o gestiona los archivos indexados en FTS5.
             </p>
           </div>
           <button

@@ -190,6 +190,8 @@ export async function putProvidersSettings(
   })
 }
 
+export type IngestMode = 'append' | 'replace'
+
 export interface ProcessedFileSummary {
   filename: string
   sections: number
@@ -201,6 +203,8 @@ export interface IngestLocalResponse {
   course_code: string
   title: string
   status: CourseStatus
+  mode?: IngestMode
+  added_nodes?: number
   node_count: number
   chunks_indexed: number
   processed_files: ProcessedFileSummary[]
@@ -214,6 +218,7 @@ export async function ingestLocalFiles(params: {
   title: string
   career_id?: string | null
   world_metaphor?: string
+  mode?: IngestMode
   files: File[]
 }): Promise<IngestLocalResponse> {
   const form = new FormData()
@@ -221,6 +226,7 @@ export async function ingestLocalFiles(params: {
   form.append('title', params.title)
   if (params.career_id) form.append('career_id', params.career_id)
   if (params.world_metaphor) form.append('world_metaphor', params.world_metaphor)
+  form.append('mode', params.mode ?? 'replace')
   for (const file of params.files) {
     form.append('files', file)
   }

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import httpx
 from fastapi import (
@@ -202,6 +202,7 @@ async def post_ingest_local(
     files: Annotated[list[UploadFile], File()],
     career_id: Annotated[str | None, Form()] = None,
     world_metaphor: Annotated[str | None, Form()] = None,
+    mode: Annotated[Literal["append", "replace"], Form()] = "replace",
 ) -> dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="Debes adjuntar al menos un archivo.")
@@ -225,6 +226,7 @@ async def post_ingest_local(
             world_metaphor=world_metaphor,
             files=file_tuples,
             preferred_provider=ai_provider,
+            mode=mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

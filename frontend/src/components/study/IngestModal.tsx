@@ -1,18 +1,26 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
+  AlertTriangle,
   ArrowRight,
   CheckCircle2,
   Clock,
   FilePlus2,
   FileText,
+  Layers,
   Loader2,
+  RefreshCw,
   ShieldAlert,
   Trash2,
   Upload,
   X,
 } from 'lucide-react'
-import { ingestLocalFiles, type IngestLocalResponse } from '../../api/curriculum'
+import {
+  getCourseFiles,
+  ingestLocalFiles,
+  type IngestLocalResponse,
+  type IngestMode,
+} from '../../api/curriculum'
 import { useAppStore } from '../../store/useAppStore'
 import { useStudyStore } from '../../store/useStudyStore'
 
@@ -34,25 +42,56 @@ export default function IngestModal({
   onIngested,
 }: Props) {
   const navigate = useNavigate()
-  const { setStatus, setActiveCourse, hydrate } = useAppStore()
-  const { load: loadStudyTree } = useStudyStore()
+  const { installedPacks, setStatus, setActiveCourse, hydrate } = useAppStore()
+  const { tree: currentTree, load: loadStudyTree } = useStudyStore()
 
   const [code, setCode] = useState(defaultCode)
   const [title, setTitle] = useState(defaultTitle)
   const [metaphor, setMetaphor] = useState('')
   const [files, setFiles] = useState<File[]>([])
+  const [mode, setMode] = useState<IngestMode>('append')
+  const [existingFilesCount, setExistingFilesCount] = useState(0)
   const [busy, setBusy] = useState(false)
   const [elapsedSec, setElapsedSec] = useState(0)
   const [err, setErr] = useState<string | null>(null)
   const [result, setResult] = useState<IngestLocalResponse | null>(null)
 
+  const targetCode = (code.trim() || defaultCode).toUpperCase()
+  const hasTreeNodes = Boolean(
+    currentTree &&
+      currentTree.nodes.length > 0 &&
+      (currentTree.course_code.toUpperCase() === targetCode ||
+        currentTree.course_id.toUpperCase() === targetCode),
+  )
+  const hasExistingContent =
+    Boolean(targetCode && installedPacks[targetCode]) || hasTreeNodes || existingFilesCount > 0
+
   useEffect(() => {
     if (open) {
       setCode(defaultCode)
       setTitle(defaultTitle)
+      setMode('append')
       setErr(null)
     }
   }, [open, defaultCode, defaultTitle])
+
+  useEffect(() => {
+    if (!open || !targetCode) {
+      setExistingFilesCount(0)
+      return
+    }
+    let cancelled = false
+    getCourseFiles(targetCode)
+      .then((res) => {
+        if (!cancelled) setExistingFilesCount(res.files.length)
+      })
+      .catch(() => {
+        if (!cancelled) setExistingFilesCount(0)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, targetCode])
 
   useEffect(() => {
     if (!busy) {
@@ -69,6 +108,7 @@ export default function IngestModal({
   if (!open) return null
 
   const activeStep = elapsedSec < 2 ? 1 : elapsedSec < 4 ? 2 : 3
+  const effectiveMode: IngestMode = hasExistingContent ? mode : 'replace'
 
   const onFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = Array.from(e.target.files ?? [])
@@ -96,11 +136,15 @@ export default function IngestModal({
         title: title.trim() || defaultTitle || 'Ramo Local',
         career_id: careerId,
         world_metaphor: metaphor.trim() || undefined,
+        mode: effectiveMode,
         files,
       })
       setResult(res)
       setStatus(res.course_code, 'active')
       await hydrate()
+      if (hasTreeNodes) {
+        await loadStudyTree(defaultCode || res.course_code || res.course_id)
+      }
       onIngested?.(res)
     } catch (exc) {
       setErr(exc instanceof Error ? exc.message : 'Error al procesar los archivos.')
@@ -194,6 +238,64 @@ export default function IngestModal({
               />
             </label>
 
+            {hasExistingContent && (
+              <div className="flex flex-col gap-2">
+                <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
+                  Modo de actualización del ramo
+                </span>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Modo de ingesta">
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={mode === 'append'}
+                    onClick={() => setMode('append')}
+                    className={`flex flex-col items-start gap-1 rounded-md border p-2.5 text-left text-xs transition ${
+                      mode === 'append'
+                        ? 'border-indigo-600 bg-indigo-50/70 text-indigo-950 dark:border-indigo-500 dark:bg-indigo-950/40 dark:text-indigo-100'
+                        : 'border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800/50'
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-1.5 font-semibold">
+                      <Layers size={14} className="text-indigo-600 dark:text-indigo-400" />
+                      Agregar al ramo (conserva tu progreso)
+                    </span>
+                    <span className="text-[11px] text-slate-600 dark:text-slate-400">
+                      Suma archivos nuevos y añade 2 a 6 nodos conectados sin borrar tu progreso 0/3 a 3/3.
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={mode === 'replace'}
+                    onClick={() => setMode('replace')}
+                    className={`flex flex-col items-start gap-1 rounded-md border p-2.5 text-left text-xs transition ${
+                      mode === 'replace'
+                        ? 'border-amber-600 bg-amber-50/70 text-amber-950 dark:border-amber-500 dark:bg-amber-950/40 dark:text-amber-100'
+                        : 'border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800/50'
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-1.5 font-semibold">
+                      <RefreshCw size={14} className="text-amber-600 dark:text-amber-400" />
+                      Reemplazar todo (reconstruye desde cero)
+                    </span>
+                    <span className="text-[11px] text-slate-600 dark:text-slate-400">
+                      Sustituye todos los archivos anteriores y regenera el árbol completo.
+                    </span>
+                  </button>
+                </div>
+
+                {mode === 'replace' && (
+                  <div className="flex items-center gap-2 rounded border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-900 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200">
+                    <AlertTriangle size={13} className="shrink-0 text-amber-600 dark:text-amber-400" />
+                    <span>
+                      Advertencia: se reemplazarán los archivos indexados previos y se reconstruirán los nodos desde cero.
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="flex flex-col gap-2">
               <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
                 Archivos de apuntes (.pdf, .pptx, .docx, .md, .txt)
@@ -280,7 +382,11 @@ export default function IngestModal({
                 className="inline-flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-1.5 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
               >
                 {busy && <Loader2 size={14} className="animate-spin" />}
-                {busy ? `Procesando (${elapsedSec}s)...` : 'Generar árbol de estudio'}
+                {busy
+                  ? `Procesando (${elapsedSec}s)...`
+                  : effectiveMode === 'append'
+                    ? 'Agregar material al árbol'
+                    : 'Generar árbol de estudio'}
               </button>
             </div>
           </form>
@@ -290,10 +396,13 @@ export default function IngestModal({
               <CheckCircle2 size={18} className="mt-0.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
               <div>
                 <div className="text-sm font-semibold">
-                  Árbol generado: {result.node_count} nodos ({result.chunks_indexed} secciones en FTS5)
+                  {result.mode === 'append'
+                    ? `Se agregaron ${result.added_nodes ?? 0} nodos nuevos · ${result.node_count} nodos en total (${result.chunks_indexed} secciones en FTS5)`
+                    : `Árbol generado: ${result.node_count} nodos (${result.chunks_indexed} secciones en FTS5)`}
                 </div>
                 <p className="mt-0.5">
-                  Motor utilizado: <code className="font-mono">{result.provider}</code> · Estado: <strong>Cursando</strong>
+                  Motor utilizado: <code className="font-mono">{result.provider}</code> · Modo:{' '}
+                  <strong>{result.mode === 'append' ? 'Incremental (progreso conservado)' : 'Árbol completo'}</strong>
                 </p>
               </div>
             </div>

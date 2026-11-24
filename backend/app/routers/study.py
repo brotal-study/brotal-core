@@ -34,7 +34,12 @@ from app.services.evaluator import (
     score_from_feedback,
 )
 from app.services.pack_manager import resolve_course_row
-from app.services.tts import TtsSynthesisError, synthesize_node_tts
+from app.services.tts import (
+    TtsSynthesisError,
+    clear_node_tts_cache,
+    get_node_tts_timings,
+    synthesize_node_tts,
+)
 
 router = APIRouter(tags=["study"])
 
@@ -342,16 +347,18 @@ def post_regenerate_story(
     eval_prompts: list[dict[str, Any]] = json.loads(node_row["eval_prompts_json"] or "[]")
     world_metaphor = _extract_world_metaphor(course_row)
 
+    old_story = node_row["story_script"] or ""
     new_story, provider = regenerate_story_with_ai(
         course_title=course_row["title"],
         world_metaphor=world_metaphor,
         node_title=node_row["title"],
         node_summary=node_row["summary"] or "",
-        current_story=node_row["story_script"] or "",
+        current_story=old_story,
         eval_prompts=eval_prompts,
         preferred_provider=ai_provider,
     )
 
+    clear_node_tts_cache(real_course_id, old_story)
     conn.execute(
         "UPDATE course_nodes SET story_script = ? WHERE course_id = ? AND id = ?;",
         (new_story, real_course_id, node_id),
@@ -457,6 +464,38 @@ async def post_node_tts(
         media_type="audio/mpeg",
         filename=f"{real_course_id}_{node_id}.mp3",
     )
+
+
+@router.get("/study/{course_id}/{node_id}/tts-timings")
+def get_node_tts_timings_endpoint(
+    course_id: str,
+    node_id: str,
+    conn: DbConn,
+    voice: str | None = None,
+) -> dict[str, Any]:
+    course_row = resolve_course_row(conn, course_id)
+    if course_row is None:
+        raise HTTPException(status_code=404, detail=f"Course '{course_id}' not found")
+
+    real_course_id = course_row["id"]
+    node_row = conn.execute(
+        "SELECT story_script FROM course_nodes WHERE course_id = ? AND id = ?;",
+        (real_course_id, node_id),
+    ).fetchone()
+    if node_row is None:
+        raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found in course '{course_id}'")
+
+    story_script = (node_row["story_script"] or "").strip()
+    timings = get_node_tts_timings(
+        course_id=real_course_id,
+        text=story_script,
+        voice=voice,
+    )
+    return {
+        "course_id": real_course_id,
+        "node_id": node_id,
+        "timings": timings,
+    }
 
 
 @router.post("/courses/{course_id}/reset-progress")
