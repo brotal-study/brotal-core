@@ -160,6 +160,18 @@ export async function regenerateQuestions(
   )
 }
 
+export interface TtsSentenceTiming {
+  text: string
+  start: number
+  end: number
+}
+
+export interface TtsTimingsResponse {
+  course_id: string
+  node_id: string
+  timings: TtsSentenceTiming[]
+}
+
 /** POST /api/v1/study/{course_id}/{node_id}/tts -> Blob MP3 */
 export async function fetchNodeTtsBlob(courseId: string, nodeId: string): Promise<Blob> {
   const res = await fetch(
@@ -168,6 +180,21 @@ export async function fetchNodeTtsBlob(courseId: string, nodeId: string): Promis
   )
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.blob()
+}
+
+/** GET /api/v1/study/{course_id}/{node_id}/tts-timings */
+export async function fetchNodeTtsTimings(
+  courseId: string,
+  nodeId: string,
+): Promise<TtsSentenceTiming[]> {
+  try {
+    const res = await api<TtsTimingsResponse>(
+      `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/tts-timings`,
+    )
+    return Array.isArray(res.timings) ? res.timings : []
+  } catch {
+    return []
+  }
 }
 
 /** GET /api/v1/chat/{course_id} */

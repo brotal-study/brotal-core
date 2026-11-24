@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   FastForward,
   Gauge,
@@ -12,8 +12,13 @@ import {
   Swords,
   Volume2,
 } from 'lucide-react'
-import { fetchNodeTtsBlob, type PackNode } from '../../api/study'
-import { useSpeech } from './useSpeech'
+import {
+  fetchNodeTtsBlob,
+  fetchNodeTtsTimings,
+  type PackNode,
+  type TtsSentenceTiming,
+} from '../../api/study'
+import { splitStoryParagraphSentences, useSpeech } from './useSpeech'
 
 interface Props {
   courseId: string
@@ -31,6 +36,42 @@ function formatTime(sec: number): string {
   return `${m}:${s < 10 ? '0' : ''}${s}`
 }
 
+function buildSentenceWindows(
+  sentences: { text: string }[],
+  serverTimings: TtsSentenceTiming[],
+  audioDuration: number,
+): { start: number; end: number }[] {
+  if (sentences.length === 0) return []
+
+  if (serverTimings.length === sentences.length) {
+    return serverTimings.map((t, idx) => {
+      const nextStart = idx < serverTimings.length - 1 ? serverTimings[idx + 1].start : undefined
+      const endVal = nextStart !== undefined ? Math.max(t.end, nextStart) : Math.max(t.end, audioDuration || t.end)
+      return { start: t.start, end: endVal }
+    })
+  }
+
+  const lastTimingEnd = serverTimings.length > 0 ? serverTimings[serverTimings.length - 1].end : 0
+  const totalDuration = audioDuration > 0 ? audioDuration : lastTimingEnd
+  if (totalDuration <= 0) {
+    return sentences.map((_, i) => ({ start: i * 3, end: (i + 1) * 3 }))
+  }
+
+  const lengths = sentences.map((s) => Math.max(1, s.text.length))
+  const totalChars = lengths.reduce((acc, n) => acc + n, 0)
+  let accChars = 0
+
+  return lengths.map((len, idx) => {
+    const start = (accChars / totalChars) * totalDuration
+    accChars += len
+    const end = idx === lengths.length - 1 ? totalDuration : (accChars / totalChars) * totalDuration
+    return {
+      start: Math.round(start * 1000) / 1000,
+      end: Math.round(end * 1000) / 1000,
+    }
+  })
+}
+
 export default function StoryTab({
   courseId,
   node,
@@ -42,6 +83,8 @@ export default function StoryTab({
   const speech = useSpeech(node.story_script)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const blobUrlRef = useRef<string | null>(null)
+  const sentenceRefs = useRef<Record<number, HTMLSpanElement | null>>({})
+  const lastManualScrollRef = useRef<number>(0)
 
   const [mode, setMode] = useState<'neural' | 'fallback'>('neural')
   const [loadingAudio, setLoadingAudio] = useState(false)
@@ -49,7 +92,31 @@ export default function StoryTab({
   const [rate, setRate] = useState(1.0)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
+  const [serverTimings, setServerTimings] = useState<TtsSentenceTiming[]>([])
   const [regenerating, setRegenerating] = useState(false)
+
+  const { paragraphs: structuredParagraphs, flat: flatSentences } = useMemo(
+    () => splitStoryParagraphSentences(node.story_script),
+    [node.story_script],
+  )
+
+  const sentenceWindows = useMemo(
+    () => buildSentenceWindows(flatSentences, serverTimings, duration),
+    [flatSentences, serverTimings, duration],
+  )
+
+  // Detectar scroll manual del usuario para no secuestrar el scroll durante auto-seguimiento
+  useEffect(() => {
+    const markManualScroll = () => {
+      lastManualScrollRef.current = Date.now()
+    }
+    window.addEventListener('wheel', markManualScroll, { passive: true })
+    window.addEventListener('touchmove', markManualScroll, { passive: true })
+    return () => {
+      window.removeEventListener('wheel', markManualScroll)
+      window.removeEventListener('touchmove', markManualScroll)
+    }
+  }, [])
 
   // Limpiar audio al cambiar de nodo o de story_script
   useEffect(() => {
@@ -64,6 +131,7 @@ export default function StoryTab({
     setPlaying(false)
     setCurrentTime(0)
     setDuration(0)
+    setServerTimings([])
     setMode('neural')
     return () => {
       if (audioRef.current) {
@@ -76,6 +144,50 @@ export default function StoryTab({
       }
     }
   }, [courseId, node.id, node.story_script])
+
+  const loadNeuralAudio = async (seekToSentenceIdx?: number) => {
+    setLoadingAudio(true)
+    try {
+      const blob = await fetchNodeTtsBlob(courseId, node.id)
+      const fetchedTimings = await fetchNodeTtsTimings(courseId, node.id)
+      setServerTimings(fetchedTimings)
+
+      const url = URL.createObjectURL(blob)
+      blobUrlRef.current = url
+      const audio = new Audio(url)
+      audio.playbackRate = rate
+      audio.addEventListener('timeupdate', () => setCurrentTime(audio.currentTime))
+      audio.addEventListener('loadedmetadata', () => {
+        const dur = audio.duration || 0
+        setDuration(dur)
+        if (seekToSentenceIdx !== undefined) {
+          const wins = buildSentenceWindows(flatSentences, fetchedTimings, dur)
+          const target = wins[seekToSentenceIdx]?.start ?? 0
+          audio.currentTime = target
+          setCurrentTime(target)
+        }
+      })
+      audio.addEventListener('play', () => setPlaying(true))
+      audio.addEventListener('pause', () => setPlaying(false))
+      audio.addEventListener('ended', () => {
+        setPlaying(false)
+        setCurrentTime(0)
+      })
+      audioRef.current = audio
+      await audio.play()
+    } catch {
+      // Fallback offline a speechSynthesis del navegador
+      setMode('fallback')
+      speech.setRate(rate)
+      if (seekToSentenceIdx !== undefined) {
+        speech.playFromSentence(seekToSentenceIdx)
+      } else {
+        speech.play()
+      }
+    } finally {
+      setLoadingAudio(false)
+    }
+  }
 
   const togglePlay = async () => {
     if (mode === 'fallback') {
@@ -93,31 +205,26 @@ export default function StoryTab({
       return
     }
 
-    setLoadingAudio(true)
-    try {
-      const blob = await fetchNodeTtsBlob(courseId, node.id)
-      const url = URL.createObjectURL(blob)
-      blobUrlRef.current = url
-      const audio = new Audio(url)
-      audio.playbackRate = rate
-      audio.addEventListener('timeupdate', () => setCurrentTime(audio.currentTime))
-      audio.addEventListener('loadedmetadata', () => setDuration(audio.duration || 0))
-      audio.addEventListener('play', () => setPlaying(true))
-      audio.addEventListener('pause', () => setPlaying(false))
-      audio.addEventListener('ended', () => {
-        setPlaying(false)
-        setCurrentTime(0)
-      })
-      audioRef.current = audio
-      await audio.play()
-    } catch {
-      // Fallback offline a speechSynthesis del navegador
-      setMode('fallback')
-      speech.setRate(rate)
-      speech.play()
-    } finally {
-      setLoadingAudio(false)
+    await loadNeuralAudio()
+  }
+
+  const handleSentenceClick = async (sentenceIdx: number) => {
+    if (mode === 'fallback') {
+      speech.playFromSentence(sentenceIdx)
+      return
     }
+
+    if (audioRef.current) {
+      const targetStart = sentenceWindows[sentenceIdx]?.start ?? 0
+      audioRef.current.currentTime = targetStart
+      setCurrentTime(targetStart)
+      if (!playing) {
+        await audioRef.current.play()
+      }
+      return
+    }
+
+    await loadNeuralAudio(sentenceIdx)
   }
 
   const stopAudio = () => {
@@ -164,8 +271,35 @@ export default function StoryTab({
     }
   }
 
-  const paragraphs = node.story_script.split(/\n{2,}/).filter(Boolean)
   const isPlaying = mode === 'fallback' ? speech.state === 'playing' : playing
+
+  const activeSentenceIndex = useMemo(() => {
+    if (mode === 'fallback') {
+      return speech.activeSentenceIndex
+    }
+    if (!playing && currentTime <= 0) return null
+    if (sentenceWindows.length === 0) return null
+    for (let i = 0; i < sentenceWindows.length; i++) {
+      const w = sentenceWindows[i]
+      if (currentTime >= w.start && currentTime < w.end) {
+        return i
+      }
+    }
+    if (currentTime >= sentenceWindows[sentenceWindows.length - 1].start) {
+      return sentenceWindows.length - 1
+    }
+    return 0
+  }, [currentTime, mode, playing, sentenceWindows, speech.activeSentenceIndex])
+
+  // Auto-scroll suave a la oracion activa sin secuestrar el scroll manual
+  useEffect(() => {
+    if (!isPlaying || activeSentenceIndex === null) return
+    if (Date.now() - lastManualScrollRef.current < 2500) return
+    const el = sentenceRefs.current[activeSentenceIndex]
+    if (el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  }, [activeSentenceIndex, isPlaying])
 
   return (
     <div className="flex min-w-0 max-w-full flex-col gap-4">
@@ -318,15 +452,44 @@ export default function StoryTab({
 
         <span className="text-[11px] text-slate-500 dark:text-slate-400">
           {mode === 'neural'
-            ? 'Voz neural edge-tts en español (MP3 con caché local en ~/.brotal/tts_cache).'
-            : 'Fallback offline: síntesis de voz local del navegador.'}
+            ? 'Voz neural edge-tts en español · Haz clic en cualquier oración para saltar en el audio.'
+            : 'Fallback offline: síntesis de voz local del navegador · Haz clic en cualquier oración para escucharla.'}
         </span>
       </div>
 
       <article className="flex min-w-0 flex-col gap-3 break-words text-[15px] leading-relaxed">
-        {paragraphs.map((p, i) => (
-          <p key={i} className="break-words">
-            {p}
+        {structuredParagraphs.map((pSentences, pIdx) => (
+          <p key={pIdx} className="break-words">
+            {pSentences.map((s, sIdx) => {
+              const isActive = activeSentenceIndex === s.globalIndex
+              return (
+                <span key={s.globalIndex}>
+                  <span
+                    ref={(el) => {
+                      sentenceRefs.current[s.globalIndex] = el
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    title="Clic para saltar a esta oración en el audio"
+                    onClick={() => void handleSentenceClick(s.globalIndex)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        void handleSentenceClick(s.globalIndex)
+                      }
+                    }}
+                    className={`cursor-pointer rounded px-1 py-0.5 transition-colors ${
+                      isActive
+                        ? 'bg-amber-100/95 font-medium text-slate-950 ring-1 ring-amber-300/90 dark:bg-indigo-950/90 dark:text-indigo-100 dark:ring-indigo-600/80'
+                        : 'hover:bg-slate-100 dark:hover:bg-slate-800/70'
+                    }`}
+                  >
+                    {s.text}
+                  </span>
+                  {sIdx < pSentences.length - 1 ? ' ' : ''}
+                </span>
+              )
+            })}
           </p>
         ))}
       </article>

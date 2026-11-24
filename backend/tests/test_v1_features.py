@@ -412,3 +412,153 @@ def test_regenerate_questions_endpoint_updates_node_prompts(
     tree_after = client.get("/api/v1/courses/cl-pucv-inf2324-ccna1/tree").json()
     node_after = next(n for n in tree_after["nodes"] if n["id"] == "B1-P2")
     assert node_after["eval_prompts"][0]["question"].startswith("Caso NetTower IA")
+
+
+def test_ingest_local_append_mode_adds_files_and_nodes_preserving_progress(client: TestClient) -> None:
+    # 1. Ingesta inicial (replace) con archivo de Semana 1
+    week1_md = (
+        b"# Bloque 1: Clases y Encapsulamiento en Java\n"
+        b"Las clases definen atributos privados y metodos publicos que protegen el invariante de cada objeto en memoria.\n\n"
+        b"# Bloque 2: Herencia y Polimorfismo Dinamico\n"
+        b"Las subclases especializan el comportamiento con @Override permitiendo despacho dinamico en tiempo de ejecucion.\n"
+    )
+    res1 = client.post(
+        "/api/v1/courses/ingest-local",
+        data={
+            "course_code": "INF2236",
+            "title": "Programacion Avanzada en Java",
+            "career_id": "cl-pucv-inf-2022",
+            "world_metaphor": "Fabrica Modular JVM",
+            "mode": "replace",
+        },
+        files=[("files", ("semana_1_poo.md", week1_md, "text/markdown"))],
+    )
+    assert res1.status_code == 200, res1.text
+    d1 = res1.json()
+    assert d1["mode"] == "replace"
+    initial_node_count = d1["node_count"]
+    assert initial_node_count >= 6
+
+    # 2. Llevar N1 a mastery_level = 2 y training_reps = 3
+    # Primer intento aprobado -> mastery_level = 1 (entra en cooldown)
+    ev1 = client.post(
+        "/api/v1/study/INF2236/N1/evaluate",
+        json={"answers": [{"prompt_id": "q1", "text": "Respuesta completa"}], "score": 9.0, "cooldown_mode": "urgency"},
+    )
+    assert ev1.status_code == 200
+    assert ev1.json()["progress"]["mastery_level"] == 1
+
+    # Tres intentos durante cooldown -> suben training_reps a 3 sin subir mastery_level
+    for rep in range(1, 4):
+        ev_rep = client.post(
+            "/api/v1/study/INF2236/N1/evaluate",
+            json={"answers": [{"prompt_id": "q1", "text": "Practica en cooldown"}], "score": 8.5, "cooldown_mode": "urgency"},
+        )
+        assert ev_rep.status_code == 200
+        assert ev_rep.json()["progress"]["mastery_level"] == 1
+        assert ev_rep.json()["progress"]["training_reps"] == rep
+
+    # Expirar cooldown en SQLite para subir a mastery_level = 2
+    from app.db.database import _connect
+
+    conn = _connect()
+    try:
+        conn.execute(
+            "UPDATE node_progress SET next_review_at = '2020-01-01T00:00:00Z' WHERE course_id = ? AND node_id = 'N1';",
+            (d1["course_id"],),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    ev2 = client.post(
+        "/api/v1/study/INF2236/N1/evaluate",
+        json={"answers": [{"prompt_id": "q1", "text": "Validacion tras cooldown"}], "score": 9.5, "cooldown_mode": "urgency"},
+    )
+    assert ev2.status_code == 200
+    assert ev2.json()["progress"]["mastery_level"] == 2
+    assert ev2.json()["progress"]["training_reps"] == 3
+
+    # 3. Ingesta incremental (mode="append") con archivo de Semana 2
+    week2_txt = (
+        b"# Concurrencia, Hilos y Sincronizacion en la JVM\n"
+        b"Los hilos comparten el heap y requieren bloques synchronized o Locks explicitos para evitar condiciones de carrera.\n\n"
+        b"# Ejecutores, Futures y CompletableFuture\n"
+        b"ExecutorService administra pools de hilos reutilizables mientras CompletableFuture encadena tareas asincronas sin bloquear.\n"
+    )
+    res2 = client.post(
+        "/api/v1/courses/ingest-local",
+        data={
+            "course_code": "INF2236",
+            "title": "Programacion Avanzada en Java",
+            "career_id": "cl-pucv-inf-2022",
+            "mode": "append",
+        },
+        files=[("files", ("semana_2_concurrencia.md", week2_txt, "text/markdown"))],
+    )
+    assert res2.status_code == 200, res2.text
+    d2 = res2.json()
+    assert d2["mode"] == "append"
+    assert d2["added_nodes"] >= 2
+    assert d2["node_count"] == initial_node_count + d2["added_nodes"]
+
+    # 4. GET /files suma ambos archivos
+    files_res = client.get("/api/v1/courses/INF2236/files")
+    assert files_res.status_code == 200
+    filenames = [f["filename"] for f in files_res.json()["files"]]
+    assert filenames == ["semana_1_poo.md", "semana_2_concurrencia.md"]
+
+    # 5. GET /tree contiene los nodos nuevos conectados y preserva N1 en mastery_level=2 y training_reps=3
+    tree_res = client.get("/api/v1/courses/INF2236/tree")
+    assert tree_res.status_code == 200
+    tree = tree_res.json()
+    assert len(tree["nodes"]) == d2["node_count"]
+    all_node_ids = {n["id"] for n in tree["nodes"]}
+    new_nodes = [n for n in tree["nodes"] if n["id"].startswith("A")]
+    assert len(new_nodes) == d2["added_nodes"]
+    for nn in new_nodes:
+        assert len(nn["parent_ids"]) >= 1
+        assert all(pid in all_node_ids for pid in nn["parent_ids"])
+
+    n1_prog = tree["progress"]["N1"]
+    assert n1_prog["mastery_level"] == 2
+    assert n1_prog["training_reps"] == 3
+    assert n1_prog["best_score"] == 9.5
+
+
+def test_tts_timings_endpoint_and_cleanup_on_regenerate(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import tts
+
+    demo_pack = json.loads((fixtures_dir() / "demo_pack.json").read_text(encoding="utf-8"))
+    client.post("/api/v1/courses/install-pack", json=demo_pack)
+
+    async def fake_run_edge_tts_with_timings(text: str, voice: str, out_path: Path) -> list[dict[str, Any]]:
+        out_path.write_bytes(b"ID3-FAKE-MP3-" + voice.encode("utf-8"))
+        sentences = tts.split_story_sentences(text)
+        return [
+            {"text": s, "start": round(i * 2.5, 3), "end": round((i + 1) * 2.5, 3)}
+            for i, s in enumerate(sentences)
+        ]
+
+    monkeypatch.setattr(tts, "_run_edge_tts", fake_run_edge_tts_with_timings)
+
+    tts_res = client.post("/api/v1/study/cl-pucv-inf2324-ccna1/B1-P2/tts")
+    assert tts_res.status_code == 200
+
+    timings_res = client.get("/api/v1/study/cl-pucv-inf2324-ccna1/B1-P2/tts-timings")
+    assert timings_res.status_code == 200
+    tdata = timings_res.json()
+    assert tdata["course_id"] == "cl-pucv-inf2324-ccna1"
+    assert tdata["node_id"] == "B1-P2"
+    assert len(tdata["timings"]) >= 2
+    assert tdata["timings"][0]["start"] == 0.0
+    assert tdata["timings"][0]["end"] == 2.5
+
+    # Al regenerar la historia se limpia el cache (.mp3 y .timings.json) de la historia anterior
+    regen_res = client.post("/api/v1/study/cl-pucv-inf2324-ccna1/B1-P2/regenerate-story")
+    assert regen_res.status_code == 200
+    after_timings = client.get("/api/v1/study/cl-pucv-inf2324-ccna1/B1-P2/tts-timings").json()
+    assert after_timings["timings"] == []

@@ -180,6 +180,67 @@ def install_pack(conn: sqlite3.Connection, pack: dict[str, Any]) -> str:
     return course_id
 
 
+def append_nodes_to_course(
+    conn: sqlite3.Connection,
+    course_id: str,
+    new_nodes: list[dict[str, Any]],
+) -> int:
+    """Inserta nodos nuevos en un ramo existente sin borrar nodos previos ni su progreso 0/3->3/3."""
+    from app.schemas.pack import PackNode
+
+    validated_nodes = [PackNode.model_validate(n) for n in new_nodes]
+    added = 0
+    for node in validated_nodes:
+        conn.execute(
+            """
+            INSERT INTO course_nodes (
+                id, course_id, parent_ids_json, branch, block_label,
+                title, summary, story_script, eval_prompts_json, storyboard_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(course_id, id) DO UPDATE SET
+                parent_ids_json = excluded.parent_ids_json,
+                branch = excluded.branch,
+                block_label = excluded.block_label,
+                title = excluded.title,
+                summary = excluded.summary,
+                story_script = excluded.story_script,
+                eval_prompts_json = excluded.eval_prompts_json,
+                storyboard_json = excluded.storyboard_json;
+            """,
+            (
+                node.id,
+                course_id,
+                json.dumps(node.parent_ids, ensure_ascii=False),
+                node.branch,
+                node.block,
+                node.title,
+                node.summary,
+                node.story_script,
+                json.dumps([p.model_dump() for p in node.eval_prompts], ensure_ascii=False),
+                json.dumps(node.storyboard_ref) if node.storyboard_ref is not None else None,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO node_progress (
+                course_id, node_id, mastery_level, next_review_at,
+                training_reps, best_score, last_score, last_practiced_at
+            )
+            VALUES (?, ?, 0, NULL, 0, 0, NULL, NULL);
+            """,
+            (course_id, node.id),
+        )
+        added += 1
+
+    conn.execute(
+        "UPDATE courses SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+        (course_id,),
+    )
+    conn.commit()
+    return added
+
+
 def archive_course(conn: sqlite3.Connection, course_id: str) -> None:
     """Marca el ramo como 'archived', borra cache TTS y chunks FTS, y conserva node_progress."""
     row = resolve_course_row(conn, course_id)

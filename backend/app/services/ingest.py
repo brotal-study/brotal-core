@@ -19,12 +19,16 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from app.schemas.pack import CoursePack, PackMetadata
 from app.services import ai_router
 from app.services.ai_router import AiProviderError, extract_json_object
-from app.services.pack_manager import install_pack, resolve_course_row
+from app.services.pack_manager import (
+    append_nodes_to_course,
+    install_pack,
+    resolve_course_row,
+)
 
 ALLOWED_EXTENSIONS = {".pdf", ".pptx", ".docx", ".md", ".txt"}
 _SEPARATOR_LINE_RE = re.compile(r"(?m)^\s*(?:[-*_]{3,}|={3,})\s*$")
@@ -224,7 +228,9 @@ def extract_chunks_from_bytes(filename: str, data: bytes) -> list[ExtractedChunk
 
 def index_chunks_in_fts(conn: sqlite3.Connection, course_id: str, chunks: list[ExtractedChunk]) -> int:
     """Reemplaza e indexa los chunks del ramo en local_chunks_fts."""
-    conn.execute("DELETE FROM local_chunks_fts WHERE course_id = ?;", (course_id,))
+    _, keys = _resolve_fts_course_keys(conn, course_id)
+    placeholders = ",".join("?" for _ in keys)
+    conn.execute(f"DELETE FROM local_chunks_fts WHERE course_id IN ({placeholders});", tuple(keys))
     for ch in chunks:
         conn.execute(
             """
@@ -235,6 +241,33 @@ def index_chunks_in_fts(conn: sqlite3.Connection, course_id: str, chunks: list[E
         )
     conn.commit()
     return len(chunks)
+
+
+def append_chunks_in_fts(conn: sqlite3.Connection, course_id: str, chunks: list[ExtractedChunk]) -> int:
+    """Agrega chunks nuevos a local_chunks_fts conservando intactos los archivos previos (reemplaza solo si coincide filename)."""
+    _, keys = _resolve_fts_course_keys(conn, course_id)
+    key_placeholders = ",".join("?" for _ in keys)
+    uploaded_files = sorted({ch.source_file for ch in chunks})
+    if uploaded_files:
+        file_placeholders = ",".join("?" for _ in uploaded_files)
+        conn.execute(
+            f"DELETE FROM local_chunks_fts WHERE course_id IN ({key_placeholders}) AND source_file IN ({file_placeholders});",
+            (*keys, *uploaded_files),
+        )
+    for ch in chunks:
+        conn.execute(
+            """
+            INSERT INTO local_chunks_fts (course_id, source_file, section_title, content)
+            VALUES (?, ?, ?, ?);
+            """,
+            (course_id, ch.source_file, ch.section_title, ch.content),
+        )
+    conn.commit()
+    row = conn.execute(
+        f"SELECT COUNT(*) AS total FROM local_chunks_fts WHERE course_id IN ({key_placeholders});",
+        tuple(keys),
+    ).fetchone()
+    return int(row["total"]) if row else len(chunks)
 
 
 def _strip_bullet_lists(story: str) -> str:
@@ -519,6 +552,245 @@ def _generate_nodes_with_ai(
         return (fallback, "local_fallback")
 
 
+def _next_unique_node_id(prefix: str, start_idx: int, used_ids: set[str]) -> str:
+    idx = start_idx
+    while f"{prefix}{idx}" in used_ids:
+        idx += 1
+    nid = f"{prefix}{idx}"
+    used_ids.add(nid)
+    return nid
+
+
+def _fallback_append_nodes_from_chunks(
+    *,
+    course_title: str,
+    world_metaphor: str,
+    chunks: list[ExtractedChunk],
+    existing_nodes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Construye de 2 a 4 nodos nuevos conectados al arbol existente cuando no hay IA externa."""
+    existing_ids = {str(n["id"]) for n in existing_nodes}
+    used_ids = set(existing_ids)
+
+    theory_anchors = [str(n["id"]) for n in existing_nodes if n.get("branch") == "theory"]
+    anchor_id = theory_anchors[-1] if theory_anchors else str(existing_nodes[-1]["id"])
+
+    segments: list[tuple[str, str]] = []
+    for ch in chunks:
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", ch.content) if len(s.strip()) > 25]
+        if not sentences:
+            sentences = [ch.content[:300]]
+        segments.append((ch.section_title, " ".join(sentences[:6])))
+
+    while len(segments) < 2:
+        idx = len(segments) + 1
+        base_title, base_text = segments[(idx - 1) % max(1, len(segments))]
+        segments.append((f"{base_title} · Aplicacion {idx}", base_text))
+
+    selected = segments[:4]
+    theory_count = max(1, len(selected) - 1)
+    nodes: list[dict[str, Any]] = []
+    prev_theory_id = anchor_id
+
+    for i, (sec_title, text_snippet) in enumerate(selected, start=1):
+        is_theory = i <= theory_count
+        branch = "theory" if is_theory else "practice"
+        nid = _next_unique_node_id("A", i, used_ids)
+        if is_theory:
+            parents = [prev_theory_id]
+            prev_theory_id = nid
+        else:
+            parents = [prev_theory_id]
+
+        block = "Bloque Incremental · Teoria" if is_theory else "Bloque Incremental · Practica"
+        raw_sec = re.sub(r"^(Seccion|Pagina|Slide)\s+\d+[:\s]*", "", sec_title).strip()
+        clean_title = _sanitize_title(raw_sec, f"Tema Incremental {i}")
+        title = f"{clean_title[:70]}" if is_theory else f"Taller Practico: {clean_title[:58]}"
+
+        key_phrases = [
+            s.strip().rstrip(".")
+            for s in re.split(r"[.;]\s+|\n+", text_snippet)
+            if len(s.strip()) >= 20 and _is_valid_title(s)
+        ][:3]
+        while len(key_phrases) < 2:
+            key_phrases.append(f"Explica el rol de {title} dentro de {course_title}")
+
+        story_script = _strip_bullet_lists(
+            f"Continuando en {world_metaphor}, incorporamos {title} al recorrido de {course_title}. "
+            f"Este nuevo material profundiza lo visto en los bloques previos a partir de tus apuntes: "
+            f"{text_snippet[:480]}.\n\n"
+            f"Al conectarlo con el resto del arbol en {world_metaphor}, observa la secuencia causal: "
+            f"{key_phrases[0]}. Ademas, considera que {key_phrases[1]} para anticipar su comportamiento "
+            f"en situaciones reales.\n\n"
+            f"En evaluaciones o proyectos de {course_title}, verifica que invariante sostiene {title} "
+            f"y como se integra con las bases anteriores del ramo."
+        )
+
+        nodes.append(
+            {
+                "id": nid,
+                "parent_ids": parents,
+                "branch": branch,
+                "block": block,
+                "title": title,
+                "summary": f"Extension incremental sobre {title} en {course_title}.",
+                "story_script": story_script,
+                "eval_prompts": [
+                    {
+                        "id": "q1",
+                        "question": f"Usando la logica de {world_metaphor}, ¿como se conecta {title} con lo aprendido antes en {course_title}?",
+                        "rubric_points": [p[:160] for p in key_phrases[:3]],
+                    }
+                ],
+                "storyboard_ref": None,
+            }
+        )
+
+    return nodes
+
+
+def _generate_append_nodes_with_ai(
+    *,
+    course_code: str,
+    course_title: str,
+    world_metaphor: str,
+    chunks: list[ExtractedChunk],
+    existing_nodes: list[dict[str, Any]],
+    preferred_provider: str = "auto",
+) -> tuple[list[dict[str, Any]], str]:
+    """Genera entre 2 y 6 nodos nuevos conectados al arbol existente sin tocar los nodos previos."""
+    digest_text = _sample_chunks_balanced(chunks)
+    files_list = sorted({c.source_file for c in chunks})
+    existing_ids = {str(n["id"]) for n in existing_nodes}
+    theory_anchors = [str(n["id"]) for n in existing_nodes if n.get("branch") == "theory"]
+    anchor_id = theory_anchors[-1] if theory_anchors else str(existing_nodes[-1]["id"])
+
+    system_prompt = (
+        "Eres el Arquitecto Pedagogico de Brotal en MODO INCREMENTAL (`append`).\n"
+        "El estudiante ya tiene un Arbol de Habilidades activo con progreso guardado y acaba de subir material nuevo.\n"
+        "Debes generar UNICAMENTE LOS NODOS NUEVOS (ENTRE 2 Y 6 NODOS, `theory` y/o `practice`) que cubren los archivos nuevos:\n"
+        "REGLAS OBLIGATORIAS:\n"
+        "1. NO repitas ni devuelvas los nodos existentes; devuelve SOLO los 2 a 6 nodos nuevos.\n"
+        "2. Cada nodo nuevo DEBE tener un `id` unico que NO colisione con ningun `id` existente (ej. 'A1', 'A2', 'P_NEW1').\n"
+        "3. `parent_ids` de cada nodo nuevo DEBE conectarse al menos a un nodo existente del arbol (o a otro nodo nuevo recien creado) "
+        "para que quede integrado en el DAG.\n"
+        "4. `story_script` DEBE ser una historia conversada continua de 2 a 3 parrafos (~180 a 240 palabras) usando la metafora del mundo (`world_metaphor`).\n"
+        "5. Cada nodo nuevo DEBE incluir `eval_prompts` con 2 a 4 preguntas socraticas a ciegas y 2 a 3 `rubric_points` verificables.\n"
+        "Responde UNICAMENTE JSON valido con la clave `nodes`."
+    )
+    user_prompt = (
+        f"Codigo: {course_code}\n"
+        f"Ramo: {course_title}\n"
+        f"Metafora del mundo: {world_metaphor}\n"
+        f"Nodos existentes en el arbol (NO los repitas, usalos para conectar `parent_ids`):\n"
+        f"{json.dumps(existing_nodes, ensure_ascii=False)}\n\n"
+        f"Archivos nuevos subidos ({len(files_list)}): {', '.join(files_list)}\n\n"
+        f"Apuntes de los archivos nuevos:\n{digest_text}"
+    )
+
+    try:
+        comp = ai_router.complete_chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            preferred_provider=preferred_provider,
+            json_mode=True,
+            temperature=0.35,
+            max_tokens=6144,
+            timeout=90.0,
+        )
+        parsed = extract_json_object(comp.text)
+        raw_nodes = parsed.get("nodes")
+        if not isinstance(raw_nodes, list) or len(raw_nodes) < 2:
+            raise ValueError("El LLM devolvio menos de 2 nodos incrementales")
+
+        capped_nodes = raw_nodes[:6]
+        used_ids = set(existing_ids)
+        assigned_ids: list[str] = []
+        raw_to_assigned: dict[str, str] = {}
+
+        for idx, n in enumerate(capped_nodes, start=1):
+            candidate = str(n.get("id") or "").strip()
+            if not candidate or candidate in used_ids:
+                nid = _next_unique_node_id("A", idx, used_ids)
+            else:
+                nid = candidate
+                used_ids.add(nid)
+            assigned_ids.append(nid)
+            if candidate:
+                raw_to_assigned[candidate] = nid
+
+        valid_parent_universe = existing_ids | set(assigned_ids)
+        normalized_nodes: list[dict[str, Any]] = []
+
+        for idx, (n, nid) in enumerate(zip(capped_nodes, assigned_ids, strict=True)):
+            mapped_parents: list[str] = []
+            for p in n.get("parent_ids") or []:
+                p_str = str(p).strip()
+                resolved_p = raw_to_assigned.get(p_str, p_str)
+                if resolved_p in valid_parent_universe and resolved_p != nid and resolved_p not in mapped_parents:
+                    mapped_parents.append(resolved_p)
+
+            if not mapped_parents:
+                mapped_parents = [anchor_id if idx == 0 else assigned_ids[idx - 1]]
+
+            branch = "practice" if str(n.get("branch")).lower() == "practice" else "theory"
+            raw_prompts = n.get("eval_prompts") or []
+            clean_prompts = []
+            for p_idx, p in enumerate(raw_prompts[:5], start=1):
+                pts = [str(x).strip() for x in (p.get("rubric_points") or []) if str(x).strip()]
+                if not pts:
+                    pts = [f"Explica los conceptos centrales de {n.get('title', nid)}"]
+                clean_prompts.append(
+                    {
+                        "id": str(p.get("id") or f"q{p_idx}"),
+                        "question": str(p.get("question") or f"Explica con tus palabras {n.get('title', nid)}."),
+                        "rubric_points": pts,
+                    }
+                )
+            if not clean_prompts:
+                clean_prompts = [
+                    {
+                        "id": "q1",
+                        "question": f"¿Como explicarias {n.get('title', nid)} y su conexion con el ramo?",
+                        "rubric_points": [
+                            f"Define la idea principal de {n.get('title', nid)}",
+                            "Conecta el concepto con un caso practico del ramo",
+                        ],
+                    }
+                ]
+
+            safe_title = _sanitize_title(str(n.get("title") or ""), f"Tema Nuevo {idx + 1} · {course_title}")
+            safe_block = _sanitize_title(
+                str(n.get("block") or ""),
+                "Bloque Practico Incremental" if branch == "practice" else "Bloque Conceptual Incremental",
+            )
+            normalized_nodes.append(
+                {
+                    "id": nid,
+                    "parent_ids": mapped_parents,
+                    "branch": branch,
+                    "block": safe_block,
+                    "title": safe_title,
+                    "summary": str(n.get("summary") or f"Conceptos incrementales de {course_title}"),
+                    "story_script": _strip_bullet_lists(str(n.get("story_script") or "")),
+                    "eval_prompts": clean_prompts,
+                    "storyboard_ref": None,
+                }
+            )
+
+        return (normalized_nodes, comp.provider)
+    except (AiProviderError, ValueError, KeyError, json.JSONDecodeError):
+        fallback = _fallback_append_nodes_from_chunks(
+            course_title=course_title,
+            world_metaphor=world_metaphor,
+            chunks=chunks,
+            existing_nodes=existing_nodes,
+        )
+        return (fallback, "local_fallback")
+
+
 def ingest_local_files(
     conn: sqlite3.Connection,
     *,
@@ -528,8 +800,9 @@ def ingest_local_files(
     world_metaphor: str | None,
     files: list[tuple[str, bytes]],
     preferred_provider: str = "auto",
+    mode: Literal["append", "replace"] = "replace",
 ) -> dict[str, Any]:
-    """Procesa 1..N archivos locales, indexa en FTS5, genera el CoursePack de 6..12 nodos y lo instala como 'active'."""
+    """Procesa 1..N archivos locales, indexa en FTS5 y reemplaza o agrega nodos al ramo ('replace' | 'append')."""
     if not files:
         raise ValueError("Debes subir al menos 1 archivo (.pdf, .pptx, .docx, .md o .txt).")
 
@@ -551,6 +824,65 @@ def ingest_local_files(
     clean_title = title.strip() or clean_code
     slug = re.sub(r"[^a-z0-9]+", "-", clean_code.lower()).strip("-") or "course"
     course_id = f"local-{slug}"
+
+    existing_row = resolve_course_row(conn, clean_code) or resolve_course_row(conn, course_id)
+    existing_node_rows: list[sqlite3.Row] = []
+    if existing_row is not None:
+        existing_node_rows = conn.execute(
+            "SELECT id, title, block_label, branch FROM course_nodes WHERE course_id = ? ORDER BY rowid ASC;",
+            (existing_row["id"],),
+        ).fetchall()
+
+    if mode == "append" and existing_row is not None and len(existing_node_rows) > 0:
+        real_course_id = str(existing_row["id"])
+        existing_metaphor = ""
+        if existing_row["pack_metadata_json"]:
+            try:
+                meta_dict = json.loads(existing_row["pack_metadata_json"])
+                if isinstance(meta_dict, dict):
+                    existing_metaphor = str(meta_dict.get("world_metaphor") or "").strip()
+            except json.JSONDecodeError:
+                existing_metaphor = ""
+
+        metaphor = (world_metaphor or "").strip() or existing_metaphor or f"Laboratorio central de {clean_title}"
+        existing_summary = [
+            {
+                "id": str(r["id"]),
+                "title": str(r["title"]),
+                "block": str(r["block_label"] or ""),
+                "branch": str(r["branch"]),
+            }
+            for r in existing_node_rows
+        ]
+        new_nodes, provider_used = _generate_append_nodes_with_ai(
+            course_code=clean_code,
+            course_title=clean_title,
+            world_metaphor=metaphor,
+            chunks=all_chunks,
+            existing_nodes=existing_summary,
+            preferred_provider=preferred_provider,
+        )
+        added_count = append_nodes_to_course(conn, real_course_id, new_nodes)
+        total_chunks = append_chunks_in_fts(conn, real_course_id, all_chunks)
+        total_nodes_row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM course_nodes WHERE course_id = ?;",
+            (real_course_id,),
+        ).fetchone()
+        total_node_count = int(total_nodes_row["cnt"]) if total_nodes_row else (len(existing_node_rows) + added_count)
+
+        return {
+            "course_id": real_course_id,
+            "course_code": str(existing_row["course_code"] or clean_code),
+            "title": str(existing_row["title"] or clean_title),
+            "status": "active",
+            "mode": "append",
+            "added_nodes": added_count,
+            "node_count": total_node_count,
+            "chunks_indexed": total_chunks,
+            "processed_files": processed_files,
+            "provider": provider_used,
+            "world_metaphor": metaphor,
+        }
 
     metaphor = (world_metaphor or "").strip() or f"Laboratorio central de {clean_title}"
 
@@ -596,6 +928,8 @@ def ingest_local_files(
         "course_code": clean_code,
         "title": clean_title,
         "status": "active",
+        "mode": "replace",
+        "added_nodes": len(pack_obj.nodes),
         "node_count": len(pack_obj.nodes),
         "chunks_indexed": total_chunks,
         "processed_files": processed_files,
