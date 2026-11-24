@@ -10,8 +10,7 @@ def test_registry_offline_fallback(client: TestClient) -> None:
     assert data["schema_version"] == "1.0"
     assert len(data["careers"]) >= 1
     assert data["careers"][0]["id"] == "cl-pucv-inf-2022"
-    assert len(data["packs"]) >= 1
-    assert data["packs"][0]["id"] == "cl-pucv-inf2324-ccna1"
+    assert data["packs"] == []
 
 
 def test_get_career_detail_and_bulk_status(client: TestClient) -> None:

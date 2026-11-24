@@ -63,6 +63,7 @@ def call_groq(
     model: str | None = None,
     json_mode: bool = False,
     temperature: float = 0.3,
+    max_tokens: int | None = None,
     timeout: float = 35.0,
 ) -> AiCompletion:
     api_key = get_secret("GROQ_API_KEY")
@@ -81,6 +82,8 @@ def call_groq(
             "messages": messages,
             "temperature": temperature,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
@@ -113,6 +116,7 @@ def call_gemini(
     model: str | None = None,
     json_mode: bool = False,
     temperature: float = 0.3,
+    max_tokens: int | None = None,
     timeout: float = 35.0,
 ) -> AiCompletion:
     api_key = get_secret("GEMINI_API_KEY")
@@ -137,6 +141,8 @@ def call_gemini(
         system_parts = []
 
     gen_config: dict[str, Any] = {"temperature": temperature}
+    if max_tokens is not None:
+        gen_config["maxOutputTokens"] = max_tokens
     if json_mode:
         gen_config["responseMimeType"] = "application/json"
 
@@ -237,6 +243,8 @@ def complete_chat(
     preferred_provider: str = "auto",
     json_mode: bool = False,
     temperature: float = 0.3,
+    max_tokens: int | None = None,
+    timeout: float | None = None,
 ) -> AiCompletion:
     """Ejecuta una completacion rotando entre los proveedores gratuitos disponibles."""
     status = configured_providers()
@@ -244,15 +252,22 @@ def complete_chat(
     if not order:
         raise AiProviderError("No hay proveedores IA configurados (configura Groq, Gemini u Ollama)")
 
+    extra_kw: dict[str, Any] = {}
+    if max_tokens is not None:
+        extra_kw["max_tokens"] = max_tokens
+    if timeout is not None:
+        extra_kw["timeout"] = timeout
+
     errors: list[str] = []
     for provider in order:
         try:
             if provider == "groq":
-                return call_groq(messages, json_mode=json_mode, temperature=temperature)
+                return call_groq(messages, json_mode=json_mode, temperature=temperature, **extra_kw)
             if provider == "gemini":
-                return call_gemini(messages, json_mode=json_mode, temperature=temperature)
+                return call_gemini(messages, json_mode=json_mode, temperature=temperature, **extra_kw)
             if provider == "ollama":
-                return call_ollama(messages, json_mode=json_mode, temperature=temperature)
+                ollama_kw = {"timeout": timeout} if timeout is not None else {}
+                return call_ollama(messages, json_mode=json_mode, temperature=temperature, **ollama_kw)
         except (AiProviderError, httpx.HTTPError, ValueError, TypeError) as exc:
             errors.append(f"{provider}: {exc}")
             continue
