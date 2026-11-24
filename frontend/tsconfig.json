@@ -6,6 +6,8 @@
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
     "strict": true,
+    "resolveJsonModule": true,
+    "paths": { "@fixtures/*": ["../fixtures/*"] },
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "skipLibCheck": true,
@@ -13,5 +15,5 @@
     "isolatedModules": true,
     "types": ["vite/client"]
   },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src", "vite.config.ts", "../fixtures/*.json"]
 }

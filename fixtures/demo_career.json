@@ -10,29 +10,59 @@
   "career": {
     "name": "Ingeniería en Informática",
     "plan_year": 2022,
-    "plan_ref": "DRA 6/2022",
+    "plan_ref": "DRA 6/2022 (mod. DRA 61/2020)",
     "updated_at": "2026-11-24"
   },
   "categories": [
     {
-      "id": "inf",
-      "label": "Informática",
-      "color": "#2E7D5B"
+      "id": "cb",
+      "label": "Ciencias Básicas",
+      "color": "#3B82C4"
     },
     {
-      "id": "mat",
-      "label": "Matemáticas y Ciencias",
-      "color": "#2B5B84"
+      "id": "ci",
+      "label": "Ciencias de la Ingeniería",
+      "color": "#C04EC0"
+    },
+    {
+      "id": "alg",
+      "label": "Algoritmos y Programación",
+      "color": "#D99B1E"
+    },
+    {
+      "id": "sis",
+      "label": "Sistemas de Información",
+      "color": "#B8A328"
+    },
+    {
+      "id": "red",
+      "label": "Computación y Redes",
+      "color": "#8462A8"
+    },
+    {
+      "id": "ges",
+      "label": "Gestión Informática",
+      "color": "#D46812"
+    },
+    {
+      "id": "int",
+      "label": "Integradoras de Dominio",
+      "color": "#C88A52"
+    },
+    {
+      "id": "opt",
+      "label": "Optativos",
+      "color": "#6B7280"
+    },
+    {
+      "id": "fofu",
+      "label": "Formación Fundamental",
+      "color": "#994848"
     },
     {
       "id": "eng",
-      "label": "Inglés",
-      "color": "#8C6D1F"
-    },
-    {
-      "id": "gen",
-      "label": "Formación Fundamental",
-      "color": "#8A335C"
+      "label": "Programa de Inglés",
+      "color": "#A37373"
     }
   ],
   "semesters": [
@@ -41,31 +71,38 @@
       "label": "S1",
       "courses": [
         {
+          "code": "MAT1001",
+          "name": "Fundamentos de Matemáticas para Ingeniería",
+          "credits": 6,
+          "category": "cb",
+          "prerequisites": []
+        },
+        {
           "code": "INF1211",
           "name": "Fundamentos de Algoritmos",
           "credits": 4,
-          "category": "inf",
+          "category": "alg",
           "prerequisites": []
         },
         {
           "code": "INF1212",
           "name": "Introducción a la Ingeniería Informática",
           "credits": 3,
-          "category": "inf",
+          "category": "alg",
           "prerequisites": []
         },
         {
           "code": "INF1413",
           "name": "Bienestar y Aprendizaje Universitario",
           "credits": 2,
-          "category": "inf",
+          "category": "ges",
           "prerequisites": []
         },
         {
-          "code": "MAT1001",
-          "name": "Fundamentos de Matemáticas para Ingeniería",
-          "credits": 6,
-          "category": "mat",
+          "code": "IER010",
+          "name": "Antropología Cristiana",
+          "credits": 2,
+          "category": "fofu",
           "prerequisites": []
         }
       ]
@@ -75,40 +112,39 @@
       "label": "S2",
       "courses": [
         {
-          "code": "FIN100-14",
-          "name": "Desarrollo Integral y Comunicación para Ingeniería",
-          "credits": 3,
-          "category": "gen",
-          "prerequisites": []
-        },
-        {
-          "code": "INF1214",
-          "name": "Fundamentos de Programación",
+          "code": "MAT1004",
+          "name": "Álgebra Lineal",
           "credits": 4,
-          "category": "inf",
+          "category": "cb",
           "prerequisites": []
         },
         {
           "code": "MAT1002",
           "name": "Cálculo Diferencial e Integral",
           "credits": 6,
-          "category": "mat",
+          "category": "cb",
           "prerequisites": []
         },
         {
-          "code": "MAT1004",
-          "name": "Álgebra Lineal",
+          "code": "INF1214",
+          "name": "Fundamentos de Programación",
           "credits": 4,
-          "category": "mat",
+          "category": "alg",
           "prerequisites": []
         },
         {
-          "code": "IER010",
-          "name": "Antropología Cristiana",
+          "code": "FIN100-14",
+          "name": "Desarrollo Integral y Comunicación para Ingeniería",
+          "credits": 3,
+          "category": "ges",
+          "prerequisites": []
+        },
+        {
+          "code": "IER020",
+          "name": "Ética Cristiana",
           "credits": 2,
-          "category": "gen",
-          "prerequisites": [],
-          "optional": true
+          "category": "fofu",
+          "prerequisites": []
         }
       ]
     },
@@ -120,30 +156,36 @@
           "code": "FIS1002",
           "name": "Física para Ingeniería",
           "credits": 5,
-          "category": "mat",
+          "category": "cb",
           "prerequisites": []
         },
         {
-          "code": "INF2223",
-          "name": "Estructura de Datos",
+          "code": "INF2121",
+          "name": "Estadística Computacional",
           "credits": 4,
-          "category": "inf",
+          "category": "ci",
           "prerequisites": []
         },
         {
           "code": "INF2322",
           "name": "Hardware y Sistemas Operativos",
           "credits": 4,
-          "category": "inf",
+          "category": "red",
           "prerequisites": []
         },
         {
-          "code": "IER020",
-          "name": "Ética Cristiana",
+          "code": "INF2223",
+          "name": "Estructura de Datos",
+          "credits": 4,
+          "category": "alg",
+          "prerequisites": []
+        },
+        {
+          "code": "FOFU1",
+          "name": "Formación Fundamental 1",
           "credits": 2,
-          "category": "gen",
-          "prerequisites": [],
-          "optional": true
+          "category": "fofu",
+          "prerequisites": []
         },
         {
           "code": "ING9000",
@@ -160,46 +202,45 @@
       "label": "S4",
       "courses": [
         {
+          "code": "INF2324",
+          "name": "Redes de Computadores",
+          "credits": 4,
+          "category": "red",
+          "prerequisites": ["INF2322"]
+        },
+        {
           "code": "INF2235",
           "name": "Base de Datos",
           "credits": 4,
-          "category": "inf",
-          "prerequisites": [
-            "INF1214"
-          ]
+          "category": "sis",
+          "prerequisites": ["INF1214"]
         },
         {
           "code": "INF2236",
           "name": "Programación Avanzada",
           "credits": 4,
-          "category": "inf",
-          "prerequisites": [
-            "INF2223"
-          ]
+          "category": "alg",
+          "prerequisites": ["INF2223"]
         },
         {
           "code": "INF2237",
           "name": "Ingeniería de Software",
           "credits": 4,
-          "category": "inf",
-          "prerequisites": [
-            "INF2223"
-          ]
-        },
-        {
-          "code": "INF2324",
-          "name": "Redes de Computadores",
-          "credits": 4,
-          "category": "inf",
-          "prerequisites": [
-            "INF2322"
-          ]
+          "category": "sis",
+          "prerequisites": ["INF2223"]
         },
         {
           "code": "ING9001",
           "name": "Inglés 1",
           "credits": 2,
           "category": "eng",
+          "prerequisites": []
+        },
+        {
+          "code": "FOFU2",
+          "name": "Formación Fundamental 2",
+          "credits": 2,
+          "category": "fofu",
           "prerequisites": []
         }
       ]
@@ -212,44 +253,43 @@
           "code": "INF3132",
           "name": "Economía y Finanzas",
           "credits": 3,
-          "category": "gen",
+          "category": "ci",
           "prerequisites": []
         },
         {
           "code": "INF3233",
           "name": "Inteligencia Artificial",
           "credits": 4,
-          "category": "inf",
-          "prerequisites": [
-            "INF2236"
-          ]
+          "category": "sis",
+          "prerequisites": ["INF2236"]
         },
         {
           "code": "INF3234",
           "name": "Modelamiento de Software",
           "credits": 4,
-          "category": "inf",
-          "prerequisites": [
-            "INF2235"
-          ]
+          "category": "sis",
+          "prerequisites": ["INF2235"]
         },
         {
           "code": "INF3235",
           "name": "Ingeniería de Requerimientos",
           "credits": 3,
-          "category": "inf",
-          "prerequisites": [
-            "INF2237"
-          ]
+          "category": "sis",
+          "prerequisites": ["INF2237"]
         },
         {
           "code": "ING9002",
           "name": "Inglés 2",
           "credits": 2,
           "category": "eng",
-          "prerequisites": [
-            "ING9001"
-          ]
+          "prerequisites": ["ING9001"]
+        },
+        {
+          "code": "OPT1",
+          "name": "Optativo 1",
+          "credits": 4,
+          "category": "opt",
+          "prerequisites": []
         }
       ]
     },
@@ -261,44 +301,43 @@
           "code": "INF3136",
           "name": "Optimización",
           "credits": 4,
-          "category": "inf",
+          "category": "ci",
           "prerequisites": []
-        },
-        {
-          "code": "INF3245",
-          "name": "Ingeniería Web y Móvil",
-          "credits": 4,
-          "category": "inf",
-          "prerequisites": [
-            "INF3234"
-          ]
-        },
-        {
-          "code": "INF3246",
-          "name": "Experiencia del Usuario",
-          "credits": 3,
-          "category": "inf",
-          "prerequisites": [
-            "INF3235"
-          ]
         },
         {
           "code": "INF3541",
           "name": "Taller de Base de Datos",
           "credits": 3,
-          "category": "inf",
-          "prerequisites": [
-            "INF2235"
-          ]
+          "category": "int",
+          "prerequisites": ["INF2235"]
+        },
+        {
+          "code": "INF3245",
+          "name": "Ingeniería Web y Móvil",
+          "credits": 4,
+          "category": "alg",
+          "prerequisites": ["INF3234"]
+        },
+        {
+          "code": "INF3246",
+          "name": "Experiencia del Usuario",
+          "credits": 3,
+          "category": "sis",
+          "prerequisites": ["INF3235"]
         },
         {
           "code": "ING9003",
           "name": "Inglés 3",
           "credits": 2,
           "category": "eng",
-          "prerequisites": [
-            "ING9002"
-          ]
+          "prerequisites": ["ING9002"]
+        },
+        {
+          "code": "OPT2",
+          "name": "Optativo 2",
+          "credits": 4,
+          "category": "opt",
+          "prerequisites": []
         }
       ]
     },
@@ -307,35 +346,24 @@
       "label": "S7",
       "courses": [
         {
-          "code": "INF4353",
-          "name": "Ciberseguridad",
-          "credits": 4,
-          "category": "inf",
-          "prerequisites": [
-            "INF2324"
-          ]
-        },
-        {
-          "code": "INF4457",
-          "name": "Tecnologías Emergentes",
-          "credits": 4,
-          "category": "inf",
-          "prerequisites": []
-        },
-        {
           "code": "INF4552",
           "name": "Taller de Ingeniería de Software",
           "credits": 4,
-          "category": "inf",
-          "prerequisites": [
-            "INF2237"
-          ]
+          "category": "int",
+          "prerequisites": ["INF2237"]
+        },
+        {
+          "code": "INF4353",
+          "name": "Ciberseguridad",
+          "credits": 4,
+          "category": "red",
+          "prerequisites": ["INF2324"]
         },
         {
           "code": "INF4556",
           "name": "Seminario de Título",
           "credits": 4,
-          "category": "inf",
+          "category": "int",
           "prerequisites": [
             "INF3136",
             "INF3541",
@@ -351,13 +379,25 @@
           ]
         },
         {
+          "code": "INF4457",
+          "name": "Tecnologías Emergentes",
+          "credits": 4,
+          "category": "ges",
+          "prerequisites": []
+        },
+        {
           "code": "ING9004",
           "name": "Inglés 4",
           "credits": 2,
           "category": "eng",
-          "prerequisites": [
-            "ING9003"
-          ]
+          "prerequisites": ["ING9003"]
+        },
+        {
+          "code": "FOFU3",
+          "name": "Formación Fundamental 3",
+          "credits": 2,
+          "category": "fofu",
+          "prerequisites": []
         }
       ]
     },
@@ -369,24 +409,29 @@
           "code": "INF4458",
           "name": "Negocios, Innovación y Emprendimiento",
           "credits": 3,
-          "category": "gen",
-          "prerequisites": []
-        },
-        {
-          "code": "INF4459",
-          "name": "Legislación, Ética y Tecnología",
-          "credits": 3,
-          "category": "gen",
+          "category": "ges",
           "prerequisites": []
         },
         {
           "code": "INF4560",
           "name": "Proyecto de Título",
           "credits": 10,
-          "category": "inf",
-          "prerequisites": [
-            "INF4556"
-          ]
+          "category": "int",
+          "prerequisites": ["INF4556"]
+        },
+        {
+          "code": "INF4459",
+          "name": "Legislación, Ética y Tecnología",
+          "credits": 3,
+          "category": "ges",
+          "prerequisites": []
+        },
+        {
+          "code": "OPT3",
+          "name": "Optativo 3",
+          "credits": 4,
+          "category": "opt",
+          "prerequisites": []
         }
       ]
     }

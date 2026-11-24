@@ -4,5 +4,6 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  server: { port: 5173, proxy: { '/api': 'http://localhost:8000', '/health': 'http://localhost:8000' } },
+  resolve: { alias: { '@fixtures': new URL('../fixtures', import.meta.url).pathname } },
+  server: { port: 5173, fs: { allow: ['..'] }, proxy: { '/api': 'http://localhost:8000', '/health': 'http://localhost:8000' } },
 })
