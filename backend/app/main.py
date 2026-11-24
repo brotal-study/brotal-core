@@ -1,8 +1,23 @@
-"""Entrypoint FastAPI de Brotal. Los routers se registran aqui (Issues #2-#4)."""
+"""Entrypoint FastAPI de Brotal (Issues #2-#4)."""
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Brotal API", version="0.1.0")
+from app.db.database import init_db
+from app.routers import courses, profile, registry, study
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    init_db()
+    yield
+
+
+app = FastAPI(title="Brotal API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,6 +32,7 @@ def health() -> dict[str, str]:
     return {"status": "ok", "version": app.version}
 
 
-# TODO(#2): app.include_router(profile.router, prefix="/api/v1")
-# TODO(#3): app.include_router(registry/careers/courses routers, prefix="/api/v1")
-# TODO(#4): app.include_router(study.router, prefix="/api/v1")
+app.include_router(profile.router, prefix="/api/v1")
+app.include_router(registry.router, prefix="/api/v1")
+app.include_router(courses.router, prefix="/api/v1")
+app.include_router(study.router, prefix="/api/v1")
