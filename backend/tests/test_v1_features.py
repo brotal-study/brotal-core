@@ -562,3 +562,115 @@ def test_tts_timings_endpoint_and_cleanup_on_regenerate(
     assert regen_res.status_code == 200
     after_timings = client.get("/api/v1/study/cl-pucv-inf2324-ccna1/B1-P2/tts-timings").json()
     assert after_timings["timings"] == []
+    # Incluso sin cache en disco, words devuelve tiempos proporcionales por palabra (nunca vacio)
+    assert len(after_timings["words"]) >= 10
+    assert after_timings["words"][0]["start"] == 0.0
+    assert after_timings["words"][0]["end"] > 0.0
+
+
+def test_chat_tutor_injects_nodes_index_and_extracts_suggested_nodes(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import ai_router
+
+    demo_pack = json.loads((fixtures_dir() / "demo_pack.json").read_text(encoding="utf-8"))
+    client.post("/api/v1/courses/install-pack", json=demo_pack)
+
+    def fake_chat(messages: list[dict[str, str]], **_kwargs: Any) -> AiCompletion:
+        sys_msg = messages[0]["content"]
+        # Verifica que el indice de nodos del ramo fue inyectado en el system_prompt
+        assert "[[node:B1-P1|" in sys_msg
+        assert "[[node:B1-P2|" in sys_msg
+        assert "PROHIBIDO usar emojis" in sys_msg
+        return AiCompletion(
+            text=(
+                "Para dominar las capas revisa primero [[node:B1-P1|Topologias y Dispositivos]] "
+                "y luego profundiza en [[node:B1-P2|Modelo OSI vs TCP/IP]]."
+            ),
+            provider="groq",
+            model="llama-3.3-70b-versatile",
+        )
+
+    monkeypatch.setattr(ai_router, "complete_chat", fake_chat)
+
+    res = client.post(
+        "/api/v1/chat/cl-pucv-inf2324-ccna1",
+        json={"message": "¿Donde puedo aprender el modelo OSI?"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert len(data["suggested_nodes"]) == 2
+    assert data["suggested_nodes"][0]["id"] == "B1-P1"
+    assert data["suggested_nodes"][1]["id"] == "B1-P2"
+
+
+def test_pedagogical_styles_in_regenerate_story_and_questions(client: TestClient) -> None:
+    demo_pack = json.loads((fixtures_dir() / "demo_pack.json").read_text(encoding="utf-8"))
+    client.post("/api/v1/courses/install-pack", json=demo_pack)
+
+    # Cambiar perfil a explanation_style='direct' y question_style='direct'
+    p1 = client.patch(
+        "/api/v1/profile",
+        json={"explanation_style": "direct", "question_style": "direct"},
+    )
+    assert p1.status_code == 200
+
+    s_direct = client.post("/api/v1/study/cl-pucv-inf2324-ccna1/B1-P2/regenerate-story")
+    assert s_direct.status_code == 200
+    assert "Imagina" not in s_direct.json()["story_script"]
+
+    q_direct = client.post("/api/v1/study/cl-pucv-inf2324-ccna1/B1-P2/regenerate-questions")
+    assert q_direct.status_code == 200
+    assert len(q_direct.json()["eval_prompts"]) >= 1
+
+    # Cambiar perfil a explanation_style='structured' y question_style='scenario'
+    p2 = client.patch(
+        "/api/v1/profile",
+        json={"explanation_style": "structured", "question_style": "scenario"},
+    )
+    assert p2.status_code == 200
+
+    s_struct = client.post("/api/v1/study/cl-pucv-inf2324-ccna1/B1-P2/regenerate-story")
+    assert s_struct.status_code == 200
+    story_txt = s_struct.json()["story_script"]
+    assert "Concepto central:" in story_txt
+    assert "Causa y efecto:" in story_txt
+    assert "Ejemplo concreto:" in story_txt
+
+    q_scen = client.post("/api/v1/study/cl-pucv-inf2324-ccna1/B1-P2/regenerate-questions")
+    assert q_scen.status_code == 200
+    assert q_scen.json()["eval_prompts"][0]["question"] != q_direct.json()["eval_prompts"][0]["question"]
+
+
+def test_tts_word_boundary_timings_saved_and_returned(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import tts
+
+    demo_pack = json.loads((fixtures_dir() / "demo_pack.json").read_text(encoding="utf-8"))
+    client.post("/api/v1/courses/install-pack", json=demo_pack)
+
+    async def fake_run_edge_tts_words(text: str, voice: str, out_path: Path) -> dict[str, Any]:
+        out_path.write_bytes(b"ID3-WORDS-MP3-" + voice.encode("utf-8"))
+        words = [w for w in text.split() if w][:6]
+        word_events = [
+            {"text": w, "start": round(i * 0.3, 3), "end": round((i + 1) * 0.3, 3)}
+            for i, w in enumerate(words)
+        ]
+        sentences = tts._group_word_boundaries_into_sentences(text, word_events)
+        return {"sentences": sentences, "words": word_events}
+
+    monkeypatch.setattr(tts, "_run_edge_tts", fake_run_edge_tts_words)
+
+    synth = client.post("/api/v1/study/cl-pucv-inf2324-ccna1/B1-P1/tts")
+    assert synth.status_code == 200
+
+    t_res = client.get("/api/v1/study/cl-pucv-inf2324-ccna1/B1-P1/tts-timings")
+    assert t_res.status_code == 200
+    payload = t_res.json()
+    assert len(payload["words"]) == 6
+    assert payload["words"][0]["start"] == 0.0
+    assert payload["words"][0]["end"] == 0.3
+    assert len(payload["sentences"]) >= 1

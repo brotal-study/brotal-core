@@ -103,7 +103,71 @@ def _group_word_boundaries_into_sentences(
     return grouped
 
 
-async def _run_edge_tts(text: str, voice: str, out_path: Path) -> list[dict[str, Any]]:
+def _derive_words_from_sentences(
+    text: str,
+    sentence_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Deriva tiempos proporcionales por palabra dentro de cada oracion cuando edge-tts no emite WordBoundary."""
+    target_sentences = split_story_sentences(text)
+    if not target_sentences:
+        return []
+
+    if len(sentence_events) == len(target_sentences):
+        source_sentences = [
+            {
+                "text": target_sentences[i],
+                "start": float(sentence_events[i].get("start", 0.0)),
+                "end": float(sentence_events[i].get("end", 0.0)),
+            }
+            for i in range(len(target_sentences))
+        ]
+    elif sentence_events:
+        total_end = max(float(sentence_events[-1].get("end", 0.0)), len(target_sentences) * 2.5)
+        total_chars = max(1, sum(len(s) for s in target_sentences))
+        cursor = 0.0
+        source_sentences = []
+        for idx, s in enumerate(target_sentences):
+            dur = (len(s) / total_chars) * total_end
+            end_t = total_end if idx == len(target_sentences) - 1 else round(cursor + dur, 3)
+            source_sentences.append({"text": s, "start": round(cursor, 3), "end": max(round(cursor + 0.1, 3), end_t)})
+            cursor = end_t
+    else:
+        cursor = 0.0
+        source_sentences = []
+        for s in target_sentences:
+            tokens = [w for w in s.split() if w]
+            dur = max(0.8, len(tokens) * 0.34)
+            end_t = round(cursor + dur, 3)
+            source_sentences.append({"text": s, "start": round(cursor, 3), "end": end_t})
+            cursor = end_t
+
+    words_out: list[dict[str, Any]] = []
+    for sent in source_sentences:
+        s_text = str(sent["text"]).strip()
+        tokens = [w for w in re.split(r"\s+", s_text) if w]
+        if not tokens:
+            continue
+        s_start = float(sent["start"])
+        s_end = max(s_start + 0.1, float(sent["end"]))
+        s_dur = s_end - s_start
+        weights = [max(1, len(t)) for t in tokens]
+        total_w = sum(weights)
+        acc = 0
+        for idx, (tok, w) in enumerate(zip(tokens, weights, strict=True)):
+            w_start = s_start + (acc / total_w) * s_dur
+            acc += w
+            w_end = s_end if idx == len(tokens) - 1 else s_start + (acc / total_w) * s_dur
+            words_out.append(
+                {
+                    "text": tok,
+                    "start": round(w_start, 3),
+                    "end": round(max(w_start + 0.04, w_end), 3),
+                }
+            )
+    return words_out
+
+
+async def _run_edge_tts(text: str, voice: str, out_path: Path) -> dict[str, list[dict[str, Any]]]:
     import edge_tts  # type: ignore[import-untyped]
 
     communicate = edge_tts.Communicate(text=text, voice=voice)
@@ -134,11 +198,36 @@ async def _run_edge_tts(text: str, voice: str, out_path: Path) -> list[dict[str,
     if audio_chunks:
         out_path.write_bytes(b"".join(audio_chunks))
 
-    if sentence_events:
-        return sentence_events
-    if word_events:
-        return _group_word_boundaries_into_sentences(text, word_events)
-    return []
+    sentences = (
+        sentence_events
+        if sentence_events
+        else _group_word_boundaries_into_sentences(text, word_events)
+    )
+    words = word_events if word_events else _derive_words_from_sentences(text, sentences)
+    return {"sentences": sentences, "words": words}
+
+
+def _normalize_timings_payload(text: str, raw: Any) -> dict[str, list[dict[str, Any]]]:
+    """Normaliza tanto caches antiguos (lista de sentences) como nuevos ({sentences, words})."""
+    sentences: list[dict[str, Any]] = []
+    words: list[dict[str, Any]] = []
+
+    if isinstance(raw, list):
+        sentences = [x for x in raw if isinstance(x, dict)]
+    elif isinstance(raw, dict):
+        raw_s = raw.get("sentences")
+        raw_w = raw.get("words")
+        if isinstance(raw_s, list):
+            sentences = [x for x in raw_s if isinstance(x, dict)]
+        if isinstance(raw_w, list):
+            words = [x for x in raw_w if isinstance(x, dict)]
+
+    if not sentences and words:
+        sentences = _group_word_boundaries_into_sentences(text, words)
+    if not words:
+        words = _derive_words_from_sentences(text, sentences)
+
+    return {"sentences": sentences, "words": words}
 
 
 async def synthesize_node_tts(
@@ -147,7 +236,7 @@ async def synthesize_node_tts(
     text: str,
     voice: str | None = None,
 ) -> Path:
-    """Devuelve la ruta al MP3 en cache (y guarda .timings.json), o lo sintetiza con edge-tts si no existe."""
+    """Devuelve la ruta al MP3 en cache (y guarda .timings.json con sentences y words), o lo sintetiza con edge-tts."""
     cleaned = text.strip()
     if not cleaned:
         raise TtsSynthesisError("El nodo no tiene story_script para sintetizar.")
@@ -158,7 +247,8 @@ async def synthesize_node_tts(
     timings_path = cached_tts_timings_path(course_id, cleaned, primary_voice)
     if target_path.is_file() and target_path.stat().st_size > 0:
         if not timings_path.is_file():
-            timings_path.write_text("[]", encoding="utf-8")
+            fallback_payload = _normalize_timings_payload(cleaned, {})
+            timings_path.write_text(json.dumps(fallback_payload, ensure_ascii=False), encoding="utf-8")
         return target_path
 
     last_err: Exception | None = None
@@ -168,9 +258,9 @@ async def synthesize_node_tts(
             timings_result = await _run_edge_tts(cleaned, candidate_voice, tmp_path)
             if tmp_path.is_file() and tmp_path.stat().st_size > 0:
                 tmp_path.replace(target_path)
-                timings_list = timings_result if isinstance(timings_result, list) else []
+                normalized = _normalize_timings_payload(cleaned, timings_result)
                 timings_path.write_text(
-                    json.dumps(timings_list, ensure_ascii=False),
+                    json.dumps(normalized, ensure_ascii=False),
                     encoding="utf-8",
                 )
                 return target_path
@@ -183,27 +273,36 @@ async def synthesize_node_tts(
     raise TtsSynthesisError(f"No se pudo sintetizar audio edge-tts: {last_err}") from last_err
 
 
-def get_node_tts_timings(
+def get_node_tts_timings_data(
     *,
     course_id: str,
     text: str,
     voice: str | None = None,
-) -> list[dict[str, Any]]:
-    """Devuelve las marcas de tiempo sincronizadas por oracion [{text, start, end}] o [] para fallback proporcional."""
+) -> dict[str, list[dict[str, Any]]]:
+    """Devuelve {'sentences': [...], 'words': [...]} asegurando que words nunca quede vacio."""
     cleaned = text.strip()
     if not cleaned:
-        return []
+        return {"sentences": [], "words": []}
     voices_to_try = [voice] if voice else list(DEFAULT_VOICES)
     for candidate_voice in voices_to_try:
         t_path = cached_tts_timings_path(course_id, cleaned, candidate_voice)
         if t_path.is_file():
             try:
                 loaded = json.loads(t_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, list):
-                    return loaded
+                return _normalize_timings_payload(cleaned, loaded)
             except json.JSONDecodeError:
-                return []
-    return []
+                break
+    return _normalize_timings_payload(cleaned, {})
+
+
+def get_node_tts_timings(
+    *,
+    course_id: str,
+    text: str,
+    voice: str | None = None,
+) -> list[dict[str, Any]]:
+    """Devuelve las marcas de tiempo sincronizadas por oracion [{text, start, end}]."""
+    return get_node_tts_timings_data(course_id=course_id, text=text, voice=voice)["sentences"]
 
 
 def clear_node_tts_cache(course_id: str, text: str | None = None) -> None:

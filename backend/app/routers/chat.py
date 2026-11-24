@@ -26,6 +26,11 @@ router = APIRouter(tags=["chat"])
 DbConn = Annotated[sqlite3.Connection, Depends(get_conn)]
 
 
+class SuggestedNode(BaseModel):
+    id: str
+    title: str
+
+
 class ChatMessageOut(BaseModel):
     id: int
     course_id: str
@@ -46,6 +51,67 @@ class ChatResponse(BaseModel):
     user_message: ChatMessageOut
     assistant_message: ChatMessageOut
     provider: str
+    suggested_nodes: list[SuggestedNode] = Field(default_factory=list)
+
+
+_NODE_LINK_RE = re.compile(r"\[\[node:([^|\]]+)\|([^\]]+)\]\]")
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"
+    "\U00002702-\U000027B0"
+    "\U00002600-\U000026FF"
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _strip_emojis(text: str) -> str:
+    return _EMOJI_RE.sub("", text).strip()
+
+
+def _load_course_nodes_index(conn: sqlite3.Connection, course_id: str) -> list[dict[str, str | int]]:
+    rows = conn.execute(
+        """
+        SELECT cn.id,
+               cn.title,
+               cn.branch,
+               COALESCE( cn.summary, '' ) AS summary,
+               COALESCE( np.mastery_level, 0 ) AS mastery_level
+        FROM course_nodes cn
+        LEFT JOIN node_progress np
+          ON np.course_id = cn.course_id AND np.node_id = cn.id
+        WHERE cn.course_id = ?
+        ORDER BY cn.rowid ASC;
+        """,
+        (course_id,),
+    ).fetchall()
+    return [
+        {
+            "id": str(r["id"]),
+            "title": str(r["title"]),
+            "branch": str(r["branch"]),
+            "summary": str(r["summary"]),
+            "mastery_level": int(r["mastery_level"]),
+        }
+        for r in rows
+    ]
+
+
+def _extract_suggested_nodes(
+    text: str,
+    nodes_by_id: dict[str, str],
+) -> list[SuggestedNode]:
+    seen: set[str] = set()
+    suggested: list[SuggestedNode] = []
+    for match in _NODE_LINK_RE.finditer(text):
+        raw_id = match.group(1).strip()
+        raw_title = match.group(2).strip()
+        if not raw_id or raw_id in seen:
+            continue
+        seen.add(raw_id)
+        resolved_title = nodes_by_id.get(raw_id, raw_title or raw_id)
+        suggested.append(SuggestedNode(id=raw_id, title=resolved_title))
+    return suggested
 
 
 def _search_fts_chunks(conn: sqlite3.Connection, course_id: str, course_code: str | None, query: str) -> list[str]:
@@ -88,31 +154,46 @@ def _search_fts_chunks(conn: sqlite3.Connection, course_id: str, course_code: st
 def _local_tutor_fallback(
     *,
     course_title: str,
+    node_id: str | None,
     node_title: str | None,
     node_story: str | None,
     node_rubric: list[str],
     fts_snippets: list[str],
+    course_nodes: list[dict[str, str | int]],
     user_msg: str,
 ) -> str:
     parts: list[str] = []
-    if node_title:
-        parts.append(f"Estamos en **{node_title}** ({course_title}).")
+    if node_id and node_title:
+        parts.append(f"Nodo actual: [[node:{node_id}|{node_title}]] ({course_title}).")
+    elif node_title:
+        parts.append(f"Nodo actual: **{node_title}** ({course_title}).")
     else:
-        parts.append(f"Revisando **{course_title}** en modo local (sin API key externa configurada).")
+        parts.append(f"Ramo: **{course_title}** (modo local sin API key externa).")
+
+    # Buscar nodos del arbol relacionados con la consulta del usuario
+    query_tokens = [w.lower() for w in re.split(r"[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ]+", user_msg) if len(w) >= 3]
+    matched_nodes: list[dict[str, str | int]] = []
+    for cn in course_nodes:
+        haystack = f"{cn['id']} {cn['title']} {cn.get('summary', '')}".lower()
+        if query_tokens and any(tok in haystack for tok in query_tokens):
+            matched_nodes.append(cn)
+    if not matched_nodes and course_nodes:
+        matched_nodes = course_nodes[:2]
+
+    if matched_nodes:
+        links = ", ".join(f"[[node:{cn['id']}|{cn['title']}]]" for cn in matched_nodes[:3])
+        parts.append(f"Nodos recomendados en el arbol: {links}.")
 
     if node_story:
         first_para = node_story.strip().split("\n\n")[0]
-        parts.append(f"Sobre tu consulta (*\"{user_msg[:120]}\"*), recuerda la idea central del nodo: {first_para}")
+        parts.append(f"Idea central: {first_para}")
 
     if node_rubric:
-        parts.append("Puntos clave que debes dominar aqui: " + "; ".join(node_rubric[:4]) + ".")
+        parts.append("Criterios clave: " + "; ".join(node_rubric[:4]) + ".")
 
     if fts_snippets:
-        parts.append("Extracto relevante de tus apuntes locales: " + fts_snippets[0][:350])
+        parts.append("Apuntes locales: " + fts_snippets[0][:350])
 
-    parts.append(
-        "Para respuestas generativas abiertas con IA, configura tu clave gratuita de Groq, Gemini u Ollama en el icono de engranaje de la barra superior."
-    )
     return "\n\n".join(parts)
 
 
@@ -202,19 +283,38 @@ def post_chat_message(
     prof = conn.execute("SELECT ai_provider FROM user_profile WHERE id = 1;").fetchone()
     ai_provider = prof["ai_provider"] if prof else "auto"
 
+    course_nodes = _load_course_nodes_index(conn, real_id)
+    nodes_by_id = {str(n["id"]): str(n["title"]) for n in course_nodes}
+    nodes_index_lines = [
+        f"- [[node:{n['id']}|{n['title']}]] (rama: {n['branch']}, dominio: {n['mastery_level']}/3)"
+        for n in course_nodes
+    ]
+
     context_blocks = [f"Ramo: {course_row['title']} ({course_row['course_code'] or real_id})"]
-    if node_title:
-        context_blocks.append(f"Nodo actual: {node_title}")
+    if nodes_index_lines:
+        context_blocks.append("Indice completo de nodos del arbol del ramo:\n" + "\n".join(nodes_index_lines))
+    if node_title and body.node_id:
+        context_blocks.append(f"Nodo actual en pantalla: [[node:{body.node_id}|{node_title}]]")
+    elif node_title:
+        context_blocks.append(f"Nodo actual en pantalla: {node_title}")
     if node_story:
-        context_blocks.append(f"Historia del nodo:\n{node_story[:1500]}")
+        context_blocks.append(f"Historia del nodo actual:\n{node_story[:1500]}")
     if node_rubric:
-        context_blocks.append("Conceptos de rubrica: " + "; ".join(node_rubric))
+        context_blocks.append("Conceptos de rubrica del nodo actual: " + "; ".join(node_rubric))
     if fts_snippets:
         context_blocks.append("Apuntes locales (FTS5):\n" + "\n".join(fts_snippets))
 
     system_prompt = (
-        "Eres el Tutor Socratico Transversal de Brotal. Responde en espanol claro, directo y conversado, "
-        "ayudando al estudiante a razonar sin regalarle respuestas copiables para la evaluacion a ciegas.\n\n"
+        "Eres el Tutor Tecnico de Brotal. Responde en espanol de forma DIRECTA, BREVE Y AL GRANO.\n"
+        "REGLAS ESTRICTAS:\n"
+        "1. PROHIBIDO usar saludos largos, frases de cortesia de relleno o preguntas introductorias innecesarias. "
+        "Empieza la primera linea respondiendo directamente la duda.\n"
+        "2. PROHIBIDO usar emojis.\n"
+        "3. Usa Markdown limpio (negritas, listas puntuales o bloques de codigo cortos cuando aporten claridad).\n"
+        "4. Cada vez que menciones, relaciones o recomiendes un nodo del ramo (por ejemplo si preguntan donde aprender "
+        "o repasar un tema), citalo SIEMPRE con el formato exacto [[node:<ID>|<Titulo>]] "
+        "(ejemplo: [[node:T5|Direccionamiento IPv6]]).\n"
+        "5. Explica con precision tecnica sin entregar respuestas redactadas listas para copiar y pegar en la evaluacion a ciegas.\n\n"
         + "\n\n".join(context_blocks)
     )
 
@@ -224,19 +324,23 @@ def post_chat_message(
     llm_messages.append({"role": "user", "content": user_text})
 
     try:
-        comp = ai_router.complete_chat(llm_messages, preferred_provider=ai_provider, temperature=0.4)
-        reply_text = comp.text
+        comp = ai_router.complete_chat(llm_messages, preferred_provider=ai_provider, temperature=0.3)
+        reply_text = _strip_emojis(comp.text)
         provider_used = comp.provider
     except AiProviderError:
         reply_text = _local_tutor_fallback(
             course_title=course_row["title"],
+            node_id=body.node_id if node_title else None,
             node_title=node_title,
             node_story=node_story,
             node_rubric=node_rubric,
             fts_snippets=fts_snippets,
+            course_nodes=course_nodes,
             user_msg=user_text,
         )
         provider_used = "local_fallback"
+
+    suggested_nodes = _extract_suggested_nodes(reply_text, nodes_by_id)
 
     cur_asst = conn.execute(
         """
@@ -254,6 +358,7 @@ def post_chat_message(
         user_message=ChatMessageOut(**dict(user_row)),
         assistant_message=ChatMessageOut(**dict(asst_row)),
         provider=provider_used,
+        suggested_nodes=suggested_nodes,
     )
 
 

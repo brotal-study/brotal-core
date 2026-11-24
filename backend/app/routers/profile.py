@@ -16,6 +16,7 @@ DbConn = Annotated[sqlite3.Connection, Depends(get_conn)]
 
 
 def _row_to_profile(row: sqlite3.Row) -> Profile:
+    row_keys = set(row.keys())
     return Profile(
         id=row["id"],
         display_name=row["display_name"],
@@ -24,6 +25,8 @@ def _row_to_profile(row: sqlite3.Row) -> Profile:
         cooldown_mode=row["cooldown_mode"],
         theme=row["theme"],
         ai_provider=row["ai_provider"],
+        explanation_style=row["explanation_style"] if "explanation_style" in row_keys else "narrative",
+        question_style=row["question_style"] if "question_style" in row_keys else "direct",
         created_at=row["created_at"],
         providers=ProvidersStatus(**configured_providers()),
     )

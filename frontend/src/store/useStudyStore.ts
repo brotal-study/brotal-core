@@ -1,5 +1,9 @@
 import { create } from 'zustand'
-import { patchProfile } from '../api/curriculum'
+import {
+  patchProfile,
+  type ExplanationStyle,
+  type QuestionStyle,
+} from '../api/curriculum'
 import {
   evaluate as apiEvaluate,
   getTree,
@@ -18,6 +22,12 @@ interface StudyState {
   cooldownMode: CooldownMode
   setCooldownMode: (m: CooldownMode) => void
 
+  explanationStyle: ExplanationStyle
+  setExplanationStyle: (s: ExplanationStyle) => void
+
+  questionStyle: QuestionStyle
+  setQuestionStyle: (s: QuestionStyle) => void
+
   tree: CourseTree | null
   status: 'idle' | 'loading' | 'ready' | 'empty'
   selectedNodeId: string | null
@@ -34,6 +44,18 @@ export const useStudyStore = create<StudyState>()((set, get) => ({
   setCooldownMode: (cooldownMode) => {
     set({ cooldownMode })
     void patchProfile({ cooldown_mode: cooldownMode }).catch(() => undefined)
+  },
+
+  explanationStyle: 'narrative',
+  setExplanationStyle: (explanationStyle) => {
+    set({ explanationStyle })
+    void patchProfile({ explanation_style: explanationStyle }).catch(() => undefined)
+  },
+
+  questionStyle: 'direct',
+  setQuestionStyle: (questionStyle) => {
+    set({ questionStyle })
+    void patchProfile({ question_style: questionStyle }).catch(() => undefined)
   },
 
   tree: null,

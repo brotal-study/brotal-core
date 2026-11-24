@@ -264,6 +264,7 @@ export default function CourseStudyPage() {
         nodeTitle={node?.title ?? null}
         initialPrompt={chatPrompt}
         contextBanner={chatBanner}
+        onSelectNode={requestSelect}
       />
 
       <CourseFilesModal

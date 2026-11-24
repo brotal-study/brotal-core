@@ -79,7 +79,11 @@ export const useAppStore = create<AppState>()((set, get) => ({
     try {
       const [apiProf, userCourses] = await Promise.all([getProfile(), listUserCourses()])
       applyTheme(apiProf.theme)
-      useStudyStore.setState({ cooldownMode: apiProf.cooldown_mode })
+      useStudyStore.setState({
+        cooldownMode: apiProf.cooldown_mode,
+        explanationStyle: apiProf.explanation_style ?? 'narrative',
+        questionStyle: apiProf.question_style ?? 'direct',
+      })
 
       const manualCourses: ManualCourse[] = []
       const statuses: Record<string, CourseStatus> = {}

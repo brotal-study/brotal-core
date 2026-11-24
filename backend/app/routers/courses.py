@@ -208,9 +208,14 @@ async def post_ingest_local(
         raise HTTPException(status_code=400, detail="Debes adjuntar al menos un archivo.")
 
     conn.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1);")
-    prof = conn.execute("SELECT ai_provider, career_id FROM user_profile WHERE id = 1;").fetchone()
+    prof = conn.execute(
+        "SELECT ai_provider, career_id, explanation_style, question_style FROM user_profile WHERE id = 1;"
+    ).fetchone()
     ai_provider = prof["ai_provider"] if prof else "auto"
     effective_career_id = career_id if career_id is not None else (prof["career_id"] if prof else None)
+    prof_keys = set(prof.keys()) if prof else set()
+    explanation_style = prof["explanation_style"] if "explanation_style" in prof_keys else "narrative"
+    question_style = prof["question_style"] if "question_style" in prof_keys else "direct"
 
     file_tuples: list[tuple[str, bytes]] = []
     for up in files:
@@ -227,6 +232,8 @@ async def post_ingest_local(
             files=file_tuples,
             preferred_provider=ai_provider,
             mode=mode,
+            explanation_style=explanation_style,
+            question_style=question_style,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -251,6 +251,19 @@ export default function SkillTree({
     return () => clearTimeout(timer)
   }, [branchFilter, tree.course_id, tree.nodes.length])
 
+  useEffect(() => {
+    if (!selectedId) return
+    const timer = setTimeout(() => {
+      rfRef.current?.fitView({
+        nodes: [{ id: selectedId }],
+        maxZoom: 1.05,
+        padding: 0.9,
+        duration: 350,
+      })
+    }, 45)
+    return () => clearTimeout(timer)
+  }, [selectedId])
+
   const centerTree = () => {
     rfRef.current?.fitView({ padding: 0.22, duration: 300 })
   }
