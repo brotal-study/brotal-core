@@ -1,0 +1,30 @@
+# Secrets
+.env
+.env.*
+!.env.example
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+# Node
+node_modules/
+frontend/dist/
+# Local data (never commit)
+*.db
+*.sqlite
+.brotal/
+tts_cache/
+# Copyrighted/personal material
+*.pdf
+*.pptx
+*.docx
+*.xls
+*.xlsx
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

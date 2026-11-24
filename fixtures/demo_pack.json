@@ -1,0 +1,147 @@
+{
+  "schema_version": "1.0",
+  "id": "cl-pucv-inf2324-ccna1",
+  "course_code": "INF2324",
+  "title": "Redes Computacionales · CCNA 1",
+  "language": "es",
+  "engine_type": "concept_tree",
+  "metadata": {
+    "university_id": "pucv",
+    "career_ids": [
+      "cl-pucv-inf-2022"
+    ],
+    "created_year": 2024,
+    "updated_year": 2026,
+    "version": "0.1.0-demo",
+    "authors": [
+      "ElFruutas"
+    ],
+    "license": "CC-BY-SA-4.0",
+    "world_metaphor": "Edificio NetTower (capas OSI como pisos del edificio)"
+  },
+  "nodes": [
+    {
+      "id": "B1-P2",
+      "parent_ids": [],
+      "branch": "theory",
+      "block": "Bloque 1 · Fundamentos de red",
+      "title": "Modelo OSI vs TCP/IP y organismos de estandarización",
+      "summary": "Por qué existen dos modelos de capas y cuál se usa en la práctica.",
+      "story_script": "Imagina NetTower, un edificio donde cada piso hace un trabajo distinto para que un mensaje llegue de una oficina a otra. El modelo OSI es el plano del arquitecto: siete pisos bien separados, pensado para explicar y para que fabricantes distintos se pongan de acuerdo. Pero el edificio que de verdad se construyó sigue el modelo TCP/IP, que junta varios de esos pisos en cuatro. Los dos describen lo mismo; OSI sirve para razonar con detalle, TCP/IP es lo que realmente corre en Internet. Detrás hay organismos como IEEE, IETF e ISO que escriben las reglas para que un cable o un protocolo de una marca funcione con los de otra.",
+      "eval_prompts": [
+        {
+          "id": "q1",
+          "question": "¿Qué diferencia de diseño hay entre OSI (7 capas) y TCP/IP (4 capas) y cuál se usa operativamente?",
+          "rubric_points": [
+            "Identifica OSI como modelo teórico de referencia",
+            "Identifica TCP/IP como modelo práctico usado en redes reales",
+            "Menciona la diferencia en el número de capas"
+          ]
+        },
+        {
+          "id": "q2",
+          "question": "¿Para qué sirven organismos como IEEE o IETF dentro de las redes?",
+          "rubric_points": [
+            "Explica que definen estándares abiertos",
+            "Relaciona los estándares con la interoperabilidad entre fabricantes"
+          ]
+        }
+      ],
+      "storyboard_ref": null
+    },
+    {
+      "id": "B1-P1",
+      "parent_ids": [
+        "B1-P2"
+      ],
+      "branch": "theory",
+      "block": "Bloque 1 · Fundamentos de red",
+      "title": "PDUs, encapsulación y tránsito por un router (IP vs MAC, TTL)",
+      "summary": "Cómo viaja un paquete entre redes y qué cambia en cada salto.",
+      "story_script": "Desde tu oficina en el piso 3 mandas un informe al edificio vecino. Tu computador arma una PDU: adentro va el mensaje, luego una cabecera IP con origen y destino finales, y por fuera una cabecera Ethernet con las direcciones MAC del siguiente salto. El switch del pasillo solo mira la MAC y empuja el paquete hacia el router de la planta baja. El router abre el sobre Ethernet, lee la IP, le resta 1 al TTL y consulta su tabla de rutas. Luego envuelve el paquete en un sobre Ethernet nuevo con las MAC del siguiente salto. La IP de destino se mantiene durante todo el viaje y las MAC cambian en cada salto. Si el TTL llega a cero, el paquete se descarta y se avisa con un mensaje ICMP Time Exceeded, lo que evita que un paquete dé vueltas para siempre.",
+      "eval_prompts": [
+        {
+          "id": "q1",
+          "question": "¿Qué ocurre con el TTL en cada router y qué pasa cuando llega a cero?",
+          "rubric_points": [
+            "TTL disminuye en 1 por router",
+            "Sirve para evitar bucles infinitos",
+            "Al llegar a 0 se descarta y se envía ICMP Time Exceeded"
+          ]
+        },
+        {
+          "id": "q2",
+          "question": "¿Qué direcciones cambian y cuáles se mantienen cuando un paquete cruza un router?",
+          "rubric_points": [
+            "La IP origen y destino se mantienen",
+            "Las MAC origen y destino se reescriben en cada salto"
+          ]
+        }
+      ],
+      "storyboard_ref": null
+    },
+    {
+      "id": "B2-P1",
+      "parent_ids": [
+        "B1-P1"
+      ],
+      "branch": "theory",
+      "block": "Bloque 2 · Aplicación y Transporte",
+      "title": "Capa de transporte: TCP vs UDP, handshake y control de flujo",
+      "summary": "Qué garantías da TCP, qué sacrifica UDP y cuándo conviene cada uno.",
+      "story_script": "En NetTower hay dos servicios de mensajería interna. TCP es el servicio certificado: antes de enviar nada hace un saludo de tres pasos (SYN, SYN-ACK, ACK), numera cada carta, exige acuse de recibo y ajusta cuántas cartas manda por vez según la capacidad del receptor. Es confiable, pero ese trabajo extra es sobrecarga. UDP es el buzón rápido: tira el mensaje sin saludo ni acuses, no garantiza que llegue ni en orden, pero es liviano. Por eso una descarga de archivos usa TCP, mientras una videollamada o una consulta DNS prefiere UDP: perder un fotograma duele menos que esperar.",
+      "eval_prompts": [
+        {
+          "id": "q1",
+          "question": "¿Por qué TCP genera más sobrecarga que UDP?",
+          "rubric_points": [
+            "Menciona el three-way handshake",
+            "Menciona números de secuencia y ACK",
+            "Menciona control de flujo o confiabilidad extra"
+          ]
+        },
+        {
+          "id": "q2",
+          "question": "Da un caso donde conviene UDP y justifica por qué.",
+          "rubric_points": [
+            "Ejemplo válido (VoIP, streaming, DNS)",
+            "Justifica con latencia sobre confiabilidad"
+          ]
+        }
+      ],
+      "storyboard_ref": null
+    },
+    {
+      "id": "B2-P3",
+      "parent_ids": [
+        "B2-P1"
+      ],
+      "branch": "theory",
+      "block": "Bloque 2 · Aplicación y Transporte",
+      "title": "Correo (SMTP, POP3 vs IMAP) y Archivos (FTP vs TFTP)",
+      "summary": "Qué problema resuelve cada protocolo de capa de aplicación y en qué se diferencian.",
+      "story_script": "En la sala de correos de NetTower, SMTP es el cartero que lleva tus cartas hacia afuera y entre servidores: solo envía. Para leer, hay dos ventanillas. POP3 vacía tu casillero: descarga los mensajes a un solo equipo y normalmente los borra del servidor. IMAP, en cambio, es una vitrina sincronizada: los mensajes se quedan en el servidor y todos tus dispositivos ven lo mismo. En la bodega de archivos pasa algo parecido. FTP es la bodega con control de acceso: usa autenticación, comandos y un canal de datos separado. TFTP es la entrega exprés sin credenciales, usada por ejemplo para cargar configuraciones o firmware en equipos de red dentro de una LAN.",
+      "eval_prompts": [
+        {
+          "id": "q1",
+          "question": "Si lees tu correo desde el celular y el notebook y quieres que siga sincronizado, ¿qué protocolo usas y por qué no POP3?",
+          "rubric_points": [
+            "Identifica IMAP para sincronización en servidor",
+            "Explica que POP3 descarga y suele borrar del servidor",
+            "Distingue que SMTP es para envío, no lectura"
+          ]
+        },
+        {
+          "id": "q2",
+          "question": "¿En qué se diferencian FTP y TFTP?",
+          "rubric_points": [
+            "FTP usa autenticación y más funciones",
+            "TFTP es simple, sin autenticación",
+            "Menciona un uso típico de TFTP"
+          ]
+        }
+      ],
+      "storyboard_ref": null
+    }
+  ]
+}

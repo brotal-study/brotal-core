@@ -1,0 +1,394 @@
+{
+  "schema_version": "1.0",
+  "id": "cl-pucv-inf-2022",
+  "country": "CL",
+  "university": {
+    "id": "pucv",
+    "name": "Pontificia Universidad Católica de Valparaíso",
+    "short_name": "PUCV"
+  },
+  "career": {
+    "name": "Ingeniería en Informática",
+    "plan_year": 2022,
+    "plan_ref": "DRA 6/2022",
+    "updated_at": "2026-11-24"
+  },
+  "categories": [
+    {
+      "id": "inf",
+      "label": "Informática",
+      "color": "#2E7D5B"
+    },
+    {
+      "id": "mat",
+      "label": "Matemáticas y Ciencias",
+      "color": "#2B5B84"
+    },
+    {
+      "id": "eng",
+      "label": "Inglés",
+      "color": "#8C6D1F"
+    },
+    {
+      "id": "gen",
+      "label": "Formación Fundamental",
+      "color": "#8A335C"
+    }
+  ],
+  "semesters": [
+    {
+      "number": 1,
+      "label": "S1",
+      "courses": [
+        {
+          "code": "INF1211",
+          "name": "Fundamentos de Algoritmos",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": []
+        },
+        {
+          "code": "INF1212",
+          "name": "Introducción a la Ingeniería Informática",
+          "credits": 3,
+          "category": "inf",
+          "prerequisites": []
+        },
+        {
+          "code": "INF1413",
+          "name": "Bienestar y Aprendizaje Universitario",
+          "credits": 2,
+          "category": "inf",
+          "prerequisites": []
+        },
+        {
+          "code": "MAT1001",
+          "name": "Fundamentos de Matemáticas para Ingeniería",
+          "credits": 6,
+          "category": "mat",
+          "prerequisites": []
+        }
+      ]
+    },
+    {
+      "number": 2,
+      "label": "S2",
+      "courses": [
+        {
+          "code": "FIN100-14",
+          "name": "Desarrollo Integral y Comunicación para Ingeniería",
+          "credits": 3,
+          "category": "gen",
+          "prerequisites": []
+        },
+        {
+          "code": "INF1214",
+          "name": "Fundamentos de Programación",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": []
+        },
+        {
+          "code": "MAT1002",
+          "name": "Cálculo Diferencial e Integral",
+          "credits": 6,
+          "category": "mat",
+          "prerequisites": []
+        },
+        {
+          "code": "MAT1004",
+          "name": "Álgebra Lineal",
+          "credits": 4,
+          "category": "mat",
+          "prerequisites": []
+        },
+        {
+          "code": "IER010",
+          "name": "Antropología Cristiana",
+          "credits": 2,
+          "category": "gen",
+          "prerequisites": [],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "number": 3,
+      "label": "S3",
+      "courses": [
+        {
+          "code": "FIS1002",
+          "name": "Física para Ingeniería",
+          "credits": 5,
+          "category": "mat",
+          "prerequisites": []
+        },
+        {
+          "code": "INF2223",
+          "name": "Estructura de Datos",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": []
+        },
+        {
+          "code": "INF2322",
+          "name": "Hardware y Sistemas Operativos",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": []
+        },
+        {
+          "code": "IER020",
+          "name": "Ética Cristiana",
+          "credits": 2,
+          "category": "gen",
+          "prerequisites": [],
+          "optional": true
+        },
+        {
+          "code": "ING9000",
+          "name": "Inglés Básico",
+          "credits": 2,
+          "category": "eng",
+          "prerequisites": [],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "number": 4,
+      "label": "S4",
+      "courses": [
+        {
+          "code": "INF2235",
+          "name": "Base de Datos",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": [
+            "INF1214"
+          ]
+        },
+        {
+          "code": "INF2236",
+          "name": "Programación Avanzada",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": [
+            "INF2223"
+          ]
+        },
+        {
+          "code": "INF2237",
+          "name": "Ingeniería de Software",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": [
+            "INF2223"
+          ]
+        },
+        {
+          "code": "INF2324",
+          "name": "Redes de Computadores",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": [
+            "INF2322"
+          ]
+        },
+        {
+          "code": "ING9001",
+          "name": "Inglés 1",
+          "credits": 2,
+          "category": "eng",
+          "prerequisites": []
+        }
+      ]
+    },
+    {
+      "number": 5,
+      "label": "S5",
+      "courses": [
+        {
+          "code": "INF3132",
+          "name": "Economía y Finanzas",
+          "credits": 3,
+          "category": "gen",
+          "prerequisites": []
+        },
+        {
+          "code": "INF3233",
+          "name": "Inteligencia Artificial",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": [
+            "INF2236"
+          ]
+        },
+        {
+          "code": "INF3234",
+          "name": "Modelamiento de Software",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": [
+            "INF2235"
+          ]
+        },
+        {
+          "code": "INF3235",
+          "name": "Ingeniería de Requerimientos",
+          "credits": 3,
+          "category": "inf",
+          "prerequisites": [
+            "INF2237"
+          ]
+        },
+        {
+          "code": "ING9002",
+          "name": "Inglés 2",
+          "credits": 2,
+          "category": "eng",
+          "prerequisites": [
+            "ING9001"
+          ]
+        }
+      ]
+    },
+    {
+      "number": 6,
+      "label": "S6",
+      "courses": [
+        {
+          "code": "INF3136",
+          "name": "Optimización",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": []
+        },
+        {
+          "code": "INF3245",
+          "name": "Ingeniería Web y Móvil",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": [
+            "INF3234"
+          ]
+        },
+        {
+          "code": "INF3246",
+          "name": "Experiencia del Usuario",
+          "credits": 3,
+          "category": "inf",
+          "prerequisites": [
+            "INF3235"
+          ]
+        },
+        {
+          "code": "INF3541",
+          "name": "Taller de Base de Datos",
+          "credits": 3,
+          "category": "inf",
+          "prerequisites": [
+            "INF2235"
+          ]
+        },
+        {
+          "code": "ING9003",
+          "name": "Inglés 3",
+          "credits": 2,
+          "category": "eng",
+          "prerequisites": [
+            "ING9002"
+          ]
+        }
+      ]
+    },
+    {
+      "number": 7,
+      "label": "S7",
+      "courses": [
+        {
+          "code": "INF4353",
+          "name": "Ciberseguridad",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": [
+            "INF2324"
+          ]
+        },
+        {
+          "code": "INF4457",
+          "name": "Tecnologías Emergentes",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": []
+        },
+        {
+          "code": "INF4552",
+          "name": "Taller de Ingeniería de Software",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": [
+            "INF2237"
+          ]
+        },
+        {
+          "code": "INF4556",
+          "name": "Seminario de Título",
+          "credits": 4,
+          "category": "inf",
+          "prerequisites": [
+            "INF3136",
+            "INF3541",
+            "INF3245",
+            "INF3246",
+            "INF3233",
+            "INF2324",
+            "INF1214",
+            "INF1212",
+            "FIS1002",
+            "MAT1004",
+            "MAT1002"
+          ]
+        },
+        {
+          "code": "ING9004",
+          "name": "Inglés 4",
+          "credits": 2,
+          "category": "eng",
+          "prerequisites": [
+            "ING9003"
+          ]
+        }
+      ]
+    },
+    {
+      "number": 8,
+      "label": "S8",
+      "courses": [
+        {
+          "code": "INF4458",
+          "name": "Negocios, Innovación y Emprendimiento",
+          "credits": 3,
+          "category": "gen",
+          "prerequisites": []
+        },
+        {
+          "code": "INF4459",
+          "name": "Legislación, Ética y Tecnología",
+          "credits": 3,
+          "category": "gen",
+          "prerequisites": []
+        },
+        {
+          "code": "INF4560",
+          "name": "Proyecto de Título",
+          "credits": 10,
+          "category": "inf",
+          "prerequisites": [
+            "INF4556"
+          ]
+        }
+      ]
+    }
+  ]
+}
