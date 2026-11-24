@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.schemas.pack import PackNode
+from app.schemas.pack import EvalPrompt, PackNode
 from app.schemas.profile import CooldownMode
 
 
@@ -62,6 +62,13 @@ class RegenerateStoryResponse(BaseModel):
     course_id: str
     node_id: str
     story_script: str
+    provider: str
+
+
+class RegenerateQuestionsResponse(BaseModel):
+    course_id: str
+    node_id: str
+    eval_prompts: list[EvalPrompt]
     provider: str
 
 

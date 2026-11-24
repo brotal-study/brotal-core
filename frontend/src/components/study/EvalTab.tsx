@@ -6,7 +6,10 @@ import {
   Cpu,
   EyeOff,
   Info,
+  Loader2,
   MessageCircle,
+  MessageSquare,
+  RefreshCw,
   RotateCcw,
   Shuffle,
 } from 'lucide-react'
@@ -30,7 +33,9 @@ interface Props {
     answers: { prompt_id: string; text: string }[]
     covered_points?: string[]
   }) => Promise<EvaluateResponse>
+  onRegenerateQuestions: () => Promise<void>
   onBackToStory: () => void
+  onAskTutor: (ctx: { prompt: string; banner: string }) => void
   /** true mientras hay respuestas/revision sin cerrar (para pedir confirmacion al salir). */
   onInProgressChange: (v: boolean) => void
 }
@@ -59,7 +64,9 @@ export default function EvalTab({
   node,
   progress,
   onSubmit,
+  onRegenerateQuestions,
   onBackToStory,
+  onAskTutor,
   onInProgressChange,
 }: Props) {
   const [order, setOrder] = useState(() => shuffled(node.id, node.eval_prompts))
@@ -68,6 +75,11 @@ export default function EvalTab({
   const [covered, setCovered] = useState<Set<string>>(new Set())
   const [result, setResult] = useState<EvaluateResponse | null>(null)
   const [busy, setBusy] = useState(false)
+  const [regeneratingQuestions, setRegeneratingQuestions] = useState(false)
+
+  useEffect(() => {
+    setOrder(shuffled(node.id, node.eval_prompts))
+  }, [node.id, node.eval_prompts])
 
   const cooling = inCooldown(progress)
   const now = useNow(phase === 'result' && cooling)
@@ -93,6 +105,19 @@ export default function EvalTab({
       setPhase('result')
     } finally {
       setBusy(false)
+    }
+  }
+
+  const handleRegenerateQuestions = async () => {
+    setRegeneratingQuestions(true)
+    try {
+      await onRegenerateQuestions()
+      setAnswers({})
+      setCovered(new Set())
+      setResult(null)
+      setPhase('answering')
+    } finally {
+      setRegeneratingQuestions(false)
     }
   }
 
@@ -143,41 +168,81 @@ export default function EvalTab({
   const previewScore = scoreFromFeedback(selfFeedback)
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-800/60 dark:text-slate-300">
-        <EyeOff size={14} /> Historia oculta: responde de memoria, con tus propias palabras. Aprobar requiere{' '}
-        {PASS_SCORE.toFixed(1)} o más.
+    <div className="flex min-w-0 max-w-full flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-800/60 dark:text-slate-300">
+        <span className="inline-flex min-w-0 flex-1 items-center gap-2">
+          <EyeOff size={14} className="shrink-0" />
+          <span className="break-words">
+            Historia oculta: responde de memoria, con tus propias palabras. Aprobar requiere{' '}
+            {PASS_SCORE.toFixed(1)} o más.
+          </span>
+        </span>
+        <button
+          type="button"
+          disabled={busy || regeneratingQuestions}
+          onClick={handleRegenerateQuestions}
+          title="Genera nuevas preguntas socráticas evaluando la misma rúbrica"
+          className="inline-flex shrink-0 items-center gap-1.5 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+        >
+          <RefreshCw size={12} className={regeneratingQuestions ? 'animate-spin' : ''} />
+          {regeneratingQuestions ? 'Generando preguntas...' : 'Nuevas preguntas (IA)'}
+        </button>
       </div>
+
+      {regeneratingQuestions && (
+        <div
+          role="status"
+          className="flex items-center gap-2 rounded-md border border-indigo-200 bg-indigo-50/70 px-3 py-2 text-xs text-indigo-950 dark:border-indigo-800/70 dark:bg-indigo-950/40 dark:text-indigo-200"
+        >
+          <Loader2 size={14} className="shrink-0 animate-spin text-indigo-600 dark:text-indigo-400" />
+          <span>
+            Formulando nuevas preguntas socráticas aplicadas para evaluar los mismos criterios de este nodo...
+          </span>
+        </div>
+      )}
 
       {phase === 'answering' && (
         <>
           {order.map((q, i) => (
-            <label key={q.id} className="flex flex-col gap-1.5">
-              <span className="text-sm font-medium">
+            <label key={q.id} className="flex min-w-0 flex-col gap-1.5">
+              <span className="break-words text-sm font-medium">
                 {i + 1}. {q.question}
               </span>
               <textarea
                 value={answers[q.id] ?? ''}
                 onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
                 rows={4}
-                className="rounded-md border border-slate-300 bg-white p-2 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 dark:border-slate-600 dark:bg-slate-900"
+                className="w-full rounded-md border border-slate-300 bg-white p-2 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 dark:border-slate-600 dark:bg-slate-900"
                 placeholder="Tu respuesta..."
               />
             </label>
           ))}
+
+          {busy && (
+            <div
+              role="status"
+              className="flex items-center gap-2 rounded-md border border-indigo-200 bg-indigo-50/70 px-3 py-2 text-xs text-indigo-950 dark:border-indigo-800/70 dark:bg-indigo-950/40 dark:text-indigo-200"
+            >
+              <Loader2 size={14} className="shrink-0 animate-spin text-indigo-600 dark:text-indigo-400" />
+              <span>
+                Evaluando tus respuestas a ciegas con el Tutor Socrático (verificando puntos de rúbrica e imprecisiones)...
+              </span>
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              disabled={!hasAnswer || busy}
+              disabled={!hasAnswer || busy || regeneratingQuestions}
               onClick={evaluateWithAi}
               className="inline-flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-40 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
             >
-              <Cpu size={15} />
+              {busy ? <Loader2 size={15} className="animate-spin" /> : <Cpu size={15} />}
               {busy ? 'Evaluando respuestas...' : 'Evaluar con Tutor IA (7/10)'}
             </button>
             <button
               type="button"
-              disabled={!hasAnswer || busy}
+              disabled={!hasAnswer || busy || regeneratingQuestions}
               onClick={startSelfReview}
               className="rounded-md border border-slate-300 px-3 py-2 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800"
             >
@@ -196,9 +261,12 @@ export default function EvalTab({
             </span>
           </div>
           {order.map((q) => (
-            <fieldset key={q.id} className="rounded-md border border-slate-200 p-3 dark:border-slate-700">
-              <legend className="px-1 text-sm font-medium">{q.question}</legend>
-              <p className="mb-2 whitespace-pre-wrap rounded bg-slate-100 p-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+            <fieldset
+              key={q.id}
+              className="min-w-0 rounded-md border border-slate-200 p-3 dark:border-slate-700"
+            >
+              <legend className="break-words px-1 text-sm font-medium">{q.question}</legend>
+              <p className="mb-2 whitespace-pre-wrap break-words rounded bg-slate-100 p-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
                 {answers[q.id]?.trim() || 'Sin respuesta'}
               </p>
               <ul className="flex flex-col gap-1.5">
@@ -208,8 +276,15 @@ export default function EvalTab({
                   return (
                     <li key={k}>
                       <label className="flex cursor-pointer items-start gap-2 text-sm">
-                        <input type="checkbox" checked={on} onChange={() => toggle(k)} className="mt-1" />
-                        <span className={`inline-flex items-start gap-1 ${on ? '' : 'text-slate-600 dark:text-slate-400'}`}>
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={() => toggle(k)}
+                          className="mt-1"
+                        />
+                        <span
+                          className={`inline-flex items-start gap-1 break-words ${on ? '' : 'text-slate-600 dark:text-slate-400'}`}
+                        >
                           {on ? (
                             <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-500" />
                           ) : (
@@ -224,7 +299,7 @@ export default function EvalTab({
               </ul>
             </fieldset>
           ))}
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <span className="text-sm">
               Nota:{' '}
               <strong
@@ -249,8 +324,9 @@ export default function EvalTab({
               type="button"
               disabled={busy}
               onClick={confirmSelfReview}
-              className="rounded-md bg-slate-900 px-4 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-40 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
+              className="inline-flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-40 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
             >
+              {busy && <Loader2 size={14} className="animate-spin" />}
               Confirmar nota
             </button>
           </div>
@@ -258,22 +334,39 @@ export default function EvalTab({
       )}
 
       {phase === 'result' && result && (
-        <Result result={result} now={now} onRetry={retry} onBackToStory={onBackToStory} />
+        <Result
+          nodeTitle={node.title}
+          result={result}
+          now={now}
+          regeneratingQuestions={regeneratingQuestions}
+          onRetry={retry}
+          onRegenerateQuestions={handleRegenerateQuestions}
+          onBackToStory={onBackToStory}
+          onAskTutor={onAskTutor}
+        />
       )}
     </div>
   )
 }
 
 function Result({
+  nodeTitle,
   result,
   now,
+  regeneratingQuestions,
   onRetry,
+  onRegenerateQuestions,
   onBackToStory,
+  onAskTutor,
 }: {
+  nodeTitle: string
   result: EvaluateResponse
   now: number
+  regeneratingQuestions: boolean
   onRetry: () => void
+  onRegenerateQuestions: () => Promise<void>
   onBackToStory: () => void
+  onAskTutor: (ctx: { prompt: string; banner: string }) => void
 }) {
   const p = result.progress
   const cooling = inCooldown(p, now)
@@ -305,8 +398,23 @@ function Result({
     message = `No alcanza ${PASS_SCORE.toFixed(1)}. Tu nivel (${p.mastery_level}/3) no baja; repasa lo que faltó y reintenta.`
   }
 
+  const askTutorAboutCorrection = () => {
+    const missedSummary =
+      missed.length > 0
+        ? `Puntos faltantes: ${missed.map((m) => m.point).join('; ')}.`
+        : 'Cubrí todos los puntos de la rúbrica.'
+    const impSummary =
+      imprecisions.length > 0 ? ` Imprecisiones: ${imprecisions.join('; ')}.` : ''
+    const banner = `Corrección en "${nodeTitle}": Nota ${result.score.toFixed(1)}/10. ${missedSummary}${impSummary}`
+    const prompt =
+      missed.length > 0 || imprecisions.length > 0
+        ? `Obtuve ${result.score.toFixed(1)}/10 en "${nodeTitle}". ¿Me puedes explicar con un ejemplo cómo entender lo que me faltó o corregirme la imprecisión?`
+        : `Obtuve ${result.score.toFixed(1)}/10 en "${nodeTitle}". ¿Cómo puedo profundizar este concepto con un caso más avanzado?`
+    onAskTutor({ prompt, banner })
+  }
+
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex min-w-0 flex-col gap-4">
       <div
         className={`flex items-center gap-3 rounded-md border p-3 ${
           result.passed
@@ -319,11 +427,11 @@ function Result({
         ) : (
           <CircleX className="shrink-0 text-rose-600 dark:text-rose-400" />
         )}
-        <div>
+        <div className="min-w-0">
           <div className="text-lg font-semibold">
             {result.score.toFixed(1)} / 10 · {result.passed ? 'Aprobado' : 'No aprobado'}
           </div>
-          <div className="text-sm">{message}</div>
+          <div className="break-words text-sm">{message}</div>
         </div>
       </div>
 
@@ -344,7 +452,7 @@ function Result({
           </div>
           <ul className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-300">
             {coveredPoints.map((c, i) => (
-              <li key={i} className="flex items-start gap-1.5">
+              <li key={i} className="flex items-start gap-1.5 break-words">
                 <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-500" /> {c.point}
               </li>
             ))}
@@ -357,7 +465,7 @@ function Result({
           <div className="mb-1 text-sm font-medium">Qué faltó</div>
           <ul className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-300">
             {missed.map((m, i) => (
-              <li key={i} className="flex items-start gap-1.5">
+              <li key={i} className="flex items-start gap-1.5 break-words">
                 <CircleX size={14} className="mt-0.5 shrink-0 text-rose-500" /> {m.point}
               </li>
             ))}
@@ -370,7 +478,7 @@ function Result({
           <div className="mb-1 text-sm font-medium">Imprecisiones detectadas</div>
           <ul className="flex flex-col gap-1 text-sm text-amber-800 dark:text-amber-300">
             {imprecisions.map((imp, i) => (
-              <li key={i} className="flex items-start gap-1.5">
+              <li key={i} className="flex items-start gap-1.5 break-words">
                 <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-500" /> {imp}
               </li>
             ))}
@@ -383,7 +491,9 @@ function Result({
           <div className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">
             <MessageCircle size={13} /> Re-explicación focalizada
           </div>
-          <p className="leading-relaxed text-slate-700 dark:text-slate-200">{result.re_explanation}</p>
+          <p className="break-words leading-relaxed text-slate-700 dark:text-slate-200">
+            {result.re_explanation}
+          </p>
         </div>
       )}
 
@@ -399,6 +509,23 @@ function Result({
         >
           {result.passed ? <Shuffle size={16} /> : <RotateCcw size={16} />}
           {result.passed ? 'Practicar en orden mezclado' : 'Reintentar en orden mezclado'}
+        </button>
+        <button
+          type="button"
+          disabled={regeneratingQuestions}
+          onClick={onRegenerateQuestions}
+          className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-3.5 py-2 text-sm font-medium hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:hover:bg-slate-800"
+        >
+          <RefreshCw size={15} className={regeneratingQuestions ? 'animate-spin' : ''} />
+          Nuevas preguntas (IA)
+        </button>
+        <button
+          type="button"
+          onClick={askTutorAboutCorrection}
+          className="inline-flex items-center gap-1.5 rounded-md border border-indigo-300 bg-indigo-50 px-3.5 py-2 text-sm font-medium text-indigo-900 hover:bg-indigo-100 dark:border-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-200 dark:hover:bg-indigo-900/60"
+        >
+          <MessageSquare size={15} />
+          Preguntar al tutor sobre esta corrección
         </button>
         <button
           type="button"

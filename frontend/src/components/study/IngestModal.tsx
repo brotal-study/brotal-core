@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   ArrowRight,
   CheckCircle2,
+  Clock,
   FilePlus2,
   FileText,
   Loader2,
@@ -21,6 +22,7 @@ interface Props {
   defaultCode?: string
   defaultTitle?: string
   careerId?: string | null
+  onIngested?: (res: IngestLocalResponse) => void
 }
 
 export default function IngestModal({
@@ -29,6 +31,7 @@ export default function IngestModal({
   defaultCode = '',
   defaultTitle = '',
   careerId = null,
+  onIngested,
 }: Props) {
   const navigate = useNavigate()
   const { setStatus, setActiveCourse, hydrate } = useAppStore()
@@ -39,10 +42,33 @@ export default function IngestModal({
   const [metaphor, setMetaphor] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [busy, setBusy] = useState(false)
+  const [elapsedSec, setElapsedSec] = useState(0)
   const [err, setErr] = useState<string | null>(null)
   const [result, setResult] = useState<IngestLocalResponse | null>(null)
 
+  useEffect(() => {
+    if (open) {
+      setCode(defaultCode)
+      setTitle(defaultTitle)
+      setErr(null)
+    }
+  }, [open, defaultCode, defaultTitle])
+
+  useEffect(() => {
+    if (!busy) {
+      setElapsedSec(0)
+      return
+    }
+    const start = Date.now()
+    const timer = setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - start) / 1000))
+    }, 500)
+    return () => clearInterval(timer)
+  }, [busy])
+
   if (!open) return null
+
+  const activeStep = elapsedSec < 2 ? 1 : elapsedSec < 4 ? 2 : 3
 
   const onFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = Array.from(e.target.files ?? [])
@@ -75,6 +101,7 @@ export default function IngestModal({
       setResult(res)
       setStatus(res.course_code, 'active')
       await hydrate()
+      onIngested?.(res)
     } catch (exc) {
       setErr(exc instanceof Error ? exc.message : 'Error al procesar los archivos.')
     } finally {
@@ -105,7 +132,7 @@ export default function IngestModal({
             <div>
               <h2 className="text-base font-semibold">Ingesta Local de Apuntes (BYOF)</h2>
               <p className="text-xs text-slate-500">
-                Extrae secciones a SQLite FTS5 y genera un árbol de 6 a 12 nodos conversados.
+                Extrae secciones a SQLite FTS5 y genera un árbol de 6 a 16 nodos conversados.
               </p>
             </div>
           </div>
@@ -207,6 +234,35 @@ export default function IngestModal({
               )}
             </div>
 
+            {busy && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex flex-col gap-2 rounded-md border border-indigo-200 bg-indigo-50/70 p-3 text-xs text-indigo-950 dark:border-indigo-800/70 dark:bg-indigo-950/40 dark:text-indigo-200"
+              >
+                <div className="flex items-center justify-between font-medium">
+                  <span className="inline-flex items-center gap-1.5">
+                    <Loader2 size={14} className="animate-spin text-indigo-600 dark:text-indigo-400" />
+                    Procesando tus apuntes...
+                  </span>
+                  <span className="inline-flex items-center gap-1 font-mono text-[11px]">
+                    <Clock size={12} /> {elapsedSec}s
+                  </span>
+                </div>
+                <ol className="space-y-1 text-[11px]">
+                  <li className={activeStep >= 1 ? 'font-semibold' : 'opacity-60'}>
+                    1. Extrayendo texto de {files.length} archivo(s)
+                  </li>
+                  <li className={activeStep >= 2 ? 'font-semibold' : 'opacity-60'}>
+                    2. Indexando secciones en SQLite FTS5
+                  </li>
+                  <li className={activeStep >= 3 ? 'font-semibold' : 'opacity-60'}>
+                    3. Generando árbol y exámenes con IA...
+                  </li>
+                </ol>
+              </div>
+            )}
+
             {err && <p className="text-xs font-medium text-rose-600 dark:text-rose-400">{err}</p>}
 
             <div className="flex justify-end gap-2 border-t border-slate-200 pt-3 dark:border-slate-800">
@@ -224,7 +280,7 @@ export default function IngestModal({
                 className="inline-flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-1.5 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
               >
                 {busy && <Loader2 size={14} className="animate-spin" />}
-                {busy ? 'Extrayendo e indexando...' : 'Generar árbol de estudio'}
+                {busy ? `Procesando (${elapsedSec}s)...` : 'Generar árbol de estudio'}
               </button>
             </div>
           </form>
@@ -261,13 +317,25 @@ export default function IngestModal({
               </ul>
             </div>
 
-            <button
-              type="button"
-              onClick={goToTree}
-              className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
-            >
-              Estudiar ramo ahora <ArrowRight size={16} />
-            </button>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setResult(null)
+                  setFiles([])
+                }}
+                className="rounded-md border border-slate-300 px-3 py-2 text-xs hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
+              >
+                Subir más archivos
+              </button>
+              <button
+                type="button"
+                onClick={goToTree}
+                className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
+              >
+                Estudiar ramo ahora <ArrowRight size={16} />
+              </button>
+            </div>
           </div>
         )}
       </div>

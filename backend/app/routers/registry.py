@@ -73,9 +73,9 @@ def get_career_detail(
     for r in rows:
         code = r["course_code"] or r["id"]
         # Si hay un pack instalado para el mismo codigo, priorizar esa fila
-        if code not in status_by_code or r["source_type"] == "pack":
+        if code not in status_by_code or r["source_type"] == "pack" or r["pack_version"]:
             status_by_code[code] = r["status"]
-        if r["source_type"] == "pack" and r["pack_version"]:
+        if r["pack_version"]:
             installed_packs[code] = r["pack_version"]
 
     statuses: dict[str, CourseStatus] = {}

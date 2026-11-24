@@ -10,19 +10,21 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
 from app.db.database import get_conn
-from app.schemas.pack import PackNode
+from app.schemas.pack import EvalPrompt, PackNode
 from app.schemas.study import (
     CourseTreeResponse,
     EvaluateRequest,
     EvaluateResponse,
     NodeProgress,
     PointFeedback,
+    RegenerateQuestionsResponse,
     RegenerateStoryResponse,
     normalize_answers,
 )
 from app.services.ai_router import (
     AiProviderError,
     evaluate_with_ai,
+    regenerate_questions_with_ai,
     regenerate_story_with_ai,
 )
 from app.services.evaluator import (
@@ -360,6 +362,60 @@ def post_regenerate_story(
         course_id=real_course_id,
         node_id=node_id,
         story_script=new_story,
+        provider=provider,
+    )
+
+
+@router.post("/study/{course_id}/{node_id}/regenerate-questions", response_model=RegenerateQuestionsResponse)
+def post_regenerate_questions(
+    course_id: str,
+    node_id: str,
+    conn: DbConn,
+) -> RegenerateQuestionsResponse:
+    course_row = resolve_course_row(conn, course_id)
+    if course_row is None:
+        raise HTTPException(status_code=404, detail=f"Course '{course_id}' not found")
+
+    real_course_id = course_row["id"]
+    node_row = conn.execute(
+        "SELECT * FROM course_nodes WHERE course_id = ? AND id = ?;",
+        (real_course_id, node_id),
+    ).fetchone()
+    if node_row is None:
+        raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found in course '{course_id}'")
+
+    conn.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1);")
+    prof_row = conn.execute("SELECT ai_provider FROM user_profile WHERE id = 1;").fetchone()
+    ai_provider = prof_row["ai_provider"] if prof_row else "auto"
+
+    eval_prompts: list[dict[str, Any]] = json.loads(node_row["eval_prompts_json"] or "[]")
+    world_metaphor = _extract_world_metaphor(course_row)
+
+    new_prompts_raw, provider = regenerate_questions_with_ai(
+        course_title=course_row["title"],
+        world_metaphor=world_metaphor,
+        node_title=node_row["title"],
+        node_summary=node_row["summary"] or "",
+        story_script=node_row["story_script"] or "",
+        eval_prompts=eval_prompts,
+        preferred_provider=ai_provider,
+    )
+    validated_prompts = [EvalPrompt.model_validate(p) for p in new_prompts_raw]
+
+    conn.execute(
+        "UPDATE course_nodes SET eval_prompts_json = ? WHERE course_id = ? AND id = ?;",
+        (
+            json.dumps([p.model_dump() for p in validated_prompts], ensure_ascii=False),
+            real_course_id,
+            node_id,
+        ),
+    )
+    conn.commit()
+
+    return RegenerateQuestionsResponse(
+        course_id=real_course_id,
+        node_id=node_id,
+        eval_prompts=validated_prompts,
         provider=provider,
     )
 

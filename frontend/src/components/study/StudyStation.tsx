@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { BookOpen, ClipboardCheck, Clock, Dumbbell, Trophy } from 'lucide-react'
+import { BookOpen, ClipboardCheck, Clock, Dumbbell, FlaskConical, Trophy } from 'lucide-react'
 import { inCooldown, type EvaluateResponse, type NodeProgress, type PackNode } from '../../api/study'
 import ConfirmDialog from './ConfirmDialog'
 import EvalTab from './EvalTab'
@@ -17,6 +17,8 @@ interface Props {
     covered_points?: string[]
   }) => Promise<EvaluateResponse>
   onRegenerateStory: () => Promise<void>
+  onRegenerateQuestions: () => Promise<void>
+  onAskTutor: (ctx: { prompt: string; banner: string }) => void
   onInProgressChange: (v: boolean) => void
 }
 
@@ -31,9 +33,12 @@ export default function StudyStation({
   now,
   onSubmit,
   onRegenerateStory,
+  onRegenerateQuestions,
+  onAskTutor,
   onInProgressChange,
 }: Props) {
-  const [tab, setTab] = useState<Tab>('story')
+  const isPractice = node.branch === 'practice'
+  const [tab, setTab] = useState<Tab>(isPractice ? 'eval' : 'story')
   const [inProgress, setInProgress] = useState(false)
   const [askLeave, setAskLeave] = useState(false)
   const lvl = LEVEL_STYLE[progress.mastery_level] ?? LEVEL_STYLE[0]
@@ -58,13 +63,20 @@ export default function StudyStation({
     }`
 
   return (
-    <section className="flex h-full min-h-0 flex-col">
-      <header className="border-b border-slate-200 px-5 pt-4 dark:border-slate-800">
+    <section className="flex h-full min-h-0 min-w-0 max-w-full flex-col overflow-x-hidden">
+      <header className="min-w-0 border-b border-slate-200 px-4 pt-3.5 sm:px-5 sm:pt-4 dark:border-slate-800">
         <div className="flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
-          <span className="truncate">{node.block}</span>
+          <span className="inline-flex min-w-0 items-center gap-1.5 truncate">
+            {isPractice && (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-900 dark:border-amber-700 dark:bg-amber-900/60 dark:text-amber-200">
+                <FlaskConical size={11} /> Examen / Práctica
+              </span>
+            )}
+            <span className="truncate">{node.block}</span>
+          </span>
           <span className="shrink-0 font-mono text-[11px]">{node.id}</span>
         </div>
-        <h2 className="mt-0.5 text-lg font-semibold leading-snug">{node.title}</h2>
+        <h2 className="mt-1 break-words text-lg font-semibold leading-snug">{node.title}</h2>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
           <span className={`rounded-full px-2 py-0.5 font-semibold ${lvl.pill}`}>
             Nivel {progress.mastery_level}/3
@@ -81,7 +93,7 @@ export default function StudyStation({
             </span>
           )}
         </div>
-        <div className="mt-2 flex gap-1" role="tablist">
+        <div className="mt-2 flex flex-wrap gap-1" role="tablist">
           <button
             type="button"
             role="tab"
@@ -89,7 +101,7 @@ export default function StudyStation({
             onClick={goStory}
             className={tabCls(tab === 'story')}
           >
-            <BookOpen size={15} /> Historia
+            <BookOpen size={15} /> {isPractice ? 'Caso / Enunciado' : 'Historia'}
           </button>
           <button
             type="button"
@@ -98,12 +110,12 @@ export default function StudyStation({
             onClick={() => setTab('eval')}
             className={tabCls(tab === 'eval')}
           >
-            <ClipboardCheck size={15} /> Evaluación a ciegas
+            <ClipboardCheck size={15} /> {isPractice ? 'Evaluación / Desafío' : 'Evaluación a ciegas'}
           </button>
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 sm:px-5">
         {tab === 'story' ? (
           <StoryTab
             courseId={courseId}
@@ -111,13 +123,16 @@ export default function StudyStation({
             worldMetaphor={worldMetaphor}
             onEvaluate={() => setTab('eval')}
             onRegenerateStory={onRegenerateStory}
+            onAskTutor={onAskTutor}
           />
         ) : (
           <EvalTab
             node={node}
             progress={progress}
             onSubmit={onSubmit}
+            onRegenerateQuestions={onRegenerateQuestions}
             onBackToStory={() => setTab('story')}
+            onAskTutor={onAskTutor}
             onInProgressChange={handleProgress}
           />
         )}
@@ -127,7 +142,7 @@ export default function StudyStation({
         <ConfirmDialog
           title="Salir de la evaluación"
           message="Si vuelves a la historia se descartan tus respuestas de este intento. ¿Continuar?"
-          confirmLabel="Volver a la historia"
+          confirmLabel={isPractice ? 'Ver Caso / Enunciado' : 'Volver a la historia'}
           cancelLabel="Seguir evaluándome"
           onCancel={() => setAskLeave(false)}
           onConfirm={() => {

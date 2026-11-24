@@ -234,3 +234,32 @@ export async function ingestLocalFiles(params: {
   }
   return (await res.json()) as IngestLocalResponse
 }
+
+export interface CourseFilesResponse {
+  course_id: string
+  files: ProcessedFileSummary[]
+}
+
+export interface DeleteCourseFileResponse {
+  course_id: string
+  deleted_file: string
+  deleted_chunks: number
+  remaining_files: number
+  files: ProcessedFileSummary[]
+}
+
+/** GET /api/v1/courses/{course_id}/files */
+export async function getCourseFiles(courseId: string): Promise<CourseFilesResponse> {
+  return api<CourseFilesResponse>(`/api/v1/courses/${encodeURIComponent(courseId)}/files`)
+}
+
+/** DELETE /api/v1/courses/{course_id}/files/{filename} */
+export async function deleteCourseFile(
+  courseId: string,
+  filename: string,
+): Promise<DeleteCourseFileResponse> {
+  return api<DeleteCourseFileResponse>(
+    `/api/v1/courses/${encodeURIComponent(courseId)}/files/${encodeURIComponent(filename)}`,
+    { method: 'DELETE' },
+  )
+}

@@ -122,6 +122,18 @@ def install_pack(conn: sqlite3.Connection, pack: dict[str, Any]) -> str:
         ),
     )
 
+    new_node_ids = [n.id for n in validated.nodes]
+    if new_node_ids:
+        placeholders = ",".join("?" for _ in new_node_ids)
+        conn.execute(
+            f"DELETE FROM course_nodes WHERE course_id = ? AND id NOT IN ({placeholders});",
+            (course_id, *new_node_ids),
+        )
+        conn.execute(
+            f"DELETE FROM node_progress WHERE course_id = ? AND node_id NOT IN ({placeholders});",
+            (course_id, *new_node_ids),
+        )
+
     for node in validated.nodes:
         conn.execute(
             """

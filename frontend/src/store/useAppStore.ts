@@ -98,7 +98,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
         } else {
           const key = c.course_code ?? c.id
           statuses[key] = c.status
-          if (c.source_type === 'pack' && c.pack_version) {
+          if (c.pack_version) {
             installedPacks[key] = c.pack_version
           }
         }

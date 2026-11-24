@@ -75,6 +75,13 @@ export interface RegenerateStoryResponse {
   provider: string
 }
 
+export interface RegenerateQuestionsResponse {
+  course_id: string
+  node_id: string
+  eval_prompts: EvalPrompt[]
+  provider: string
+}
+
 export interface ChatMessage {
   id: number
   course_id: string
@@ -138,6 +145,17 @@ export async function regenerateStory(
 ): Promise<RegenerateStoryResponse> {
   return api<RegenerateStoryResponse>(
     `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/regenerate-story`,
+    { method: 'POST' },
+  )
+}
+
+/** POST /api/v1/study/{course_id}/{node_id}/regenerate-questions */
+export async function regenerateQuestions(
+  courseId: string,
+  nodeId: string,
+): Promise<RegenerateQuestionsResponse> {
+  return api<RegenerateQuestionsResponse>(
+    `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/regenerate-questions`,
     { method: 'POST' },
   )
 }
