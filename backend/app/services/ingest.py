@@ -24,9 +24,10 @@ from typing import Any
 from app.schemas.pack import CoursePack, PackMetadata
 from app.services import ai_router
 from app.services.ai_router import AiProviderError, extract_json_object
-from app.services.pack_manager import install_pack
+from app.services.pack_manager import install_pack, resolve_course_row
 
 ALLOWED_EXTENSIONS = {".pdf", ".pptx", ".docx", ".md", ".txt"}
+_SEPARATOR_LINE_RE = re.compile(r"(?m)^\s*(?:[-*_]{3,}|={3,})\s*$")
 
 
 @dataclass
@@ -36,8 +37,24 @@ class ExtractedChunk:
     content: str
 
 
+def _is_valid_title(raw: str) -> bool:
+    cleaned = re.sub(r"^[-=*_#:\s.]+|[-=*_#:\s.]+$", "", raw.strip())
+    if not cleaned:
+        return False
+    return sum(1 for c in cleaned if c.isalnum()) >= 3
+
+
+def _sanitize_title(raw: str, fallback: str) -> str:
+    cleaned = re.sub(r"^[-=*_#:\s.]+|[-=*_#:\s.]+$", "", raw.strip())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if sum(1 for c in cleaned if c.isalnum()) < 3:
+        return fallback
+    return cleaned
+
+
 def _clean_text(raw: str) -> str:
     text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    text = _SEPARATOR_LINE_RE.sub("", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
@@ -82,8 +99,9 @@ def extract_chunks_from_bytes(filename: str, data: bytes) -> list[ExtractedChunk
                     if t:
                         lines.append(t)
             txt = _clean_text("\n".join(lines))
-            if txt:
-                sec = f"Slide {idx}: {title_text[:60]}" if title_text else f"Slide {idx}"
+            if txt and sum(1 for c in txt if c.isalnum()) >= 3:
+                clean_slide_title = _sanitize_title(title_text[:60], "")
+                sec = f"Slide {idx}: {clean_slide_title}" if clean_slide_title else f"Slide {idx}"
                 chunks.append(
                     ExtractedChunk(
                         source_file=safe_name,
@@ -101,86 +119,103 @@ def extract_chunks_from_bytes(filename: str, data: bytes) -> list[ExtractedChunk
         sec_idx = 1
         for para in doc.paragraphs:
             t = para.text.strip()
-            if not t:
+            if not t or _SEPARATOR_LINE_RE.match(t):
                 continue
             style_name = (para.style.name if para.style else "").lower()
             if "heading" in style_name or "titulo" in style_name:
                 if current_lines:
-                    chunks.append(
-                        ExtractedChunk(
-                            source_file=safe_name,
-                            section_title=current_title,
-                            content=_clean_text("\n".join(current_lines))[:4000],
+                    body_txt = _clean_text("\n".join(current_lines))[:4000]
+                    if sum(1 for c in body_txt if c.isalnum()) >= 3:
+                        chunks.append(
+                            ExtractedChunk(
+                                source_file=safe_name,
+                                section_title=current_title,
+                                content=body_txt,
+                            )
                         )
-                    )
                     current_lines = []
                 sec_idx += 1
-                current_title = t[:80] or f"Seccion {sec_idx}"
+                current_title = _sanitize_title(t[:80], f"Seccion {sec_idx}")
             else:
                 current_lines.append(t)
                 if sum(len(x) for x in current_lines) >= 2500:
-                    chunks.append(
-                        ExtractedChunk(
-                            source_file=safe_name,
-                            section_title=current_title,
-                            content=_clean_text("\n".join(current_lines))[:4000],
+                    body_txt = _clean_text("\n".join(current_lines))[:4000]
+                    if sum(1 for c in body_txt if c.isalnum()) >= 3:
+                        chunks.append(
+                            ExtractedChunk(
+                                source_file=safe_name,
+                                section_title=current_title,
+                                content=body_txt,
+                            )
                         )
-                    )
                     current_lines = []
                     sec_idx += 1
                     current_title = f"Seccion {sec_idx}"
         if current_lines:
-            chunks.append(
-                ExtractedChunk(
-                    source_file=safe_name,
-                    section_title=current_title,
-                    content=_clean_text("\n".join(current_lines))[:4000],
+            body_txt = _clean_text("\n".join(current_lines))[:4000]
+            if sum(1 for c in body_txt if c.isalnum()) >= 3:
+                chunks.append(
+                    ExtractedChunk(
+                        source_file=safe_name,
+                        section_title=current_title,
+                        content=body_txt,
+                    )
                 )
-            )
 
     else:
         # .md o .txt
         raw_text = data.decode("utf-8", errors="replace")
+        raw_text = _SEPARATOR_LINE_RE.sub("", raw_text)
         parts = re.split(r"(?m)^(?=#{1,3}\s+)", raw_text)
         parts = [p.strip() for p in parts if p.strip()]
         if len(parts) <= 1:
             # Dividir por bloques de parrafos
-            paras = [p.strip() for p in re.split(r"\n{2,}", raw_text) if p.strip()]
+            paras = [p.strip() for p in re.split(r"\n{2,}", raw_text) if p.strip() and _is_valid_title(p)]
             buf: list[str] = []
             sec_idx = 1
             for p in paras:
                 buf.append(p)
                 if sum(len(x) for x in buf) >= 1200:
+                    body_txt = _clean_text("\n\n".join(buf))[:4000]
+                    if sum(1 for c in body_txt if c.isalnum()) >= 3:
+                        chunks.append(
+                            ExtractedChunk(
+                                source_file=safe_name,
+                                section_title=f"Seccion {sec_idx}",
+                                content=body_txt,
+                            )
+                        )
+                    buf = []
+                    sec_idx += 1
+            if buf:
+                body_txt = _clean_text("\n\n".join(buf))[:4000]
+                if sum(1 for c in body_txt if c.isalnum()) >= 3:
                     chunks.append(
                         ExtractedChunk(
                             source_file=safe_name,
                             section_title=f"Seccion {sec_idx}",
-                            content=_clean_text("\n\n".join(buf))[:4000],
+                            content=body_txt,
                         )
                     )
-                    buf = []
-                    sec_idx += 1
-            if buf:
-                chunks.append(
-                    ExtractedChunk(
-                        source_file=safe_name,
-                        section_title=f"Seccion {sec_idx}",
-                        content=_clean_text("\n\n".join(buf))[:4000],
-                    )
-                )
         else:
             for idx, part in enumerate(parts, start=1):
                 first_line, _, rest = part.partition("\n")
-                heading = re.sub(r"^#{1,3}\s*", "", first_line).strip()[:80] or f"Seccion {idx}"
+                raw_heading = re.sub(r"^#{1,3}\s*", "", first_line).strip()[:80]
                 body = _clean_text(rest if rest.strip() else first_line)
-                if body:
-                    chunks.append(
-                        ExtractedChunk(
-                            source_file=safe_name,
-                            section_title=heading,
-                            content=body[:4000],
-                        )
+                if sum(1 for c in body if c.isalnum()) < 3:
+                    continue
+                if not _is_valid_title(raw_heading):
+                    first_body_line = next((ln.strip() for ln in body.splitlines() if _is_valid_title(ln)), "")
+                    heading = _sanitize_title(first_body_line[:65], f"Seccion {idx}")
+                else:
+                    heading = _sanitize_title(raw_heading, f"Seccion {idx}")
+                chunks.append(
+                    ExtractedChunk(
+                        source_file=safe_name,
+                        section_title=heading,
+                        content=body[:4000],
                     )
+                )
 
     if not chunks:
         raise ValueError(f"El archivo '{safe_name}' no contiene texto extraible.")
@@ -255,24 +290,29 @@ def _fallback_nodes_from_chunks(
             parents = ["N1"] if i == theory_count + 1 else [f"N{i - 1}"]
 
         block = "Bloque 1 · Fundamentos Teoricos" if is_theory else "Bloque 2 · Practica y Casos"
-        clean_title = re.sub(r"^(Seccion|Pagina|Slide)\s+\d+[:\s]*", "", sec_title).strip() or f"Concepto {i}"
+        raw_sec = re.sub(r"^(Seccion|Pagina|Slide)\s+\d+[:\s]*", "", sec_title).strip()
+        clean_title = _sanitize_title(raw_sec, f"Concepto {i}")
         title = f"{clean_title[:70]}" if is_theory else f"Taller Practico: {clean_title[:58]}"
 
         key_phrases = [
             s.strip().rstrip(".")
             for s in re.split(r"[.;]\s+|\n+", text_snippet)
-            if len(s.strip()) >= 20
+            if len(s.strip()) >= 20 and _is_valid_title(s)
         ][:3]
         while len(key_phrases) < 2:
             key_phrases.append(f"Explica el rol de {title} dentro de {course_title}")
 
         story_script = _strip_bullet_lists(
-            f"Situemonos en {world_metaphor} para entender por que {title} es una pieza clave de {course_title}. "
-            f"Cuando observamos el funcionamiento en vivo, lo primero que salta a la vista es como se conectan las ideas "
-            f"de tus apuntes: {text_snippet[:550]}\n\n"
-            f"Si lo llevas a un escenario real dentro de {world_metaphor}, no basta con repetir definiciones aisladas. "
-            f"Lo importante es seguir la causa y efecto: {key_phrases[0]}. Ademas, ten presente que {key_phrases[1]}, "
-            f"lo que te permite diagnosticar y resolver problemas de {course_title} con criterio propio."
+            f"Situemonos en {world_metaphor} para entender por que {title} es una pieza fundamental dentro de "
+            f"{course_title}. Cuando observamos el sistema en operacion real, lo primero que salta a la vista es como "
+            f"se encadenan las decisiones tecnicas a partir de tus apuntes: {text_snippet[:480]}.\n\n"
+            f"Si lo llevas a un escenario concreto dentro de {world_metaphor}, no basta con repetir definiciones "
+            f"de memoria. Lo decisivo es seguir la relacion de causa y efecto paso a paso: {key_phrases[0]}. "
+            f"Ademas, ten siempre presente que {key_phrases[1]}, porque esa conexion explica como interactuan "
+            f"los componentes cuando la carga o la complejidad aumentan.\n\n"
+            f"Por eso, al enfrentarte a un caso practico o examen de {course_title} dentro de {world_metaphor}, "
+            f"preguntate primero que invariante protege {title} y que ocurriria si esa pieza fallara; asi podras "
+            f"diagnosticar y justificar tu solucion con criterio propio."
         )
 
         nodes.append(
@@ -357,12 +397,14 @@ def _generate_nodes_with_ai(
         "(ej. 'Examen Parcial 1 · ...', 'Caso Practico / Debugging · ...', 'Simulacro Examen Final'), "
         "conectados en `parent_ids` a los nodos 'theory' que ponen a prueba.\n"
         "REGLAS OBLIGATORIAS:\n"
-        "1. `story_script` DEBE ser una historia conversada continua de 2 a 3 parrafos usando la metafora del mundo "
-        "(`world_metaphor`), explicando causa-efecto y que problema real resuelve cada concepto. PROHIBIDO listas con vinetas.\n"
-        "2. El primer nodo 'theory' lleva `parent_ids: []`. Todos los demas conectan `parent_ids` formando un DAG valido.\n"
-        "3. Cada nodo DEBE incluir `eval_prompts` con 3 a 4 PREGUNTAS SOCRATICAS A CIEGAS (aplicadas, comparativas o de diagnostico, "
+        "1. `story_script` DEBE ser una historia conversada continua de 2 a 3 parrafos (~180 a 240 palabras en total) "
+        "usando la metafora del mundo (`world_metaphor`), explicando causa-efecto y que problema real resuelve cada concepto. "
+        "PROHIBIDO listas con vinetas y saltos bruscos de extension.\n"
+        "2. Ningun titulo (`title`) puede ser una linea separadora (`---`, `===`, `***`) ni tener menos de 3 caracteres alfanumericos.\n"
+        "3. El primer nodo 'theory' lleva `parent_ids: []`. Todos los demas conectan `parent_ids` formando un DAG valido.\n"
+        "4. Cada nodo DEBE incluir `eval_prompts` con 3 a 4 PREGUNTAS SOCRATICAS A CIEGAS (aplicadas, comparativas o de diagnostico, "
         "nunca triviales) y cada pregunta lleva 2 a 3 `rubric_points` concretos y verificables.\n"
-        "4. Cubre TODOS los archivos entregados, no solo el primero.\n"
+        "5. Cubre TODOS los archivos entregados, no solo el primero.\n"
         "Responde UNICAMENTE JSON valido con la clave `nodes`:\n"
         "{\n"
         '  "world_metaphor": "...",\n'
@@ -448,13 +490,18 @@ def _generate_nodes_with_ai(
                     }
                 ]
 
+            safe_title = _sanitize_title(str(n.get("title") or ""), f"Nodo {idx+1} · {course_title}")
+            safe_block = _sanitize_title(
+                str(n.get("block") or ""),
+                "Bloque Practico" if branch == "practice" else "Bloque Conceptual",
+            )
             normalized_nodes.append(
                 {
                     "id": nid,
                     "parent_ids": raw_parents,
                     "branch": branch,
-                    "block": str(n.get("block") or ("Bloque Practico" if branch == "practice" else "Bloque Conceptual")),
-                    "title": str(n.get("title") or f"Nodo {idx+1}"),
+                    "block": safe_block,
+                    "title": safe_title,
                     "summary": str(n.get("summary") or f"Conceptos clave de {course_title}"),
                     "story_script": _strip_bullet_lists(str(n.get("story_script") or "")),
                     "eval_prompts": clean_prompts,
@@ -554,4 +601,73 @@ def ingest_local_files(
         "processed_files": processed_files,
         "provider": provider_used,
         "world_metaphor": metaphor,
+    }
+
+
+def _resolve_fts_course_keys(conn: sqlite3.Connection, course_id_or_code: str) -> tuple[str, list[str]]:
+    row = resolve_course_row(conn, course_id_or_code)
+    keys: set[str] = {course_id_or_code}
+    clean_slug = re.sub(r"[^a-z0-9]+", "-", course_id_or_code.strip().lower()).strip("-")
+    if clean_slug:
+        keys.add(f"local-{clean_slug}")
+    if row is not None:
+        real_id = str(row["id"])
+        keys.add(real_id)
+        if row["course_code"]:
+            keys.add(str(row["course_code"]))
+            code_slug = re.sub(r"[^a-z0-9]+", "-", str(row["course_code"]).strip().lower()).strip("-")
+            if code_slug:
+                keys.add(f"local-{code_slug}")
+    else:
+        real_id = course_id_or_code
+    return real_id, sorted(k for k in keys if k)
+
+
+def list_course_files(conn: sqlite3.Connection, course_id_or_code: str) -> dict[str, Any]:
+    """Lista los archivos unicos indexados en local_chunks_fts para un ramo (por id o course_code)."""
+    real_id, keys = _resolve_fts_course_keys(conn, course_id_or_code)
+    placeholders = ",".join("?" for _ in keys)
+    rows = conn.execute(
+        f"""
+        SELECT source_file AS filename,
+               COUNT(*) AS sections,
+               COALESCE(SUM(LENGTH(content)), 0) AS chars
+        FROM local_chunks_fts
+        WHERE course_id IN ({placeholders})
+        GROUP BY source_file
+        ORDER BY MIN(rowid) ASC;
+        """,
+        tuple(keys),
+    ).fetchall()
+    files = [
+        {
+            "filename": str(r["filename"]),
+            "sections": int(r["sections"]),
+            "chars": int(r["chars"]),
+        }
+        for r in rows
+    ]
+    return {"course_id": real_id, "files": files}
+
+
+def delete_course_file(
+    conn: sqlite3.Connection,
+    course_id_or_code: str,
+    filename: str,
+) -> dict[str, Any]:
+    """Elimina los chunks de un archivo en local_chunks_fts y devuelve cuantos archivos quedan."""
+    real_id, keys = _resolve_fts_course_keys(conn, course_id_or_code)
+    placeholders = ",".join("?" for _ in keys)
+    cur = conn.execute(
+        f"DELETE FROM local_chunks_fts WHERE course_id IN ({placeholders}) AND source_file = ?;",
+        (*keys, filename),
+    )
+    conn.commit()
+    remaining_info = list_course_files(conn, course_id_or_code)
+    return {
+        "course_id": real_id,
+        "deleted_file": filename,
+        "deleted_chunks": cur.rowcount,
+        "remaining_files": len(remaining_info["files"]),
+        "files": remaining_info["files"],
     }

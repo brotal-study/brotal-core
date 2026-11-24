@@ -3,12 +3,14 @@ import { patchProfile } from '../api/curriculum'
 import {
   evaluate as apiEvaluate,
   getTree,
+  regenerateQuestions as apiRegenerateQuestions,
   regenerateStory as apiRegenerateStory,
   resetProgress,
   type CooldownMode,
   type CourseTree,
   type EvaluateRequest,
   type EvaluateResponse,
+  type RegenerateQuestionsResponse,
   type RegenerateStoryResponse,
 } from '../api/study'
 
@@ -23,6 +25,7 @@ interface StudyState {
   select: (nodeId: string | null) => void
   submit: (nodeId: string, req: Omit<EvaluateRequest, 'cooldown_mode'>) => Promise<EvaluateResponse>
   regenerateNodeStory: (nodeId: string) => Promise<RegenerateStoryResponse>
+  regenerateNodeQuestions: (nodeId: string) => Promise<RegenerateQuestionsResponse>
   reset: () => Promise<void>
 }
 
@@ -66,6 +69,18 @@ export const useStudyStore = create<StudyState>()((set, get) => ({
       tree: {
         ...tree,
         nodes: tree.nodes.map((n) => (n.id === nodeId ? { ...n, story_script: res.story_script } : n)),
+      },
+    })
+    return res
+  },
+  regenerateNodeQuestions: async (nodeId) => {
+    const tree = get().tree
+    if (!tree) throw new Error('Arbol no cargado')
+    const res = await apiRegenerateQuestions(tree.course_id, nodeId)
+    set({
+      tree: {
+        ...tree,
+        nodes: tree.nodes.map((n) => (n.id === nodeId ? { ...n, eval_prompts: res.eval_prompts } : n)),
       },
     })
     return res

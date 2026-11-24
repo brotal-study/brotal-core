@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowRight, Check, Download, FilePlus2, Trash2, X } from 'lucide-react'
+import { Archive, ArrowRight, Check, Download, FilePlus2, Trash2, Upload, X } from 'lucide-react'
 import type { Course, CourseStatus, PackSummary } from '../../api/types'
 import { STATUS_LABEL, useAppStore } from '../../store/useAppStore'
 import { statusOf, type StatusMap } from '../../lib/curriculum'
+import CourseFilesPanel from '../study/CourseFilesPanel'
 import IngestModal from '../study/IngestModal'
 
 interface Props {
@@ -18,7 +19,6 @@ const OPTIONS: { value: CourseStatus; label: string }[] = [
   { value: 'pending', label: STATUS_LABEL.pending },
   { value: 'active', label: STATUS_LABEL.active },
   { value: 'passed', label: STATUS_LABEL.passed },
-  { value: 'archived', label: 'Archivar archivos' },
 ]
 
 export default function CourseModal({ course, allCourses, statuses, pack, onClose }: Props) {
@@ -34,8 +34,13 @@ export default function CourseModal({ course, allCourses, statuses, pack, onClos
   } = useAppStore()
   const [busy, setBusy] = useState(false)
   const [ingestOpen, setIngestOpen] = useState(false)
+  const [filesCount, setFilesCount] = useState(0)
+  const [filesRefresh, setFilesRefresh] = useState(0)
+
   const status = statusOf(statuses, course.id)
   const installed = installedPacks[course.code]
+  const hasContentOrFiles = Boolean(installed) || filesCount > 0
+
   const prereqs = course.prerequisites.map((code) => ({
     code,
     name: allCourses.find((c) => c.code === code)?.name ?? code,
@@ -75,7 +80,9 @@ export default function CourseModal({ course, allCourses, statuses, pack, onClos
         </header>
 
         <section>
-          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Prerrequisitos</h3>
+          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Prerrequisitos
+          </h3>
           {prereqs.length === 0 ? (
             <p className="text-sm text-slate-500">Sin prerrequisitos.</p>
           ) : (
@@ -103,33 +110,60 @@ export default function CourseModal({ course, allCourses, statuses, pack, onClos
 
         <section>
           <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Estado</h3>
-          <div className="grid grid-cols-2 gap-2">
-            {OPTIONS.map((o) => (
-              <button
-                key={o.value}
-                type="button"
-                onClick={() => setStatus(course.id, o.value)}
-                className={`rounded-md border px-3 py-1.5 text-sm ${
-                  status === o.value
-                    ? 'border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-900'
-                    : 'border-slate-300 hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800'
-                }`}
-              >
-                {o.label}
-              </button>
-            ))}
+          <div className="grid grid-cols-3 gap-2">
+            {OPTIONS.map((o) => {
+              const isSelected = status === o.value
+              const activeCls =
+                o.value === 'passed'
+                  ? 'border-emerald-600 bg-emerald-600 text-white dark:border-emerald-500 dark:bg-emerald-500 dark:text-slate-950'
+                  : o.value === 'active'
+                    ? 'border-indigo-600 bg-indigo-600 text-white dark:border-indigo-500 dark:bg-indigo-500 dark:text-white'
+                    : 'border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-900'
+              return (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => setStatus(course.id, o.value)}
+                  className={`rounded-md border px-3 py-1.5 text-sm font-medium transition ${
+                    isSelected
+                      ? activeCls
+                      : 'border-slate-300 hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  {o.label}
+                </button>
+              )
+            })}
           </div>
+          {hasContentOrFiles && (
+            <button
+              type="button"
+              onClick={() => {
+                setStatus(course.id, 'archived')
+                setFilesCount(0)
+                setFilesRefresh((n) => n + 1)
+              }}
+              className="mt-2.5 inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+            >
+              <Archive size={13} />
+              Liberar espacio (archivar audios y caché)
+            </button>
+          )}
         </section>
 
         <section className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Pack de estudio</h3>
+          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Pack de estudio
+          </h3>
           {pack ? (
             <div className="space-y-2 text-sm">
               <p className="font-medium">{pack.title}</p>
               <p className="text-xs text-slate-500">
-                Creado {pack.metadata.created_year} · Act. {pack.metadata.updated_year} · v{pack.metadata.version}
+                Creado {pack.metadata.created_year} · Act. {pack.metadata.updated_year} · v
+                {pack.metadata.version}
                 <br />
-                Autor: {pack.metadata.authors.join(', ')} · {pack.node_count} nodos · {pack.metadata.license}
+                Autor: {pack.metadata.authors.join(', ')} · {pack.node_count} nodos ·{' '}
+                {pack.metadata.license}
               </p>
               <div className="flex flex-wrap gap-2">
                 <button
@@ -153,30 +187,53 @@ export default function CourseModal({ course, allCourses, statuses, pack, onClos
                   onClick={() => setIngestOpen(true)}
                   className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-slate-400 px-2.5 py-1.5 text-xs hover:bg-slate-100 dark:hover:bg-slate-800"
                 >
-                  <FilePlus2 size={14} /> Crear desde tus archivos (PDF/PPTX)
+                  <FilePlus2 size={14} /> Subir archivos (PDF/PPTX)
                 </button>
               </div>
             </div>
-          ) : (
+          ) : hasContentOrFiles ? (
             <div className="space-y-2 text-sm">
-              <p className="text-slate-500">No hay un pack comunitario para este ramo.</p>
+              <p className="text-xs text-emerald-700 dark:text-emerald-300">
+                Ruta de estudio activa para este ramo ({installed ? `v${installed}` : 'archivos locales'}).
+              </p>
               <button
                 type="button"
                 onClick={() => setIngestOpen(true)}
-                className="inline-flex items-center gap-2 rounded-md border border-dashed border-slate-400 px-3 py-1.5 text-sm hover:bg-slate-100 dark:hover:bg-slate-800"
+                className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
               >
-                <FilePlus2 size={16} />
-                Crear desde tus archivos (PDF/PPTX)
+                <Upload size={14} />
+                Subir archivos
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3 text-sm">
+              <p className="text-slate-600 dark:text-slate-300">
+                No existen packs comunitarios actualmente. Sube el contenido de tu asignatura y crearemos tu ruta de estudio al momento.
+              </p>
+              <button
+                type="button"
+                onClick={() => setIngestOpen(true)}
+                className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-indigo-500 dark:bg-indigo-500 dark:hover:bg-indigo-400"
+              >
+                <Upload size={16} />
+                Subir archivos
               </button>
             </div>
           )}
         </section>
 
+        <CourseFilesPanel
+          courseId={course.code || course.id}
+          refreshTrigger={filesRefresh}
+          onFilesChange={setFilesCount}
+          onOpenIngest={() => setIngestOpen(true)}
+        />
+
         <div className="mt-auto flex flex-col gap-2">
           <button
             type="button"
             onClick={enter}
-            className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
+            className="inline-flex items-center justify-center gap-2 rounded-md bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 dark:bg-indigo-500 dark:hover:bg-indigo-400"
           >
             Entrar al Árbol de Estudio
             <ArrowRight size={16} />
@@ -202,6 +259,7 @@ export default function CourseModal({ course, allCourses, statuses, pack, onClos
         defaultCode={course.code}
         defaultTitle={course.name}
         careerId={profile?.careerId ?? null}
+        onIngested={() => setFilesRefresh((n) => n + 1)}
       />
     </div>
   )

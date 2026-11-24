@@ -22,7 +22,11 @@ from pydantic import ValidationError
 from app.db.database import get_conn
 from app.schemas.career import CourseStatus
 from app.schemas.pack import CourseOut, CoursePatch, ManualCourseCreate
-from app.services.ingest import ingest_local_files
+from app.services.ingest import (
+    delete_course_file,
+    ingest_local_files,
+    list_course_files,
+)
 from app.services.pack_manager import (
     archive_course,
     ensure_career_installed,
@@ -282,3 +286,23 @@ def get_export_pack(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/courses/{course_id}/files")
+def get_course_files(
+    course_id: str,
+    conn: DbConn,
+) -> dict[str, Any]:
+    return list_course_files(conn, course_id)
+
+
+@router.delete("/courses/{course_id}/files/{filename}")
+def remove_course_file(
+    course_id: str,
+    filename: str,
+    conn: DbConn,
+) -> dict[str, Any]:
+    res = delete_course_file(conn, course_id, filename)
+    if res["deleted_chunks"] == 0:
+        raise HTTPException(status_code=404, detail=f"File '{filename}' not found in course '{course_id}'")
+    return res

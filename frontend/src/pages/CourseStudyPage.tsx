@@ -1,19 +1,37 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { Home, MessageSquare, RotateCcw } from 'lucide-react'
+import { FolderOpen, Home, MessageSquare, RotateCcw } from 'lucide-react'
 import { inCooldown, type CooldownMode } from '../api/study'
 import { selectCourses, useAppStore } from '../store/useAppStore'
 import { useStudyStore } from '../store/useStudyStore'
 import ChatDrawer from '../components/layout/ChatDrawer'
 import ConfirmDialog from '../components/study/ConfirmDialog'
+import { CourseFilesModal } from '../components/study/CourseFilesPanel'
 import EmptyCourse from '../components/study/EmptyCourse'
-import SkillTree from '../components/study/SkillTree'
+import IngestModal from '../components/study/IngestModal'
+import SkillTree, { type TreeBranchFilter } from '../components/study/SkillTree'
 import StudyStation from '../components/study/StudyStation'
 import { useNow } from '../components/study/studyUtils'
 
-const MODES: { id: CooldownMode; label: string; hint: string }[] = [
-  { id: 'semester', label: 'Modo Semestre', hint: 'Cooldown de 7 días entre validaciones' },
-  { id: 'urgency', label: 'Modo Urgencia', hint: 'Cooldown de 30 s (demo)' },
+const MODES: { id: CooldownMode; label: string; hint: string; activeNote: string }[] = [
+  {
+    id: 'semester',
+    label: 'Repaso Espaciado (7d)',
+    hint: 'Cooldown de 7 días entre validaciones',
+    activeNote: 'Sube nivel 0/3->3/3 tras 7 días',
+  },
+  {
+    id: 'urgency',
+    label: 'Repaso Rápido (examen)',
+    hint: 'Modo examen: 30 s entre validaciones',
+    activeNote: 'Modo examen: 30 s entre validaciones',
+  },
+]
+
+const BRANCH_FILTERS: { id: TreeBranchFilter; label: string }[] = [
+  { id: 'all', label: 'Completo' },
+  { id: 'theory', label: 'Teoría' },
+  { id: 'practice', label: 'Práctica' },
 ]
 
 export default function CourseStudyPage() {
@@ -30,12 +48,19 @@ export default function CourseStudyPage() {
     select,
     submit,
     regenerateNodeStory,
+    regenerateNodeQuestions,
     reset,
   } = useStudyStore()
   const [inProgress, setInProgress] = useState(false)
   const [pendingNode, setPendingNode] = useState<string | null>(null)
   const [askReset, setAskReset] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
+  const [chatPrompt, setChatPrompt] = useState<string | null>(null)
+  const [chatBanner, setChatBanner] = useState<string | null>(null)
+  const [filesOpen, setFilesOpen] = useState(false)
+  const [ingestOpen, setIngestOpen] = useState(false)
+  const [filesRefresh, setFilesRefresh] = useState(0)
+  const [branchFilter, setBranchFilter] = useState<TreeBranchFilter>('all')
 
   const course = selectCourses({ career, profile, manualCourses }).find((c) => c.id === id)
   const lookupKey = course?.code ?? id
@@ -66,79 +91,146 @@ export default function CourseStudyPage() {
     return <main className="p-6 text-sm text-slate-500">Cargando árbol...</main>
   }
   if (status === 'empty' || !tree) {
-    return <EmptyCourse name={course ? course.name : 'Ramo no encontrado'} code={course?.code ?? id} />
+    return (
+      <EmptyCourse name={course ? course.name : 'Ramo no encontrado'} code={course?.code ?? id} />
+    )
   }
 
   const node = tree.nodes.find((n) => n.id === selectedNodeId) ?? null
+  const activeModeMeta = MODES.find((m) => m.id === cooldownMode) ?? MODES[0]
+
   const requestSelect = (nid: string) => {
     if (nid === selectedNodeId) return
     if (inProgress) setPendingNode(nid)
     else select(nid)
   }
 
+  const openContextualTutor = (ctx: { prompt: string; banner: string }) => {
+    setChatPrompt(ctx.prompt)
+    setChatBanner(ctx.banner)
+    setChatOpen(true)
+  }
+
   return (
-    <div className="flex min-h-[calc(100vh-53px)] flex-col overflow-x-hidden lg:h-[calc(100vh-53px)] lg:min-h-0">
+    <div className="flex min-h-[calc(100vh-53px)] w-full max-w-full flex-col overflow-x-hidden lg:h-[calc(100vh-53px)] lg:min-h-0">
       {/* Barra del ramo */}
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-slate-200 px-4 py-2 dark:border-slate-800">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-semibold">{tree.title}</div>
-          <div className="font-mono text-[11px] text-slate-500">{tree.course_code}</div>
-        </div>
-        <div className="flex min-w-48 flex-1 flex-col gap-1">
-          <div className="text-xs text-slate-600 dark:text-slate-300">
-            Dominados {stats.mastered}/{stats.total} en 3/3 · Progreso del árbol {stats.pct}%
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-slate-200 px-3 py-2 sm:px-4 dark:border-slate-800">
+        <div className="flex min-w-0 flex-wrap items-center gap-3">
+          <div className="min-w-0 max-w-xs sm:max-w-sm">
+            <div className="truncate text-sm font-semibold">{tree.title}</div>
+            <div className="font-mono text-[11px] text-slate-500">{tree.course_code}</div>
           </div>
-          <div className="h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
-            <div className="h-full bg-emerald-500 transition-all" style={{ width: `${stats.pct}%` }} />
+
+          <div className="flex w-44 flex-col gap-1 sm:w-52">
+            <div className="truncate text-[11px] text-slate-600 dark:text-slate-300">
+              Dominados {stats.mastered}/{stats.total} (3/3) · {stats.pct}%
+            </div>
+            <div className="h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+              <div
+                className="h-full bg-emerald-500 transition-all"
+                style={{ width: `${stats.pct}%` }}
+              />
+            </div>
+          </div>
+
+          <div
+            className="inline-flex rounded-md border border-slate-300 p-0.5 dark:border-slate-600"
+            role="group"
+            aria-label="Filtro de ramas del árbol"
+          >
+            {BRANCH_FILTERS.map((bf) => (
+              <button
+                key={bf.id}
+                type="button"
+                aria-pressed={branchFilter === bf.id}
+                onClick={() => setBranchFilter(bf.id)}
+                className={`rounded px-2 py-1 text-xs font-medium ${
+                  branchFilter === bf.id
+                    ? 'bg-indigo-600 text-white dark:bg-indigo-500'
+                    : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
+                }`}
+              >
+                {bf.label}
+              </button>
+            ))}
           </div>
         </div>
-        <div
-          className="inline-flex rounded-md border border-slate-300 p-0.5 dark:border-slate-600"
-          role="group"
-          aria-label="Modo de cooldown"
-        >
-          {MODES.map((m) => (
-            <button
-              key={m.id}
-              type="button"
-              title={m.hint}
-              aria-pressed={cooldownMode === m.id}
-              onClick={() => setCooldownMode(m.id)}
-              className={`rounded px-2.5 py-1 text-xs font-medium ${
-                cooldownMode === m.id
-                  ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
-                  : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
-              }`}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <div
+              className="inline-flex rounded-md border border-slate-300 p-0.5 dark:border-slate-600"
+              role="group"
+              aria-label="Modo de cooldown"
             >
-              {m.label}
-            </button>
-          ))}
+              {MODES.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  title={m.hint}
+                  aria-pressed={cooldownMode === m.id}
+                  onClick={() => setCooldownMode(m.id)}
+                  className={`rounded px-2 py-1 text-xs font-medium ${
+                    cooldownMode === m.id
+                      ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
+                      : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+              {activeModeMeta.activeNote}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setFilesOpen(true)}
+            className="inline-flex items-center gap-1 rounded border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            <FolderOpen size={13} /> Archivos
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setChatPrompt(null)
+              setChatBanner(null)
+              setChatOpen(true)
+            }}
+            className="inline-flex items-center gap-1 rounded border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            <MessageSquare size={13} /> Tutor del ramo
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setAskReset(true)}
+            title="Borra el progreso local de este ramo"
+            className="inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800"
+          >
+            <RotateCcw size={13} /> Reiniciar progreso
+          </button>
+
+          <Link to="/" className="inline-flex items-center gap-1 text-xs font-medium underline">
+            <Home size={13} /> Mi Malla
+          </Link>
         </div>
-        <button
-          type="button"
-          onClick={() => setChatOpen(true)}
-          className="inline-flex items-center gap-1 rounded border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
-        >
-          <MessageSquare size={13} /> Tutor del ramo
-        </button>
-        <button
-          type="button"
-          onClick={() => setAskReset(true)}
-          title="Borra el progreso local de este ramo (solo demo)"
-          className="inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800"
-        >
-          <RotateCcw size={13} /> Reiniciar progreso
-        </button>
-        <Link to="/" className="inline-flex items-center gap-1 text-xs underline">
-          <Home size={13} /> Mi Malla
-        </Link>
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        <div className="h-[48vh] min-h-[340px] min-w-0 border-b border-slate-200 lg:h-auto lg:min-h-0 lg:basis-[58%] lg:border-b-0 lg:border-r dark:border-slate-800">
-          <SkillTree tree={tree} selectedId={selectedNodeId} now={now} onSelect={requestSelect} />
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:flex-row">
+        <div className="h-[48vh] min-h-[340px] min-w-0 border-b border-slate-200 lg:h-auto lg:min-h-0 lg:basis-[56%] lg:border-b-0 lg:border-r dark:border-slate-800">
+          <SkillTree
+            tree={tree}
+            selectedId={selectedNodeId}
+            branchFilter={branchFilter}
+            now={now}
+            onSelect={requestSelect}
+          />
         </div>
-        <div className="min-h-0 min-w-0 flex-1 lg:basis-[42%]">
+        <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden lg:basis-[44%]">
           {node ? (
             <StudyStation
               key={node.id}
@@ -151,6 +243,10 @@ export default function CourseStudyPage() {
               onRegenerateStory={async () => {
                 await regenerateNodeStory(node.id)
               }}
+              onRegenerateQuestions={async () => {
+                await regenerateNodeQuestions(node.id)
+              }}
+              onAskTutor={openContextualTutor}
               onInProgressChange={setInProgress}
             />
           ) : (
@@ -166,6 +262,32 @@ export default function CourseStudyPage() {
         courseTitle={tree.title}
         nodeId={selectedNodeId}
         nodeTitle={node?.title ?? null}
+        initialPrompt={chatPrompt}
+        contextBanner={chatBanner}
+      />
+
+      <CourseFilesModal
+        open={filesOpen}
+        onClose={() => setFilesOpen(false)}
+        courseId={tree.course_code || tree.course_id}
+        courseTitle={tree.title}
+        refreshTrigger={filesRefresh}
+        onOpenIngest={() => {
+          setFilesOpen(false)
+          setIngestOpen(true)
+        }}
+      />
+
+      <IngestModal
+        open={ingestOpen}
+        onClose={() => setIngestOpen(false)}
+        defaultCode={tree.course_code}
+        defaultTitle={tree.title}
+        careerId={profile?.careerId ?? null}
+        onIngested={() => {
+          setFilesRefresh((n) => n + 1)
+          void load(lookupKey)
+        }}
       />
 
       {pendingNode && (

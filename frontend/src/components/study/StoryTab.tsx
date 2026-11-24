@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import {
   FastForward,
   Gauge,
+  Loader2,
+  MessageSquare,
   Pause,
   Play,
   RefreshCw,
@@ -19,6 +21,7 @@ interface Props {
   worldMetaphor: string | null
   onEvaluate: () => void
   onRegenerateStory: () => Promise<void>
+  onAskTutor: (ctx: { prompt: string; banner: string }) => void
 }
 
 function formatTime(sec: number): string {
@@ -34,6 +37,7 @@ export default function StoryTab({
   worldMetaphor,
   onEvaluate,
   onRegenerateStory,
+  onAskTutor,
 }: Props) {
   const speech = useSpeech(node.story_script)
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -164,14 +168,14 @@ export default function StoryTab({
   const isPlaying = mode === 'fallback' ? speech.state === 'playing' : playing
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex min-w-0 max-w-full flex-col gap-4">
       {worldMetaphor && (
-        <div className="flex items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800/60">
-          <div>
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800/60">
+          <div className="min-w-0 flex-1">
             <span className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
               Mundo
             </span>
-            <div className="font-medium">{worldMetaphor}</div>
+            <div className="break-words font-medium">{worldMetaphor}</div>
           </div>
           <button
             type="button"
@@ -187,8 +191,10 @@ export default function StoryTab({
       )}
 
       {!worldMetaphor && (
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-sm text-slate-600 dark:text-slate-300">{node.summary}</p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="min-w-0 flex-1 break-words text-sm text-slate-600 dark:text-slate-300">
+            {node.summary}
+          </p>
           <button
             type="button"
             disabled={regenerating}
@@ -201,7 +207,21 @@ export default function StoryTab({
         </div>
       )}
 
-      {worldMetaphor && <p className="text-sm text-slate-600 dark:text-slate-300">{node.summary}</p>}
+      {worldMetaphor && (
+        <p className="break-words text-sm text-slate-600 dark:text-slate-300">{node.summary}</p>
+      )}
+
+      {regenerating && (
+        <div
+          role="status"
+          className="flex items-center gap-2 rounded-md border border-indigo-200 bg-indigo-50/70 px-3 py-2 text-xs text-indigo-950 dark:border-indigo-800/70 dark:bg-indigo-950/40 dark:text-indigo-200"
+        >
+          <Loader2 size={14} className=" shrink-0 animate-spin text-indigo-600 dark:text-indigo-400" />
+          <span>
+            Redactando otra explicación conversada (~200 palabras) con nuevo enfoque sobre la metáfora del ramo...
+          </span>
+        </div>
+      )}
 
       <div className="flex flex-col gap-2 rounded-md border border-slate-200 p-2.5 dark:border-slate-700">
         <div className="flex flex-wrap items-center gap-2">
@@ -212,7 +232,13 @@ export default function StoryTab({
             onClick={togglePlay}
             className="inline-flex items-center gap-1 rounded border border-slate-300 px-2.5 py-1 text-xs font-medium hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:hover:bg-slate-800"
           >
-            {isPlaying ? <Pause size={14} /> : <Play size={14} />}
+            {loadingAudio ? (
+              <Loader2 size={14} className="animate-spin" />
+            ) : isPlaying ? (
+              <Pause size={14} />
+            ) : (
+              <Play size={14} />
+            )}
             {loadingAudio ? 'Sintetizando voz...' : isPlaying ? 'Pausar' : 'Escuchar'}
           </button>
           <button
@@ -262,6 +288,16 @@ export default function StoryTab({
           </label>
         </div>
 
+        {loadingAudio && (
+          <div
+            role="status"
+            className="flex items-center gap-2 rounded bg-slate-100 px-2.5 py-1.5 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-200"
+          >
+            <Loader2 size={13} className="shrink-0 animate-spin" />
+            <span>Generando audio neural en español con edge-tts y guardando en caché local...</span>
+          </div>
+        )}
+
         {mode === 'neural' && (
           <div className="flex items-center gap-2 text-xs text-slate-500">
             <span className="w-9 font-mono text-[11px]">{formatTime(currentTime)}</span>
@@ -287,19 +323,35 @@ export default function StoryTab({
         </span>
       </div>
 
-      <article className="flex flex-col gap-3 text-[15px] leading-relaxed">
+      <article className="flex min-w-0 flex-col gap-3 break-words text-[15px] leading-relaxed">
         {paragraphs.map((p, i) => (
-          <p key={i}>{p}</p>
+          <p key={i} className="break-words">
+            {p}
+          </p>
         ))}
       </article>
 
-      <button
-        type="button"
-        onClick={onEvaluate}
-        className="inline-flex items-center justify-center gap-2 self-start rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
-      >
-        <Swords size={16} /> Evaluarme a ciegas
-      </button>
+      <div className="flex flex-wrap items-center gap-2 pt-1">
+        <button
+          type="button"
+          onClick={onEvaluate}
+          className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
+        >
+          <Swords size={16} /> Evaluarme a ciegas
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            onAskTutor({
+              prompt: `Tengo una duda sobre la explicación de "${node.title}": `,
+              banner: `Consultando sobre la historia del nodo "${node.title}" (${node.block}).`,
+            })
+          }
+          className="inline-flex items-center justify-center gap-1.5 rounded-md border border-slate-300 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
+        >
+          <MessageSquare size={15} /> Tengo una duda sobre esta historia
+        </button>
+      </div>
     </div>
   )
 }

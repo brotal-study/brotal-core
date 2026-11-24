@@ -382,6 +382,21 @@ def evaluate_with_ai(
     }
 
 
+def _strip_bullets(story: str) -> str:
+    lines = story.splitlines()
+    cleaned_lines: list[str] = []
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            cleaned_lines.append("")
+            continue
+        s = re.sub(r"^[-*•]\s+", "", s)
+        s = re.sub(r"^\d+[.)]\s+", "", s)
+        cleaned_lines.append(s)
+    prose = "\n".join(cleaned_lines)
+    return re.sub(r"\n{3,}", "\n\n", prose).strip()
+
+
 def regenerate_story_with_ai(
     *,
     course_title: str,
@@ -394,6 +409,7 @@ def regenerate_story_with_ai(
 ) -> tuple[str, str]:
     """Genera una explicacion conversada alternativa manteniendo el world_metaphor del ramo.
 
+    Siempre 2 a 3 parrafos conversados continuos (~180-240 palabras en total), sin listas con vinetas.
     Si no hay IA configurada, genera una analogia conversada determinista alternativa para no fallar offline.
     Devuelve (new_story_script, provider_used).
     """
@@ -407,16 +423,19 @@ def regenerate_story_with_ai(
     try:
         system_prompt = (
             "Eres el narrador pedagogico de Brotal. Tu tarea es explicar un concepto universitario "
-            "como una historia conversada continua en espanol, usando otra analogia o angulo fresco "
-            "pero respetando la metafora de mundo del ramo. PROHIBIDO usar listas con bullets o markdown seco: "
-            "solo 2 a 4 parrafos conversados naturales que cubran todos los conceptos clave de la rubrica."
+            "como una historia conversada continua en espanol de 2 a 3 parrafos (~180 a 240 palabras en total), "
+            "usando otro angulo o caso dentro de la metafora del mundo (`world_metaphor`) del ramo, explicando "
+            "causa-efecto y que problema real resuelve. PROHIBIDO usar listas con vinetas, numeraciones o saltos "
+            "bruscos de extension: entrega unicamente los 2 a 3 parrafos conversados naturales que cubran todos "
+            "los conceptos clave de la rubrica."
         )
         user_prompt = (
             f"Ramo: {course_title}\n"
             f"Metafora del mundo: {metaphor_hint}\n"
             f"Nodo: {node_title} ({node_summary})\n"
             f"Conceptos que deben quedar claros en la narrativa: {', '.join(rubric_points)}\n"
-            f"Historia anterior (usa otro enfoque/ejemplo distinto a este):\n{current_story}\n"
+            f"Historia anterior (usa otro enfoque/ejemplo distinto manteniendo ~180-240 palabras en 2 a 3 parrafos):\n"
+            f"{current_story}\n"
         )
         comp = complete_chat(
             [
@@ -425,18 +444,119 @@ def regenerate_story_with_ai(
             ],
             preferred_provider=preferred_provider,
             json_mode=False,
-            temperature=0.65,
+            temperature=0.6,
         )
-        return (comp.text.strip(), comp.provider)
+        return (_strip_bullets(comp.text), comp.provider)
     except AiProviderError:
-        # Fallback local conversado alternativo
+        # Fallback local conversado alternativo (2-3 parrafos, ~190-220 palabras)
         concepts_prose = ". Ademas, observa como ".join(rubric_points) if rubric_points else node_summary
-        alt = (
-            f"Miralo ahora desde otro angulo dentro de {metaphor_hint}. Cuando nos enfrentamos a {node_title}, "
-            f"el error tipico es quedarse en la definicion de memoria en vez de seguir el flujo real del problema: "
-            f"{node_summary}\n\n"
-            f"Imagina que tienes que diagnosticarlo en vivo paso a paso: primero confirmas que {concepts_prose}. "
-            f"Al conectar cada pieza por su funcion concreta en {metaphor_hint}, ya no necesitas memorizar listas "
-            f"sueltas porque entiendes exactamente que pasa si una de las piezas falla."
+        alt = _strip_bullets(
+            f"Miralo ahora desde otro angulo operativo dentro de {metaphor_hint}. Cuando nos enfrentamos a {node_title} "
+            f"en {course_title}, el error tipico es quedarse en la definicion de memoria en vez de seguir el flujo real "
+            f"del sistema y entender que problema concreto resuelve: {node_summary}.\n\n"
+            f"Imagina que tienes que diagnosticarlo en vivo paso a paso cuando algo falla en {metaphor_hint}: primero "
+            f"confirmas la causa y efecto verificando que {concepts_prose}. Cada una de estas piezas cumple un rol "
+            f"especifico para mantener la estabilidad del diseno.\n\n"
+            f"Al conectar cada mecanismo con su consecuencia practica dentro de {metaphor_hint}, ya no necesitas "
+            f"memorizar definiciones aisladas, porque puedes anticipar que ocurre si una condicion cambia y justificar "
+            f"tu decision tecnica con claridad."
         )
         return (alt, "local_fallback")
+
+
+def regenerate_questions_with_ai(
+    *,
+    course_title: str,
+    world_metaphor: str | None,
+    node_title: str,
+    node_summary: str,
+    story_script: str,
+    eval_prompts: list[dict[str, Any]],
+    preferred_provider: str = "auto",
+) -> tuple[list[dict[str, Any]], str]:
+    """Redacta preguntas socraticas nuevas y distintas evaluando exactamente los mismos rubric_points del nodo."""
+    metaphor_hint = world_metaphor or f"Taller practico de {course_title}"
+    source_prompts = eval_prompts or [
+        {
+            "id": "q1",
+            "question": f"¿Como funciona {node_title} en {course_title}?",
+            "rubric_points": [f"Explica el concepto central de {node_title}"],
+        }
+    ]
+
+    try:
+        system_prompt = (
+            "Eres el Evaluador Socratico de Brotal. Tu tarea es redactar PREGUNTAS SOCRATICAS NUEVAS Y DISTINTAS "
+            "(planteando casos practicos, diagnosticos de fallos o comparaciones aplicadas dentro de la metafora del ramo) "
+            "que evaluen EXACTAMENTE los mismos `rubric_points` de cada pregunta original.\n"
+            "REGLAS OBLIGATORIAS:\n"
+            "1. Conserva los mismos `id` y los mismos `rubric_points` de cada item.\n"
+            "2. Cambia por completo la formulacion de cada `question` para que el estudiante deba razonar desde otro caso o escenario.\n"
+            "3. Responde UNICAMENTE un objeto JSON valido con la clave `eval_prompts`:\n"
+            '{"eval_prompts": [{"id": "q1", "question": "Nueva pregunta socratica...", "rubric_points": ["..."]}]}'
+        )
+        user_prompt = json.dumps(
+            {
+                "course_title": course_title,
+                "world_metaphor": metaphor_hint,
+                "node_title": node_title,
+                "node_summary": node_summary,
+                "story_script": story_script[:1500],
+                "current_eval_prompts": source_prompts,
+            },
+            ensure_ascii=False,
+        )
+        comp = complete_chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            preferred_provider=preferred_provider,
+            json_mode=True,
+            temperature=0.7,
+        )
+        parsed = extract_json_object(comp.text)
+        raw_list = parsed.get("eval_prompts")
+        if not isinstance(raw_list, list) or not raw_list:
+            raise ValueError("Respuesta sin eval_prompts validos")
+
+        by_id = {str(item.get("id")): str(item.get("question") or "").strip() for item in raw_list if isinstance(item, dict)}
+        updated: list[dict[str, Any]] = []
+        for idx, orig in enumerate(source_prompts):
+            qid = str(orig.get("id") or f"q{idx+1}")
+            pts = [str(p) for p in (orig.get("rubric_points") or [])]
+            candidate_q = by_id.get(qid, "")
+            if not candidate_q and idx < len(raw_list) and isinstance(raw_list[idx], dict):
+                candidate_q = str(raw_list[idx].get("question") or "").strip()
+            if not candidate_q or candidate_q == str(orig.get("question") or "").strip():
+                focus = "; ".join(pts[:2]) if pts else node_summary
+                candidate_q = (
+                    f"En un escenario de diagnostico dentro de {metaphor_hint}, ¿como aplicarias {node_title} "
+                    f"para resolver un caso real considerando: {focus}?"
+                )
+            updated.append({"id": qid, "question": candidate_q, "rubric_points": pts})
+        return (updated, comp.provider)
+    except (AiProviderError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        templates = [
+            "Imagina una falla en vivo dentro de {metaphor}: ¿como diagnosticarias y justificarias {node} asegurando que {focus}?",
+            "Si tuvieras que defender una decision de diseno en {metaphor} sobre {node}, ¿como conectarias en la practica que {focus}?",
+            "Plantea un caso concreto de {course} dentro de {metaphor}: ¿que ocurriria paso a paso con {node} respecto a {focus}?",
+            "Comparando alternativas dentro de {metaphor}, ¿por que es determinante en {node} tener en cuenta que {focus}?",
+        ]
+        updated_fallback: list[dict[str, Any]] = []
+        for idx, orig in enumerate(source_prompts):
+            qid = str(orig.get("id") or f"q{idx+1}")
+            pts = [str(p) for p in (orig.get("rubric_points") or [])]
+            prev_q = str(orig.get("question") or "").strip()
+            focus = " y ".join(p.rstrip(".") for p in pts[:2]) if pts else (node_summary or node_title)
+            tpl = templates[idx % len(templates)]
+            new_q = tpl.format(metaphor=metaphor_hint, node=node_title, course=course_title, focus=focus)
+            if new_q == prev_q:
+                new_q = templates[(idx + 1) % len(templates)].format(
+                    metaphor=metaphor_hint,
+                    node=node_title,
+                    course=course_title,
+                    focus=focus,
+                )
+            updated_fallback.append({"id": qid, "question": new_q, "rubric_points": pts})
+        return (updated_fallback, "local_fallback")
