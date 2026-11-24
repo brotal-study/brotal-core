@@ -1,16 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronDown, Home, Settings } from 'lucide-react'
+import { ChevronDown, Home, MessageSquare, Settings } from 'lucide-react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import ThemeToggle from './ThemeToggle'
 import CommandPalette from './CommandPalette'
+import AiSettingsModal from './AiSettingsModal'
+import ChatDrawer from './ChatDrawer'
 import { selectCourses, useAppStore } from '../../store/useAppStore'
+import { useStudyStore } from '../../store/useStudyStore'
 
 export default function TopBar() {
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const { career, profile, manualCourses, statuses, setActiveCourse, loadCareer } = useAppStore()
+  const { tree, selectedNodeId } = useStudyStore()
   const [menu, setMenu] = useState(false)
   const [palette, setPalette] = useState(false)
+  const [aiSettings, setAiSettings] = useState(false)
+  const [chatOpen, setChatOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -40,6 +46,8 @@ export default function TopBar() {
   const active = all.filter((c) => statuses[c.id] === 'active')
   const routeId = pathname.startsWith('/course/') ? decodeURIComponent(pathname.slice(8)) : null
   const current = all.find((c) => c.id === routeId)
+  const activeNode = tree?.nodes.find((n) => n.id === selectedNodeId) ?? null
+  const chatCourseId = tree?.course_id ?? current?.code ?? routeId
 
   const item = 'rounded px-2 py-1 hover:bg-slate-200 dark:hover:bg-slate-800'
   return (
@@ -51,7 +59,7 @@ export default function TopBar() {
       <span className="text-slate-400">|</span>
       <div ref={ref} className="relative">
         <button type="button" onClick={() => setMenu((m) => !m)} aria-expanded={menu} className={`flex items-center gap-2 ${item}`}>
-          <span>{current ? current.name : 'Sin ramo activo'}</span>
+          <span>{current ? current.name : tree ? tree.title : 'Sin ramo activo'}</span>
           <ChevronDown size={16} />
         </button>
         {menu && (
@@ -84,13 +92,40 @@ export default function TopBar() {
         Ctrl+K
       </button>
       <div className="ml-auto flex items-center gap-1">
-        {profile && <span className="hidden text-sm text-slate-500 sm:inline">{profile.name}</span>}
-        <Link to="/onboarding" aria-label="Editar perfil local" className="rounded p-2 hover:bg-slate-200 dark:hover:bg-slate-800">
+        {chatCourseId && (
+          <button
+            type="button"
+            onClick={() => setChatOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded border border-slate-300 px-2.5 py-1 text-xs font-medium hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
+          >
+            <MessageSquare size={14} />
+            <span>Chat Tutor</span>
+          </button>
+        )}
+        {profile && <span className="hidden px-1 text-sm text-slate-500 sm:inline">{profile.name}</span>}
+        <button
+          type="button"
+          onClick={() => setAiSettings(true)}
+          aria-label="Configuración de IA"
+          title="Configuración de IA (Groq / Gemini / Ollama)"
+          className="rounded p-2 hover:bg-slate-200 dark:hover:bg-slate-800"
+        >
           <Settings size={18} />
-        </Link>
+        </button>
         <ThemeToggle />
       </div>
       <CommandPalette open={palette} onClose={() => setPalette(false)} />
+      <AiSettingsModal open={aiSettings} onClose={() => setAiSettings(false)} />
+      {chatCourseId && (
+        <ChatDrawer
+          open={chatOpen}
+          onClose={() => setChatOpen(false)}
+          courseId={chatCourseId}
+          courseTitle={tree?.title ?? current?.name ?? chatCourseId}
+          nodeId={selectedNodeId}
+          nodeTitle={activeNode?.title ?? null}
+        />
+      )}
     </header>
   )
 }

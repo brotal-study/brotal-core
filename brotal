@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# Launcher en 1 comando de Brotal v1.0 (Local-First Active Study Engine)
+# Modos:
+#   ./brotal          -> Levanta FastAPI sirviendo frontend/dist en http://127.0.0.1:8000 y abre el navegador
+#   ./brotal --dev    -> Levanta FastAPI (:8000) + Vite (:5173) en paralelo con hot-reload
+#   ./brotal --check  -> Verifica venv, frontend/dist, levanta FastAPI, comprueba HTTP 200 en /health, / y /api/v1/profile y termina
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$ROOT_DIR/backend"
+FRONTEND_DIR="$ROOT_DIR/frontend"
+VENV_DIR="$BACKEND_DIR/.venv"
+HOST="${BROTAL_HOST:-127.0.0.1}"
+PORT="${BROTAL_PORT:-8000}"
+DEV_PORT="${BROTAL_DEV_PORT:-5173}"
+MODE="prod"
+NO_OPEN="${BROTAL_NO_OPEN:-0}"
+
+for arg in "$@"; do
+  case "$arg" in
+    --dev)
+      MODE="dev"
+      ;;
+    --check)
+      MODE="check"
+      NO_OPEN="1"
+      ;;
+    --no-open)
+      NO_OPEN="1"
+      ;;
+    -h|--help)
+      echo "Uso: ./brotal [--dev | --check | --no-open]"
+      exit 0
+      ;;
+    *)
+      echo "Opcion desconocida: $arg (usa --help)" >&2
+      exit 1
+      ;;
+  esac
+done
+
+ensure_backend_venv() {
+  if [ ! -x "$VENV_DIR/bin/python" ]; then
+    echo "[brotal] Creando entorno virtual en backend/.venv..."
+    python3 -m venv "$VENV_DIR"
+  fi
+  if ! "$VENV_DIR/bin/python" -c "import fastapi, uvicorn, edge_tts, pypdf, pptx, docx, multipart" >/dev/null 2>&1; then
+    echo "[brotal] Instalando dependencias de backend..."
+    "$VENV_DIR/bin/pip" install -q -e "$BACKEND_DIR"
+  fi
+}
+
+ensure_frontend_dist() {
+  if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+    echo "[brotal] Instalando dependencias de frontend (npm install)..."
+    (cd "$FRONTEND_DIR" && npm install)
+  fi
+  if [ "$MODE" != "dev" ] && [ ! -f "$FRONTEND_DIR/dist/index.html" ]; then
+    echo "[brotal] Compilando frontend/dist (npm run build)..."
+    (cd "$FRONTEND_DIR" && npm run build)
+  fi
+}
+
+wait_for_url() {
+  local url="$1"
+  local retries="${2:-40}"
+  for ((i=1; i<=retries; i++)); do
+    if curl -fsS "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+open_browser() {
+  local url="$1"
+  if [ "$NO_OPEN" = "1" ]; then
+    return 0
+  fi
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url" >/dev/null 2>&1 &
+  elif command -v open >/dev/null 2>&1; then
+    open "$url" >/dev/null 2>&1 &
+  fi
+}
+
+ensure_backend_venv
+ensure_frontend_dist
+
+pids=()
+cleanup() {
+  for pid in "${pids[@]:-}"; do
+    if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+}
+trap cleanup EXIT INT TERM
+
+if [ "$MODE" = "check" ]; then
+  echo "[brotal] Ejecutando verificacion --check en http://$HOST:$PORT ..."
+  (cd "$BACKEND_DIR" && "$VENV_DIR/bin/uvicorn" app.main:app --host "$HOST" --port "$PORT" --log-level warning) &
+  pids+=("$!")
+
+  if ! wait_for_url "http://$HOST:$PORT/health" 40; then
+    echo "[brotal] ERROR: /health no respondio a tiempo." >&2
+    exit 1
+  fi
+
+  status_root="$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST:$PORT/")"
+  status_prof="$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST:$PORT/api/v1/profile")"
+  status_prov="$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST:$PORT/api/v1/settings/providers")"
+
+  echo "[brotal] GET /                       -> HTTP $status_root"
+  echo "[brotal] GET /api/v1/profile         -> HTTP $status_prof"
+  echo "[brotal] GET /api/v1/settings/providers -> HTTP $status_prov"
+
+  if [ "$status_root" != "200" ] || [ "$status_prof" != "200" ] || [ "$status_prov" != "200" ]; then
+    echo "[brotal] ERROR: Fallo la verificacion HTTP 200." >&2
+    exit 1
+  fi
+  echo "[brotal] OK: Brotal v1.0 listo."
+  exit 0
+fi
+
+if [ "$MODE" = "dev" ]; then
+  echo "[brotal] Iniciando modo desarrollo (FastAPI :$PORT + Vite :$DEV_PORT)..."
+  (cd "$BACKEND_DIR" && "$VENV_DIR/bin/uvicorn" app.main:app --reload --host "$HOST" --port "$PORT") &
+  pids+=("$!")
+  (cd "$FRONTEND_DIR" && npm run dev -- --host "$HOST" --port "$DEV_PORT") &
+  pids+=("$!")
+
+  wait_for_url "http://$HOST:$PORT/health" 40 || true
+  wait_for_url "http://$HOST:$DEV_PORT" 40 || true
+  echo "[brotal] Disponible en http://$HOST:$DEV_PORT"
+  open_browser "http://$HOST:$DEV_PORT"
+  wait
+else
+  echo "[brotal] Iniciando Brotal v1.0 en http://$HOST:$PORT ..."
+  (cd "$BACKEND_DIR" && "$VENV_DIR/bin/uvicorn" app.main:app --host "$HOST" --port "$PORT") &
+  pids+=("$!")
+
+  if wait_for_url "http://$HOST:$PORT/health" 40; then
+    echo "[brotal] Listo en http://$HOST:$PORT"
+    open_browser "http://$HOST:$PORT"
+  fi
+  wait
+fi

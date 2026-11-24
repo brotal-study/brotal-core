@@ -15,7 +15,7 @@ import shutil
 import sqlite3
 from typing import Any
 
-from app.config import fixtures_dir, tts_cache_dir
+from app.config import fixtures_dir, legacy_tts_cache_dir, tts_cache_dir
 from app.schemas.career import CareerManifest
 from app.schemas.pack import CoursePack, PackMetadata
 
@@ -183,16 +183,18 @@ def archive_course(conn: sqlite3.Connection, course_id: str) -> None:
     if row["course_code"]:
         conn.execute("DELETE FROM local_chunks_fts WHERE course_id = ?;", (row["course_code"],))
 
-    cache_root = tts_cache_dir()
-    for key in {real_id, course_id, row["course_code"] or ""}:
-        if not key:
+    for cache_root in (tts_cache_dir(), legacy_tts_cache_dir()):
+        if not cache_root.exists():
             continue
-        course_cache_dir = cache_root / key
-        if course_cache_dir.is_dir():
-            shutil.rmtree(course_cache_dir, ignore_errors=True)
-        for f in cache_root.glob(f"{key}_*"):
-            if f.is_file():
-                f.unlink(missing_ok=True)
+        for key in {real_id, course_id, row["course_code"] or ""}:
+            if not key:
+                continue
+            course_cache_dir = cache_root / key
+            if course_cache_dir.is_dir():
+                shutil.rmtree(course_cache_dir, ignore_errors=True)
+            for f in cache_root.glob(f"{key}_*"):
+                if f.is_file():
+                    f.unlink(missing_ok=True)
 
     conn.commit()
 

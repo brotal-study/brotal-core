@@ -7,12 +7,22 @@ import uuid
 from typing import Annotated, Any
 
 import httpx
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from pydantic import ValidationError
 
 from app.db.database import get_conn
 from app.schemas.career import CourseStatus
 from app.schemas.pack import CourseOut, CoursePatch, ManualCourseCreate
+from app.services.ingest import ingest_local_files
 from app.services.pack_manager import (
     archive_course,
     ensure_career_installed,
@@ -178,6 +188,42 @@ def post_install_pack(
         "status": row["status"],
         "version": row["pack_version"],
     }
+
+
+@router.post("/courses/ingest-local")
+async def post_ingest_local(
+    conn: DbConn,
+    course_code: Annotated[str, Form()],
+    title: Annotated[str, Form()],
+    files: Annotated[list[UploadFile], File()],
+    career_id: Annotated[str | None, Form()] = None,
+    world_metaphor: Annotated[str | None, Form()] = None,
+) -> dict[str, Any]:
+    if not files:
+        raise HTTPException(status_code=400, detail="Debes adjuntar al menos un archivo.")
+
+    conn.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1);")
+    prof = conn.execute("SELECT ai_provider, career_id FROM user_profile WHERE id = 1;").fetchone()
+    ai_provider = prof["ai_provider"] if prof else "auto"
+    effective_career_id = career_id if career_id is not None else (prof["career_id"] if prof else None)
+
+    file_tuples: list[tuple[str, bytes]] = []
+    for up in files:
+        raw = await up.read()
+        file_tuples.append((up.filename or "apunte.txt", raw))
+
+    try:
+        return ingest_local_files(
+            conn,
+            course_code=course_code,
+            title=title,
+            career_id=effective_career_id,
+            world_metaphor=world_metaphor,
+            files=file_tuples,
+            preferred_provider=ai_provider,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.patch("/courses/{course_id}", response_model=CourseOut)
