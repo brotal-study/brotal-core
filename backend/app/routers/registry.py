@@ -16,12 +16,10 @@ from app.schemas.career import (
     CourseStatus,
     Semester,
 )
-from app.schemas.pack import PackSummary
 from app.services.pack_manager import (
     bulk_status,
     ensure_career_installed,
     load_fixture_career,
-    load_fixture_pack,
 )
 
 router = APIRouter(tags=["registry"])
@@ -31,7 +29,6 @@ DbConn = Annotated[sqlite3.Connection, Depends(get_conn)]
 
 def _build_registry_payload() -> dict[str, Any]:
     career = load_fixture_career()
-    pack = load_fixture_pack()
     career_summary = CareerSummary(
         id=career.id,
         country=career.country,
@@ -43,24 +40,12 @@ def _build_registry_payload() -> dict[str, Any]:
         plan_ref=career.career.plan_ref,
         manifest_url=f"fixtures/{career.id}.json",
     )
-    pack_summary = PackSummary(
-        id=pack.id,
-        career_ids=pack.metadata.career_ids,
-        course_code=pack.course_code,
-        title=pack.title,
-        engine_type=pack.engine_type,
-        created_year=pack.metadata.created_year,
-        updated_year=pack.metadata.updated_year,
-        version=pack.metadata.version,
-        metadata=pack.metadata,
-        node_count=len(pack.nodes),
-        pack_url=f"fixtures/{pack.id}.json",
-    )
+    # Sin packs demo precargados: cada estudiante crea desde sus archivos o instala packs comunitarios reales.
     return {
         "schema_version": "1.0",
         "updated_at": career.career.updated_at,
         "careers": [career_summary.model_dump()],
-        "packs": [pack_summary.model_dump()],
+        "packs": [],
     }
 
 

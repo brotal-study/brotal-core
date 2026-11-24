@@ -298,6 +298,45 @@ def _fallback_nodes_from_chunks(
     return nodes
 
 
+def _sample_chunks_balanced(
+    chunks: list[ExtractedChunk],
+    *,
+    max_chunks: int = 36,
+    max_chars: int = 26000,
+) -> str:
+    """Muestrea equitativamente todos los archivos subidos (round-robin por archivo) sin cortar los ultimos."""
+    by_file: dict[str, list[ExtractedChunk]] = {}
+    for ch in chunks:
+        by_file.setdefault(ch.source_file, []).append(ch)
+
+    file_queues: list[list[ExtractedChunk]] = []
+    for file_chunks in by_file.values():
+        if len(file_chunks) <= 8:
+            file_queues.append(list(file_chunks))
+        else:
+            # Distribuye indices a lo largo de todo el archivo (inicio, medio y fin)
+            step = max(1, len(file_chunks) // 8)
+            sampled = [file_chunks[i] for i in range(0, len(file_chunks), step)][:8]
+            file_queues.append(sampled)
+
+    selected: list[ExtractedChunk] = []
+    while file_queues and len(selected) < max_chunks:
+        next_queues: list[list[ExtractedChunk]] = []
+        for q in file_queues:
+            if q and len(selected) < max_chunks:
+                selected.append(q.pop(0))
+            if q:
+                next_queues.append(q)
+        file_queues = next_queues
+
+    per_chunk_limit = max(450, max_chars // max(1, len(selected)))
+    items = [
+        f"[{c.source_file} - {c.section_title}]: {c.content[:per_chunk_limit]}"
+        for c in selected
+    ]
+    return "\n\n".join(items)[:max_chars]
+
+
 def _generate_nodes_with_ai(
     *,
     course_code: str,
@@ -306,35 +345,41 @@ def _generate_nodes_with_ai(
     chunks: list[ExtractedChunk],
     preferred_provider: str = "auto",
 ) -> tuple[list[dict[str, Any]], str]:
-    """Usa ai_router para sintetizar un arbol de 6..12 nodos (theory + practice) desde los chunks."""
-    digest_items = [
-        f"[{c.source_file} - {c.section_title}]: {c.content[:900]}"
-        for c in chunks[:16]
-    ]
-    digest_text = "\n\n".join(digest_items)[:12000]
+    """Usa ai_router para sintetizar un arbol profundo de 8..16 nodos (copa theory + raices practice/examenes)."""
+    digest_text = _sample_chunks_balanced(chunks)
+    files_list = sorted({c.source_file for c in chunks})
 
     system_prompt = (
         "Eres el Arquitecto Pedagogico de Brotal. Convierte apuntes universitarios en un Arbol de Habilidades "
-        "JSON con ENTRE 6 Y 12 NODOS (combina nodos 'theory' para conceptos y al menos 2 nodos 'practice' para "
-        "ejercicios/casos reales).\n"
+        "JSON profundo y exigente con ENTRE 8 Y 16 NODOS (si el material es muy corto, minimo 6):\n"
+        "- COPA SUPERIOR (`branch: \"theory\"`): entre 6 y 11 nodos conceptuales ordenados por prerequisito y agrupados en bloques claros.\n"
+        "- RAICES INFERIORES (`branch: \"practice\"`): entre 3 y 5 nodos explicitos de EXAMENES, CONTROLES, LABS o CASOS REALES "
+        "(ej. 'Examen Parcial 1 · ...', 'Caso Practico / Debugging · ...', 'Simulacro Examen Final'), "
+        "conectados en `parent_ids` a los nodos 'theory' que ponen a prueba.\n"
         "REGLAS OBLIGATORIAS:\n"
-        "1. `story_script` DEBE ser una historia conversada continua de 2 parrafos usando la metafora del mundo "
-        "(`world_metaphor`). PROHIBIDO usar listas con viñetas o enumeraciones secas.\n"
-        "2. El primer nodo 'theory' lleva `parent_ids: []`. Los demas nodos conectan sus `parent_ids` formando un DAG valido.\n"
-        "3. Cada nodo incluye `eval_prompts` (1 o 2 preguntas socraticas a ciegas) con 2 o 3 `rubric_points` verificables.\n"
+        "1. `story_script` DEBE ser una historia conversada continua de 2 a 3 parrafos usando la metafora del mundo "
+        "(`world_metaphor`), explicando causa-efecto y que problema real resuelve cada concepto. PROHIBIDO listas con vinetas.\n"
+        "2. El primer nodo 'theory' lleva `parent_ids: []`. Todos los demas conectan `parent_ids` formando un DAG valido.\n"
+        "3. Cada nodo DEBE incluir `eval_prompts` con 3 a 4 PREGUNTAS SOCRATICAS A CIEGAS (aplicadas, comparativas o de diagnostico, "
+        "nunca triviales) y cada pregunta lleva 2 a 3 `rubric_points` concretos y verificables.\n"
+        "4. Cubre TODOS los archivos entregados, no solo el primero.\n"
         "Responde UNICAMENTE JSON valido con la clave `nodes`:\n"
         "{\n"
         '  "world_metaphor": "...",\n'
         '  "nodes": [\n'
         "    {\n"
-        '      "id": "N1",\n'
+        '      "id": "T1",\n'
         '      "parent_ids": [],\n'
         '      "branch": "theory",\n'
         '      "block": "Bloque 1 · Fundamentos",\n'
         '      "title": "...",\n'
         '      "summary": "...",\n'
         '      "story_script": "Parrafo 1 conversado...\\n\\nParrafo 2 conversado...",\n'
-        '      "eval_prompts": [{"id": "q1", "question": "...", "rubric_points": ["...", "..."]}]\n'
+        '      "eval_prompts": [\n'
+        '        {"id": "q1", "question": "...", "rubric_points": ["...", "..."]},\n'
+        '        {"id": "q2", "question": "...", "rubric_points": ["...", "..."]},\n'
+        '        {"id": "q3", "question": "...", "rubric_points": ["...", "..."]}\n'
+        "      ]\n"
         "    }\n"
         "  ]\n"
         "}"
@@ -342,8 +387,9 @@ def _generate_nodes_with_ai(
     user_prompt = (
         f"Codigo: {course_code}\n"
         f"Ramo: {course_title}\n"
-        f"Metafora del mundo sugerida: {world_metaphor}\n\n"
-        f"Apuntes extraidos:\n{digest_text}"
+        f"Metafora del mundo sugerida: {world_metaphor}\n"
+        f"Archivos subidos ({len(files_list)}): {', '.join(files_list)}\n\n"
+        f"Apuntes muestreados de todos los archivos:\n{digest_text}"
     )
 
     try:
@@ -355,6 +401,8 @@ def _generate_nodes_with_ai(
             preferred_provider=preferred_provider,
             json_mode=True,
             temperature=0.35,
+            max_tokens=8192,
+            timeout=90.0,
         )
         parsed = extract_json_object(comp.text)
         raw_nodes = parsed.get("nodes")
@@ -362,21 +410,22 @@ def _generate_nodes_with_ai(
             raise ValueError("El LLM devolvio menos de 6 nodos")
 
         normalized_nodes: list[dict[str, Any]] = []
-        valid_ids = {str(n.get("id") or f"N{idx+1}") for idx, n in enumerate(raw_nodes[:12])}
+        capped_nodes = raw_nodes[:16]
+        valid_ids = {str(n.get("id") or f"N{idx+1}") for idx, n in enumerate(capped_nodes)}
 
-        for idx, n in enumerate(raw_nodes[:12]):
+        for idx, n in enumerate(capped_nodes):
             nid = str(n.get("id") or f"N{idx+1}")
             raw_parents = [str(p) for p in (n.get("parent_ids") or []) if str(p) in valid_ids and str(p) != nid]
             branch = "practice" if str(n.get("branch")).lower() == "practice" else "theory"
             if idx == 0:
                 raw_parents = []
                 branch = "theory"
-            elif idx == len(raw_nodes[:12]) - 1 and not any(x.get("branch") == "practice" for x in normalized_nodes):
+            elif idx == len(capped_nodes) - 1 and not any(x.get("branch") == "practice" for x in normalized_nodes):
                 branch = "practice"
 
             raw_prompts = n.get("eval_prompts") or []
             clean_prompts = []
-            for p_idx, p in enumerate(raw_prompts[:3], start=1):
+            for p_idx, p in enumerate(raw_prompts[:5], start=1):
                 pts = [str(x).strip() for x in (p.get("rubric_points") or []) if str(x).strip()]
                 if not pts:
                     pts = [f"Explica los conceptos centrales de {n.get('title', nid)}"]
