@@ -1,8 +1,5 @@
-// Capa de datos de estudio (arbol + evaluacion).
-// HOY: mock local sobre fixtures/demo_pack.json con progreso persistido en localStorage.
-// CUANDO el backend (#4) este listo, reemplazar el cuerpo de getTree/evaluate por `api(...)`.
-// La UI solo depende de las firmas y tipos de este archivo.
-import packFixture from '@fixtures/demo_pack.json'
+// Capa de datos de estudio (arbol + evaluacion) conectada a FastAPI (/api/v1/*).
+import { api } from './client'
 
 export type Branch = 'theory' | 'practice'
 export type CooldownMode = 'semester' | 'urgency'
@@ -49,10 +46,7 @@ export interface EvaluateRequest {
   /** Respuestas por id de pregunta, en el orden mezclado en que se respondieron. */
   answers: { prompt_id: string; text: string }[]
   cooldown_mode: CooldownMode
-  /**
-   * Solo mock v0.1: puntos de rubrica marcados como cubiertos (`${prompt_id}::${indice}`).
-   * En v1.0 el backend calcula la nota con el tutor IA y este campo desaparece.
-   */
+  /** Puntos de rubrica marcados como cubiertos (`${prompt_id}::${indice}`). */
   covered_points: string[]
 }
 
@@ -73,72 +67,28 @@ export interface EvaluateResponse {
 
 export const PASS_SCORE = 7.0
 export const MAX_MASTERY = 3
-/** Semestre: separa validaciones ~1 semana. Urgencia: 30 s para poder probar 0/3 -> 1/3 -> 2/3 en vivo. */
 export const COOLDOWN_MS: Record<CooldownMode, number> = {
   semester: 7 * 24 * 60 * 60 * 1000,
   urgency: 30 * 1000,
 }
 
-const pack = packFixture as unknown as {
-  id: string
-  course_code: string
-  title: string
-  metadata: { world_metaphor?: string }
-  nodes: PackNode[]
-}
-
-const STORAGE_KEY = 'brotal_study_progress'
-type Stored = Record<string, Record<string, NodeProgress>>
-
-const tick = () => new Promise<void>((r) => setTimeout(r, 0))
-const read = (): Stored => {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as Stored
-  } catch {
-    return {}
-  }
-}
-const write = (s: Stored) => localStorage.setItem(STORAGE_KEY, JSON.stringify(s))
-
-const emptyProgress = (node_id: string): NodeProgress => ({
-  node_id,
-  mastery_level: 0,
-  next_review_at: null,
-  training_reps: 0,
-  best_score: 0,
-  last_score: null,
-  last_practiced_at: null,
-})
-
 export const inCooldown = (p: NodeProgress, now = Date.now()): boolean =>
   p.next_review_at !== null && new Date(p.next_review_at).getTime() > now
 
-/** Acepta el id del pack o el codigo del ramo (INF2324). */
-const matches = (courseId: string) => courseId === pack.id || courseId === pack.course_code
-
-/** GET /api/v1/courses/{course_id}/tree  -> nodos + node_progress. null si el ramo no tiene Pack. */
+/** GET /api/v1/courses/{course_id}/tree -> nodos + node_progress. null si el ramo no tiene Pack. */
 export async function getTree(courseId: string): Promise<CourseTree | null> {
-  await tick()
-  if (!matches(courseId)) return null
-  const stored = read()[pack.id] ?? {}
-  const progress: Record<string, NodeProgress> = {}
-  for (const n of pack.nodes) progress[n.id] = stored[n.id] ?? emptyProgress(n.id)
-  return {
-    course_id: pack.id,
-    course_code: pack.course_code,
-    title: pack.title,
-    world_metaphor: pack.metadata.world_metaphor ?? null,
-    nodes: pack.nodes,
-    progress,
-  }
+  const res = await fetch(`/api/v1/courses/${encodeURIComponent(courseId)}/tree`)
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return (await res.json()) as CourseTree
 }
 
-/** Solo mock: borra el progreso local del ramo (no existe en el contrato real). */
+/** POST /api/v1/courses/{course_id}/reset-progress */
 export async function resetProgress(courseId: string): Promise<void> {
-  if (!matches(courseId)) return
-  const s = read()
-  delete s[pack.id]
-  write(s)
+  await api<{ course_id: string; reset: boolean }>(
+    `/api/v1/courses/${encodeURIComponent(courseId)}/reset-progress`,
+    { method: 'POST' },
+  )
 }
 
 /** POST /api/v1/study/{course_id}/{node_id}/evaluate */
@@ -146,48 +96,14 @@ export async function evaluate(
   courseId: string,
   nodeId: string,
   req: EvaluateRequest,
-  now = Date.now(),
 ): Promise<EvaluateResponse> {
-  await tick()
-  const node = pack.nodes.find((n) => n.id === nodeId)
-  if (!matches(courseId) || !node) throw new Error('Nodo no encontrado')
-
-  const covered = new Set(req.covered_points)
-  const feedback: PointFeedback[] = node.eval_prompts.flatMap((q) =>
-    q.rubric_points.map((point, point_index) => ({
-      prompt_id: q.id,
-      point_index,
-      point,
-      covered: covered.has(`${q.id}::${point_index}`),
-    })),
+  return api<EvaluateResponse>(
+    `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/evaluate`,
+    {
+      method: 'POST',
+      body: JSON.stringify(req),
+    },
   )
-  const score = scoreFromFeedback(feedback)
-  const passed = score >= PASS_SCORE
-
-  const all = read()
-  const course = (all[pack.id] ??= {})
-  const prev = course[nodeId] ?? emptyProgress(nodeId)
-  const next: NodeProgress = {
-    ...prev,
-    best_score: Math.max(prev.best_score, score),
-    last_score: score,
-    last_practiced_at: new Date(now).toISOString(),
-  }
-
-  // Regla del contrato: solo la validacion fuera de cooldown sube mastery; en cooldown suma Reps.
-  let counted = false
-  if (passed) {
-    if (!inCooldown(prev, now) && prev.mastery_level < MAX_MASTERY) {
-      next.mastery_level = prev.mastery_level + 1
-      next.next_review_at = new Date(now + COOLDOWN_MS[req.cooldown_mode]).toISOString()
-      counted = true
-    } else {
-      next.training_reps = prev.training_reps + 1
-    }
-  }
-  course[nodeId] = next
-  write(all)
-  return { score, passed, counted_mastery: counted, feedback, progress: next }
 }
 
 /** Nota 1.0..10.0 proporcional a puntos cubiertos (promedio simple sobre todos los puntos). */
@@ -197,7 +113,7 @@ export function scoreFromFeedback(feedback: { covered: boolean }[]): number {
   return Math.round((1 + 9 * ratio) * 10) / 10
 }
 
-// ---------------- Evaluador demo local (solo v0.1) ----------------
+// ---------------- Pre-evaluador local de apoyo en UI (v0.1) ----------------
 
 const norm = (s: string) =>
   s
@@ -222,11 +138,6 @@ function keywords(point: string): { stems: string[]; acronyms: string[] } {
   return { stems: [...new Set(stems)], acronyms }
 }
 
-/**
- * Evaluador por palabras clave: un punto se marca cubierto si la respuesta contiene todas sus siglas
- * y al menos la mitad de sus raices. Es impreciso a proposito; el usuario puede corregirlo.
- * Evaluador demo local — en v1.0 evalua el tutor IA.
- */
 export function previewGrade(node: PackNode, answers: Record<string, string>): PointFeedback[] {
   return node.eval_prompts.flatMap((q) => {
     const text = norm(answers[q.id] ?? '')

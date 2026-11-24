@@ -7,12 +7,27 @@ import OnboardingPage from './pages/OnboardingPage'
 import { useAppStore } from './store/useAppStore'
 
 export default function App() {
+  const hydrated = useAppStore((s) => s.hydrated)
+  const hydrate = useAppStore((s) => s.hydrate)
   const profile = useAppStore((s) => s.profile)
   const theme = useAppStore((s) => s.theme)
 
   useEffect(() => {
+    void hydrate()
+  }, [hydrate])
+
+  useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark')
   }, [theme])
+
+  if (!hydrated) {
+    return (
+      <>
+        <TopBar />
+        <main className="p-6 text-sm text-slate-500">Cargando perfil local...</main>
+      </>
+    )
+  }
 
   return (
     <>
