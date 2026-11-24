@@ -5,6 +5,9 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: { alias: { '@fixtures': new URL('../fixtures', import.meta.url).pathname } },
+  build: {
+    chunkSizeWarningLimit: 800,
+  },
   server: {
     port: 5173,
     fs: { allow: ['..'] },

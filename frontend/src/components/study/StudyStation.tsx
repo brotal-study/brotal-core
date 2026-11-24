@@ -7,18 +7,32 @@ import StoryTab from './StoryTab'
 import { formatRemaining, LEVEL_STYLE } from './studyUtils'
 
 interface Props {
+  courseId: string
   node: PackNode
   progress: NodeProgress
   worldMetaphor: string | null
   now: number
-  onSubmit: (req: { answers: { prompt_id: string; text: string }[]; covered_points: string[] }) => Promise<EvaluateResponse>
+  onSubmit: (req: {
+    answers: { prompt_id: string; text: string }[]
+    covered_points?: string[]
+  }) => Promise<EvaluateResponse>
+  onRegenerateStory: () => Promise<void>
   onInProgressChange: (v: boolean) => void
 }
 
 type Tab = 'story' | 'eval'
 
 /** Se monta con `key={node.id}`: al cambiar de nodo el estado local se reinicia. */
-export default function StudyStation({ node, progress, worldMetaphor, now, onSubmit, onInProgressChange }: Props) {
+export default function StudyStation({
+  courseId,
+  node,
+  progress,
+  worldMetaphor,
+  now,
+  onSubmit,
+  onRegenerateStory,
+  onInProgressChange,
+}: Props) {
   const [tab, setTab] = useState<Tab>('story')
   const [inProgress, setInProgress] = useState(false)
   const [askLeave, setAskLeave] = useState(false)
@@ -68,10 +82,22 @@ export default function StudyStation({ node, progress, worldMetaphor, now, onSub
           )}
         </div>
         <div className="mt-2 flex gap-1" role="tablist">
-          <button type="button" role="tab" aria-selected={tab === 'story'} onClick={goStory} className={tabCls(tab === 'story')}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'story'}
+            onClick={goStory}
+            className={tabCls(tab === 'story')}
+          >
             <BookOpen size={15} /> Historia
           </button>
-          <button type="button" role="tab" aria-selected={tab === 'eval'} onClick={() => setTab('eval')} className={tabCls(tab === 'eval')}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'eval'}
+            onClick={() => setTab('eval')}
+            className={tabCls(tab === 'eval')}
+          >
             <ClipboardCheck size={15} /> Evaluación a ciegas
           </button>
         </div>
@@ -79,7 +105,13 @@ export default function StudyStation({ node, progress, worldMetaphor, now, onSub
 
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
         {tab === 'story' ? (
-          <StoryTab node={node} worldMetaphor={worldMetaphor} onEvaluate={() => setTab('eval')} />
+          <StoryTab
+            courseId={courseId}
+            node={node}
+            worldMetaphor={worldMetaphor}
+            onEvaluate={() => setTab('eval')}
+            onRegenerateStory={onRegenerateStory}
+          />
         ) : (
           <EvalTab
             node={node}

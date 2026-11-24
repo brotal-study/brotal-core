@@ -1,4 +1,4 @@
-"""Esquemas Pydantic v2 para arbol de estudio y evaluacion 7/10 (Issue #4)."""
+"""Esquemas Pydantic v2 para arbol de estudio y evaluacion 7/10 (v1.0)."""
 from __future__ import annotations
 
 from typing import Any
@@ -53,6 +53,16 @@ class EvaluateResponse(BaseModel):
     counted_mastery: bool
     feedback: list[PointFeedback]
     progress: NodeProgress
+    imprecisions: list[str] = Field(default_factory=list)
+    re_explanation: str | None = None
+    evaluated_by: str = "local_fallback"
+
+
+class RegenerateStoryResponse(BaseModel):
+    course_id: str
+    node_id: str
+    story_script: str
+    provider: str
 
 
 def normalize_answers(

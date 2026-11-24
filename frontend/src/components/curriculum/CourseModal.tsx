@@ -4,6 +4,7 @@ import { ArrowRight, Check, Download, FilePlus2, Trash2, X } from 'lucide-react'
 import type { Course, CourseStatus, PackSummary } from '../../api/types'
 import { STATUS_LABEL, useAppStore } from '../../store/useAppStore'
 import { statusOf, type StatusMap } from '../../lib/curriculum'
+import IngestModal from '../study/IngestModal'
 
 interface Props {
   course: Course
@@ -22,10 +23,17 @@ const OPTIONS: { value: CourseStatus; label: string }[] = [
 
 export default function CourseModal({ course, allCourses, statuses, pack, onClose }: Props) {
   const navigate = useNavigate()
-  const { setStatus, install, installedPacks, setActiveCourse, removeManualCourse, curriculumMode } =
-    useAppStore()
+  const {
+    profile,
+    setStatus,
+    install,
+    installedPacks,
+    setActiveCourse,
+    removeManualCourse,
+    curriculumMode,
+  } = useAppStore()
   const [busy, setBusy] = useState(false)
-  const [note, setNote] = useState(false)
+  const [ingestOpen, setIngestOpen] = useState(false)
   const status = statusOf(statuses, course.id)
   const installed = installedPacks[course.code]
   const prereqs = course.prerequisites.map((code) => ({
@@ -56,7 +64,12 @@ export default function CourseModal({ course, allCourses, statuses, pack, onClos
             </p>
             <h2 className="text-lg font-semibold leading-snug">{course.name}</h2>
           </div>
-          <button type="button" aria-label="Cerrar" onClick={onClose} className="rounded p-1.5 hover:bg-slate-200 dark:hover:bg-slate-800">
+          <button
+            type="button"
+            aria-label="Cerrar"
+            onClick={onClose}
+            className="rounded p-1.5 hover:bg-slate-200 dark:hover:bg-slate-800"
+          >
             <X size={18} />
           </button>
         </header>
@@ -69,7 +82,11 @@ export default function CourseModal({ course, allCourses, statuses, pack, onClos
             <ul className="space-y-1 text-sm">
               {prereqs.map((p) => (
                 <li key={p.code} className="flex items-center gap-2">
-                  {p.ok ? <Check size={14} className="text-emerald-600 dark:text-emerald-400" /> : <X size={14} className="text-amber-600 dark:text-amber-400" />}
+                  {p.ok ? (
+                    <Check size={14} className="text-emerald-600 dark:text-emerald-400" />
+                  ) : (
+                    <X size={14} className="text-amber-600 dark:text-amber-400" />
+                  )}
                   <span className="font-mono text-xs">{p.code}</span>
                   <span className="truncate">{p.name}</span>
                   <span className="ml-auto text-xs text-slate-500">{p.ok ? 'listo' : 'falta'}</span>
@@ -114,35 +131,43 @@ export default function CourseModal({ course, allCourses, statuses, pack, onClos
                 <br />
                 Autor: {pack.metadata.authors.join(', ')} · {pack.node_count} nodos · {pack.metadata.license}
               </p>
-              <button
-                type="button"
-                disabled={busy || !!installed}
-                onClick={async () => {
-                  setBusy(true)
-                  try {
-                    await install(course.code, pack.id)
-                  } finally {
-                    setBusy(false)
-                  }
-                }}
-                className="inline-flex items-center gap-2 rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 disabled:opacity-60 dark:border-slate-700 dark:hover:bg-slate-800"
-              >
-                {installed ? <Check size={16} /> : <Download size={16} />}
-                {installed ? `Pack activo (v${installed})` : 'Instalar y activar pack'}
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={busy || !!installed}
+                  onClick={async () => {
+                    setBusy(true)
+                    try {
+                      await install(course.code, pack.id)
+                    } finally {
+                      setBusy(false)
+                    }
+                  }}
+                  className="inline-flex items-center gap-2 rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 disabled:opacity-60 dark:border-slate-700 dark:hover:bg-slate-800"
+                >
+                  {installed ? <Check size={16} /> : <Download size={16} />}
+                  {installed ? `Pack activo (v${installed})` : 'Instalar y activar pack'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIngestOpen(true)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-slate-400 px-2.5 py-1.5 text-xs hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  <FilePlus2 size={14} /> Crear desde tus archivos (PDF/PPTX)
+                </button>
+              </div>
             </div>
           ) : (
             <div className="space-y-2 text-sm">
               <p className="text-slate-500">No hay un pack comunitario para este ramo.</p>
               <button
                 type="button"
-                onClick={() => setNote(true)}
+                onClick={() => setIngestOpen(true)}
                 className="inline-flex items-center gap-2 rounded-md border border-dashed border-slate-400 px-3 py-1.5 text-sm hover:bg-slate-100 dark:hover:bg-slate-800"
               >
                 <FilePlus2 size={16} />
                 Crear desde tus archivos (PDF/PPTX)
               </button>
-              {note && <p className="text-xs text-slate-500">Disponible en v1.0. Por ahora puedes entrar al árbol de estudio.</p>}
             </div>
           )}
         </section>
@@ -171,6 +196,13 @@ export default function CourseModal({ course, allCourses, statuses, pack, onClos
           )}
         </div>
       </aside>
+      <IngestModal
+        open={ingestOpen}
+        onClose={() => setIngestOpen(false)}
+        defaultCode={course.code}
+        defaultTitle={course.name}
+        careerId={profile?.careerId ?? null}
+      />
     </div>
   )
 }

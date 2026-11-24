@@ -1,4 +1,4 @@
-"""Router de estudio y evaluacion /api/v1/courses/{course_id}/tree y /api/v1/study (Issue #4)."""
+"""Router de estudio, evaluacion socratica, regeneracion de historia y TTS (v1.0)."""
 from __future__ import annotations
 
 import json
@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 
 from app.db.database import get_conn
 from app.schemas.pack import PackNode
@@ -16,7 +17,13 @@ from app.schemas.study import (
     EvaluateResponse,
     NodeProgress,
     PointFeedback,
+    RegenerateStoryResponse,
     normalize_answers,
+)
+from app.services.ai_router import (
+    AiProviderError,
+    evaluate_with_ai,
+    regenerate_story_with_ai,
 )
 from app.services.evaluator import (
     PASS_SCORE,
@@ -25,6 +32,7 @@ from app.services.evaluator import (
     score_from_feedback,
 )
 from app.services.pack_manager import resolve_course_row
+from app.services.tts import TtsSynthesisError, synthesize_node_tts
 
 router = APIRouter(tags=["study"])
 
@@ -47,6 +55,17 @@ def _format_iso(dt: datetime | None) -> str | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _extract_world_metaphor(course_row: sqlite3.Row) -> str | None:
+    if course_row["pack_metadata_json"]:
+        try:
+            meta = json.loads(course_row["pack_metadata_json"])
+            if isinstance(meta, dict):
+                return meta.get("world_metaphor")
+        except json.JSONDecodeError:
+            return None
+    return None
 
 
 @router.get("/courses/{course_id}/tree", response_model=CourseTreeResponse)
@@ -72,14 +91,7 @@ def get_course_tree(
     ).fetchall()
     prog_by_id = {r["node_id"]: r for r in prog_rows}
 
-    world_metaphor: str | None = None
-    if course_row["pack_metadata_json"]:
-        try:
-            meta = json.loads(course_row["pack_metadata_json"])
-            if isinstance(meta, dict):
-                world_metaphor = meta.get("world_metaphor")
-        except json.JSONDecodeError:
-            world_metaphor = None
+    world_metaphor = _extract_world_metaphor(course_row)
 
     nodes: list[PackNode] = []
     progress: dict[str, NodeProgress] = {}
@@ -153,20 +165,61 @@ def post_evaluate_node(
     eval_prompts: list[dict[str, Any]] = json.loads(node_row["eval_prompts_json"] or "[]")
     ordered_answers, answers_by_prompt = normalize_answers(req.answers, eval_prompts)
 
-    raw_feedback = evaluate_rubric(eval_prompts, answers_by_prompt, req.covered_points)
-    if req.score is not None:
-        computed_score = float(req.score)
-        if req.covered_points is None:
-            for item in raw_feedback:
-                item["covered"] = computed_score >= PASS_SCORE
-    else:
-        computed_score = score_from_feedback(raw_feedback)
-
     conn.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1);")
-    prof_row = conn.execute("SELECT cooldown_mode FROM user_profile WHERE id = 1;").fetchone()
+    prof_row = conn.execute("SELECT cooldown_mode, ai_provider FROM user_profile WHERE id = 1;").fetchone()
     cooldown_mode = req.cooldown_mode or (prof_row["cooldown_mode"] if prof_row else "semester")
+    ai_provider = prof_row["ai_provider"] if prof_row else "auto"
     if req.cooldown_mode and prof_row and prof_row["cooldown_mode"] != req.cooldown_mode:
         conn.execute("UPDATE user_profile SET cooldown_mode = ? WHERE id = 1;", (req.cooldown_mode,))
+
+    imprecisions: list[str] = []
+    re_explanation: str | None = None
+    evaluated_by = "local_fallback"
+
+    # Si no se inyectaron covered_points ni score explicito, intentamos evaluar con ai_router
+    if req.covered_points is None and req.score is None:
+        try:
+            ai_res = evaluate_with_ai(
+                node_title=node_row["title"],
+                story_script=node_row["story_script"] or "",
+                eval_prompts=eval_prompts,
+                answers_by_prompt=answers_by_prompt,
+                preferred_provider=ai_provider,
+            )
+            raw_feedback = evaluate_rubric(eval_prompts, answers_by_prompt, ai_res["covered_points"])
+            computed_score = float(ai_res["score"])
+            imprecisions = list(ai_res.get("imprecisions") or [])
+            re_explanation = ai_res.get("re_explanation")
+            evaluated_by = str(ai_res.get("provider") or "ai")
+        except (AiProviderError, ValueError, KeyError):
+            raw_feedback = evaluate_rubric(eval_prompts, answers_by_prompt, None)
+            computed_score = score_from_feedback(raw_feedback)
+            evaluated_by = "local_fallback"
+            if computed_score < PASS_SCORE:
+                missed_pts = [f["point"] for f in raw_feedback if not f["covered"]]
+                if missed_pts:
+                    re_explanation = (
+                        "Repasemos lo que falto en tu respuesta: "
+                        + "; ademas, ".join(missed_pts[:3])
+                        + "."
+                    )
+    else:
+        raw_feedback = evaluate_rubric(eval_prompts, answers_by_prompt, req.covered_points)
+        if req.score is not None:
+            computed_score = float(req.score)
+            if req.covered_points is None:
+                for item in raw_feedback:
+                    item["covered"] = computed_score >= PASS_SCORE
+        else:
+            computed_score = score_from_feedback(raw_feedback)
+        if computed_score < PASS_SCORE:
+            missed_pts = [f["point"] for f in raw_feedback if not f["covered"]]
+            if missed_pts:
+                re_explanation = (
+                    "Repasemos lo que falto en tu respuesta: "
+                    + "; ademas, ".join(missed_pts[:3])
+                    + "."
+                )
 
     conn.execute(
         """
@@ -256,6 +309,97 @@ def post_evaluate_node(
         counted_mastery=result.counted_mastery,
         feedback=[PointFeedback(**f) for f in raw_feedback],
         progress=updated_progress,
+        imprecisions=imprecisions,
+        re_explanation=re_explanation,
+        evaluated_by=evaluated_by,
+    )
+
+
+@router.post("/study/{course_id}/{node_id}/regenerate-story", response_model=RegenerateStoryResponse)
+def post_regenerate_story(
+    course_id: str,
+    node_id: str,
+    conn: DbConn,
+) -> RegenerateStoryResponse:
+    course_row = resolve_course_row(conn, course_id)
+    if course_row is None:
+        raise HTTPException(status_code=404, detail=f"Course '{course_id}' not found")
+
+    real_course_id = course_row["id"]
+    node_row = conn.execute(
+        "SELECT * FROM course_nodes WHERE course_id = ? AND id = ?;",
+        (real_course_id, node_id),
+    ).fetchone()
+    if node_row is None:
+        raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found in course '{course_id}'")
+
+    conn.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1);")
+    prof_row = conn.execute("SELECT ai_provider FROM user_profile WHERE id = 1;").fetchone()
+    ai_provider = prof_row["ai_provider"] if prof_row else "auto"
+
+    eval_prompts: list[dict[str, Any]] = json.loads(node_row["eval_prompts_json"] or "[]")
+    world_metaphor = _extract_world_metaphor(course_row)
+
+    new_story, provider = regenerate_story_with_ai(
+        course_title=course_row["title"],
+        world_metaphor=world_metaphor,
+        node_title=node_row["title"],
+        node_summary=node_row["summary"] or "",
+        current_story=node_row["story_script"] or "",
+        eval_prompts=eval_prompts,
+        preferred_provider=ai_provider,
+    )
+
+    conn.execute(
+        "UPDATE course_nodes SET story_script = ? WHERE course_id = ? AND id = ?;",
+        (new_story, real_course_id, node_id),
+    )
+    conn.commit()
+
+    return RegenerateStoryResponse(
+        course_id=real_course_id,
+        node_id=node_id,
+        story_script=new_story,
+        provider=provider,
+    )
+
+
+@router.post("/study/{course_id}/{node_id}/tts")
+async def post_node_tts(
+    course_id: str,
+    node_id: str,
+    conn: DbConn,
+    voice: str | None = None,
+) -> FileResponse:
+    course_row = resolve_course_row(conn, course_id)
+    if course_row is None:
+        raise HTTPException(status_code=404, detail=f"Course '{course_id}' not found")
+
+    real_course_id = course_row["id"]
+    node_row = conn.execute(
+        "SELECT story_script FROM course_nodes WHERE course_id = ? AND id = ?;",
+        (real_course_id, node_id),
+    ).fetchone()
+    if node_row is None:
+        raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found in course '{course_id}'")
+
+    story_script = (node_row["story_script"] or "").strip()
+    if not story_script:
+        raise HTTPException(status_code=400, detail="Node has no story_script")
+
+    try:
+        mp3_path = await synthesize_node_tts(
+            course_id=real_course_id,
+            text=story_script,
+            voice=voice,
+        )
+    except TtsSynthesisError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return FileResponse(
+        path=mp3_path,
+        media_type="audio/mpeg",
+        filename=f"{real_course_id}_{node_id}.mp3",
     )
 
 

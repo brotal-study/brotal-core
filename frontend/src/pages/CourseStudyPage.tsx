@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { Home, RotateCcw } from 'lucide-react'
+import { Home, MessageSquare, RotateCcw } from 'lucide-react'
 import { inCooldown, type CooldownMode } from '../api/study'
 import { selectCourses, useAppStore } from '../store/useAppStore'
 import { useStudyStore } from '../store/useStudyStore'
+import ChatDrawer from '../components/layout/ChatDrawer'
 import ConfirmDialog from '../components/study/ConfirmDialog'
 import EmptyCourse from '../components/study/EmptyCourse'
 import SkillTree from '../components/study/SkillTree'
@@ -19,10 +20,22 @@ export default function CourseStudyPage() {
   const { courseId = '' } = useParams()
   const id = decodeURIComponent(courseId)
   const { career, profile, manualCourses, loadCareer, setActiveCourse } = useAppStore()
-  const { tree, status, selectedNodeId, cooldownMode, setCooldownMode, load, select, submit, reset } = useStudyStore()
+  const {
+    tree,
+    status,
+    selectedNodeId,
+    cooldownMode,
+    setCooldownMode,
+    load,
+    select,
+    submit,
+    regenerateNodeStory,
+    reset,
+  } = useStudyStore()
   const [inProgress, setInProgress] = useState(false)
   const [pendingNode, setPendingNode] = useState<string | null>(null)
   const [askReset, setAskReset] = useState(false)
+  const [chatOpen, setChatOpen] = useState(false)
 
   const course = selectCourses({ career, profile, manualCourses }).find((c) => c.id === id)
   const lookupKey = course?.code ?? id
@@ -53,7 +66,7 @@ export default function CourseStudyPage() {
     return <main className="p-6 text-sm text-slate-500">Cargando árbol...</main>
   }
   if (status === 'empty' || !tree) {
-    return <EmptyCourse name={course ? course.name : 'Ramo no encontrado'} code={course?.code} />
+    return <EmptyCourse name={course ? course.name : 'Ramo no encontrado'} code={course?.code ?? id} />
   }
 
   const node = tree.nodes.find((n) => n.id === selectedNodeId) ?? null
@@ -79,7 +92,11 @@ export default function CourseStudyPage() {
             <div className="h-full bg-emerald-500 transition-all" style={{ width: `${stats.pct}%` }} />
           </div>
         </div>
-        <div className="inline-flex rounded-md border border-slate-300 p-0.5 dark:border-slate-600" role="group" aria-label="Modo de cooldown">
+        <div
+          className="inline-flex rounded-md border border-slate-300 p-0.5 dark:border-slate-600"
+          role="group"
+          aria-label="Modo de cooldown"
+        >
           {MODES.map((m) => (
             <button
               key={m.id}
@@ -97,7 +114,19 @@ export default function CourseStudyPage() {
             </button>
           ))}
         </div>
-        <button type="button" onClick={() => setAskReset(true)} title="Borra el progreso local de este ramo (solo demo)" className="inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800">
+        <button
+          type="button"
+          onClick={() => setChatOpen(true)}
+          className="inline-flex items-center gap-1 rounded border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
+        >
+          <MessageSquare size={13} /> Tutor del ramo
+        </button>
+        <button
+          type="button"
+          onClick={() => setAskReset(true)}
+          title="Borra el progreso local de este ramo (solo demo)"
+          className="inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800"
+        >
           <RotateCcw size={13} /> Reiniciar progreso
         </button>
         <Link to="/" className="inline-flex items-center gap-1 text-xs underline">
@@ -113,11 +142,15 @@ export default function CourseStudyPage() {
           {node ? (
             <StudyStation
               key={node.id}
+              courseId={tree.course_id}
               node={node}
               progress={tree.progress[node.id]}
               worldMetaphor={tree.world_metaphor}
               now={now}
               onSubmit={(req) => submit(node.id, req)}
+              onRegenerateStory={async () => {
+                await regenerateNodeStory(node.id)
+              }}
               onInProgressChange={setInProgress}
             />
           ) : (
@@ -125,6 +158,15 @@ export default function CourseStudyPage() {
           )}
         </div>
       </div>
+
+      <ChatDrawer
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
+        courseId={tree.course_id}
+        courseTitle={tree.title}
+        nodeId={selectedNodeId}
+        nodeTitle={node?.title ?? null}
+      />
 
       {pendingNode && (
         <ConfirmDialog

@@ -46,8 +46,8 @@ export interface EvaluateRequest {
   /** Respuestas por id de pregunta, en el orden mezclado en que se respondieron. */
   answers: { prompt_id: string; text: string }[]
   cooldown_mode: CooldownMode
-  /** Puntos de rubrica marcados como cubiertos (`${prompt_id}::${indice}`). */
-  covered_points: string[]
+  /** Puntos de rubrica marcados como cubiertos (`${prompt_id}::${indice}`). Si se omite, evalua con IA en backend. */
+  covered_points?: string[]
 }
 
 export interface PointFeedback {
@@ -63,6 +63,31 @@ export interface EvaluateResponse {
   counted_mastery: boolean // true si subio 0/3 -> 3/3
   feedback: PointFeedback[]
   progress: NodeProgress
+  imprecisions?: string[]
+  re_explanation?: string | null
+  evaluated_by?: string
+}
+
+export interface RegenerateStoryResponse {
+  course_id: string
+  node_id: string
+  story_script: string
+  provider: string
+}
+
+export interface ChatMessage {
+  id: number
+  course_id: string
+  node_id: string | null
+  role: 'user' | 'assistant'
+  content: string
+  created_at: string
+}
+
+export interface ChatResponse {
+  user_message: ChatMessage
+  assistant_message: ChatMessage
+  provider: string
 }
 
 export const PASS_SCORE = 7.0
@@ -103,6 +128,52 @@ export async function evaluate(
       method: 'POST',
       body: JSON.stringify(req),
     },
+  )
+}
+
+/** POST /api/v1/study/{course_id}/{node_id}/regenerate-story */
+export async function regenerateStory(
+  courseId: string,
+  nodeId: string,
+): Promise<RegenerateStoryResponse> {
+  return api<RegenerateStoryResponse>(
+    `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/regenerate-story`,
+    { method: 'POST' },
+  )
+}
+
+/** POST /api/v1/study/{course_id}/{node_id}/tts -> Blob MP3 */
+export async function fetchNodeTtsBlob(courseId: string, nodeId: string): Promise<Blob> {
+  const res = await fetch(
+    `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/tts`,
+    { method: 'POST' },
+  )
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return res.blob()
+}
+
+/** GET /api/v1/chat/{course_id} */
+export async function getChatHistory(courseId: string): Promise<ChatMessage[]> {
+  return api<ChatMessage[]>(`/api/v1/chat/${encodeURIComponent(courseId)}`)
+}
+
+/** POST /api/v1/chat/{course_id} */
+export async function sendChatMessage(
+  courseId: string,
+  message: string,
+  nodeId?: string | null,
+): Promise<ChatResponse> {
+  return api<ChatResponse>(`/api/v1/chat/${encodeURIComponent(courseId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ message, node_id: nodeId ?? null }),
+  })
+}
+
+/** DELETE /api/v1/chat/{course_id} */
+export async function clearChatHistory(courseId: string): Promise<void> {
+  await api<{ course_id: string; deleted: number }>(
+    `/api/v1/chat/${encodeURIComponent(courseId)}`,
+    { method: 'DELETE' },
   )
 }
 
