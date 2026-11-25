@@ -272,10 +272,15 @@ export default function CourseStudyPage() {
         onClose={() => setFilesOpen(false)}
         courseId={tree.course_code || tree.course_id}
         courseTitle={tree.title}
+        hasTree={tree.nodes.length > 0}
         refreshTrigger={filesRefresh}
         onOpenIngest={() => {
           setFilesOpen(false)
           setIngestOpen(true)
+        }}
+        onCourseCleared={() => {
+          void useAppStore.getState().hydrate()
+          void load(lookupKey)
         }}
       />
 

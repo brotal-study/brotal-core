@@ -276,12 +276,27 @@ def delete_course(
     course_id: str,
     conn: DbConn,
 ) -> dict[str, str]:
+    import shutil
+
+    from app.config import tts_cache_dir
+
     row = resolve_course_row(conn, course_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Course '{course_id}' not found")
-    conn.execute("DELETE FROM courses WHERE id = ?;", (row["id"],))
+    real_id = str(row["id"])
+    # Limpiar chunks FTS5, intentos y caché TTS asociados al ramo
+    fts_keys = {real_id, course_id}
+    if row["course_code"]:
+        fts_keys.add(str(row["course_code"]))
+    placeholders = ",".join("?" for _ in fts_keys)
+    conn.execute(f"DELETE FROM local_chunks_fts WHERE course_id IN ({placeholders});", tuple(fts_keys))
+    conn.execute("DELETE FROM evaluation_attempts WHERE course_id = ?;", (real_id,))
+    conn.execute("DELETE FROM courses WHERE id = ?;", (real_id,))
     conn.commit()
-    return {"deleted": row["id"]}
+    cache_path = tts_cache_dir() / real_id
+    if cache_path.exists():
+        shutil.rmtree(cache_path, ignore_errors=True)
+    return {"deleted": real_id}
 
 
 @router.get("/courses/{course_id}/export")

@@ -225,8 +225,13 @@ export default function CourseModal({ course, allCourses, statuses, pack, onClos
         <CourseFilesPanel
           courseId={course.code || course.id}
           refreshTrigger={filesRefresh}
+          hasTree={hasContentOrFiles}
           onFilesChange={setFilesCount}
           onOpenIngest={() => setIngestOpen(true)}
+          onCourseCleared={() => {
+            setFilesRefresh((n) => n + 1)
+            void useAppStore.getState().hydrate()
+          }}
         />
 
         <div className="mt-auto flex flex-col gap-2">

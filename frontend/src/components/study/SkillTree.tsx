@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
   Controls,
@@ -125,6 +125,9 @@ export default function SkillTree({
 }: Props) {
   const theme = useAppStore((s) => s.theme)
   const rfRef = useRef<ReactFlowInstance<Node, Edge> | null>(null)
+  const [rfReady, setRfReady] = useState(false)
+  const mountedSelectedRef = useRef<string | null>(selectedId)
+  const treeKey = `${tree.course_id}:${tree.nodes.length}:${branchFilter}`
 
   const visibleSkillNodes = useMemo(
     () =>
@@ -245,24 +248,33 @@ export default function SkillTree({
   }, [pos])
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      rfRef.current?.fitView({ padding: 0.22, duration: 250 })
-    }, 40)
-    return () => clearTimeout(timer)
-  }, [branchFilter, tree.course_id, tree.nodes.length])
+    if (!rfReady) return
+    mountedSelectedRef.current = selectedId
+    let raf2 = 0
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        rfRef.current?.fitView({ padding: 0.22, duration: 250 })
+      })
+    })
+    return () => {
+      cancelAnimationFrame(raf1)
+      cancelAnimationFrame(raf2)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rfReady, treeKey])
 
   useEffect(() => {
-    if (!selectedId) return
+    if (!rfReady || !selectedId) return
+    // No competir con el fitView inicial al recién montar el árbol; enfocar cuando el usuario selecciona un nodo.
+    if (mountedSelectedRef.current === selectedId) return
+    mountedSelectedRef.current = selectedId
+    const p = pos[selectedId]
+    if (!p) return
     const timer = setTimeout(() => {
-      rfRef.current?.fitView({
-        nodes: [{ id: selectedId }],
-        maxZoom: 1.05,
-        padding: 0.9,
-        duration: 350,
-      })
-    }, 45)
+      rfRef.current?.setCenter(p.x + 125, p.y + 72, { zoom: 0.98, duration: 350 })
+    }, 30)
     return () => clearTimeout(timer)
-  }, [selectedId])
+  }, [rfReady, selectedId, pos])
 
   const centerTree = () => {
     rfRef.current?.fitView({ padding: 0.22, duration: 300 })
@@ -277,6 +289,7 @@ export default function SkillTree({
       forceColorMode={theme}
       onInit={(instance) => {
         rfRef.current = instance
+        setRfReady(true)
       }}
       fitView
       fitViewOptions={{ padding: 0.22 }}
@@ -285,7 +298,14 @@ export default function SkillTree({
       translateExtent={translateExtent}
       nodesConnectable={false}
       onNodeClick={(_, n) => {
-        if (n.id !== ROOT_ID) onSelect(n.id)
+        if (n.id !== ROOT_ID) {
+          mountedSelectedRef.current = null
+          if (n.id === selectedId) {
+            const p = pos[n.id]
+            if (p) rfRef.current?.setCenter(p.x + 125, p.y + 72, { zoom: 0.98, duration: 350 })
+          }
+          onSelect(n.id)
+        }
       }}
       proOptions={{ hideAttribution: true }}
     >

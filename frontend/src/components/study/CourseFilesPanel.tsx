@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
-import { FilePlus2, FileText, FolderOpen, Loader2, Trash2, X } from 'lucide-react'
+import { AlertTriangle, FilePlus2, FileText, FolderOpen, Loader2, Trash2, X } from 'lucide-react'
 import {
   deleteCourseFile,
+  deleteCourseTree,
   getCourseFiles,
   type ProcessedFileSummary,
 } from '../../api/curriculum'
@@ -10,6 +11,8 @@ interface Props {
   courseId: string
   onOpenIngest: () => void
   onFilesChange?: (count: number) => void
+  onCourseCleared?: () => void
+  hasTree?: boolean
   refreshTrigger?: number
 }
 
@@ -17,11 +20,15 @@ export default function CourseFilesPanel({
   courseId,
   onOpenIngest,
   onFilesChange,
+  onCourseCleared,
+  hasTree = false,
   refreshTrigger = 0,
 }: Props) {
   const [files, setFiles] = useState<ProcessedFileSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [deletingFile, setDeletingFile] = useState<string | null>(null)
+  const [confirmClear, setConfirmClear] = useState(false)
+  const [clearingTree, setClearingTree] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const loadFiles = useCallback(async () => {
@@ -57,6 +64,24 @@ export default function CourseFilesPanel({
     }
   }
 
+  const handleClearTree = async () => {
+    setClearingTree(true)
+    setError(null)
+    try {
+      await deleteCourseTree(courseId)
+      setFiles([])
+      setConfirmClear(false)
+      onFilesChange?.(0)
+      onCourseCleared?.()
+    } catch {
+      setError('No se pudo vaciar el árbol del ramo.')
+    } finally {
+      setClearingTree(false)
+    }
+  }
+
+  const canClearTree = hasTree || files.length > 0
+
   return (
     <div className="flex flex-col gap-2.5 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
       <div className="flex items-center justify-between gap-2">
@@ -81,7 +106,9 @@ export default function CourseFilesPanel({
         </div>
       ) : files.length === 0 ? (
         <p className="text-xs text-slate-500">
-          Aún no hay archivos locales indexados para este ramo.
+          {hasTree
+            ? 'No quedan archivos indexados. El árbol generado se conserva hasta que uses "Vaciar árbol del ramo" o subas archivos con "Reemplazar todo".'
+            : 'Aún no hay archivos locales indexados para este ramo.'}
         </p>
       ) : (
         <ul className="max-h-48 divide-y divide-slate-200 overflow-y-auto rounded border border-slate-200 text-xs dark:divide-slate-800 dark:border-slate-800">
@@ -119,6 +146,49 @@ export default function CourseFilesPanel({
         </ul>
       )}
 
+      {canClearTree && (
+        <div className="border-t border-slate-200 pt-2.5 dark:border-slate-800">
+          {!confirmClear ? (
+            <button
+              type="button"
+              onClick={() => setConfirmClear(true)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-rose-200 px-2.5 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50 dark:border-rose-900/60 dark:text-rose-300 dark:hover:bg-rose-950/40"
+            >
+              <Trash2 size={13} />
+              Vaciar árbol del ramo
+            </button>
+          ) : (
+            <div className="flex flex-col gap-2 rounded-md border border-rose-300 bg-rose-50 p-2.5 text-xs text-rose-800 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-200">
+              <div className="flex items-start gap-2">
+                <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                <span>
+                  Se eliminarán todos los nodos del árbol, los archivos indexados y el progreso de este ramo. ¿Confirmar?
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={clearingTree}
+                  onClick={() => void handleClearTree()}
+                  className="inline-flex items-center gap-1 rounded bg-rose-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-rose-500 disabled:opacity-50"
+                >
+                  {clearingTree && <Loader2 size={12} className="animate-spin" />}
+                  Sí, vaciar todo
+                </button>
+                <button
+                  type="button"
+                  disabled={clearingTree}
+                  onClick={() => setConfirmClear(false)}
+                  className="rounded border border-slate-300 bg-white px-2.5 py-1 text-xs text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {error && <p className="text-xs text-rose-600 dark:text-rose-400">{error}</p>}
     </div>
   )
@@ -130,6 +200,8 @@ export function CourseFilesModal({
   courseId,
   courseTitle,
   onOpenIngest,
+  onCourseCleared,
+  hasTree = true,
   refreshTrigger = 0,
 }: {
   open: boolean
@@ -137,6 +209,8 @@ export function CourseFilesModal({
   courseId: string
   courseTitle: string
   onOpenIngest: () => void
+  onCourseCleared?: () => void
+  hasTree?: boolean
   refreshTrigger?: number
 }) {
   if (!open) return null
@@ -156,7 +230,7 @@ export function CourseFilesModal({
           <div className="min-w-0">
             <h2 className="truncate text-base font-semibold">Archivos del ramo · {courseTitle}</h2>
             <p className="text-xs text-slate-500">
-              Agrega nuevos apuntes semana a semana conservando tu progreso o gestiona los archivos indexados en FTS5.
+              Agrega nuevos apuntes semana a semana conservando tu progreso, gestiona los archivos indexados o vacía el árbol completo.
             </p>
           </div>
           <button
@@ -172,7 +246,12 @@ export function CourseFilesModal({
         <CourseFilesPanel
           courseId={courseId}
           refreshTrigger={refreshTrigger}
+          hasTree={hasTree}
           onOpenIngest={onOpenIngest}
+          onCourseCleared={() => {
+            onCourseCleared?.()
+            onClose()
+          }}
         />
       </div>
     </div>
