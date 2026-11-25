@@ -215,6 +215,7 @@ export interface IngestLocalResponse {
   node_count: number
   chunks_indexed: number
   processed_files: ProcessedFileSummary[]
+  skipped_files?: { filename: string; reason: string }[]
   provider: string
   world_metaphor: string
 }
@@ -275,4 +276,11 @@ export async function deleteCourseFile(
     `/api/v1/courses/${encodeURIComponent(courseId)}/files/${encodeURIComponent(filename)}`,
     { method: 'DELETE' },
   )
+}
+
+/** DELETE /api/v1/courses/{course_id} — vacía completamente el árbol, archivos y progreso del ramo */
+export async function deleteCourseTree(courseId: string): Promise<{ deleted: string }> {
+  return api<{ deleted: string }>(`/api/v1/courses/${encodeURIComponent(courseId)}`, {
+    method: 'DELETE',
+  })
 }

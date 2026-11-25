@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import {
   AlertTriangle,
   ArrowRight,
@@ -42,6 +42,7 @@ export default function IngestModal({
   onIngested,
 }: Props) {
   const navigate = useNavigate()
+  const location = useLocation()
   const { installedPacks, setStatus, setActiveCourse, hydrate } = useAppStore()
   const { tree: currentTree, load: loadStudyTree } = useStudyStore()
 
@@ -142,9 +143,6 @@ export default function IngestModal({
       setResult(res)
       setStatus(res.course_code, 'active')
       await hydrate()
-      if (hasTreeNodes) {
-        await loadStudyTree(defaultCode || res.course_code || res.course_id)
-      }
       onIngested?.(res)
     } catch (exc) {
       setErr(exc instanceof Error ? exc.message : 'Error al procesar los archivos.')
@@ -156,10 +154,14 @@ export default function IngestModal({
   const goToTree = async () => {
     if (!result) return
     const targetKey = defaultCode || result.course_code || result.course_id
+    const targetPath = `/course/${encodeURIComponent(targetKey)}`
     setActiveCourse(targetKey)
-    await loadStudyTree(targetKey)
     onClose()
-    navigate(`/course/${encodeURIComponent(targetKey)}`)
+    if (location.pathname === targetPath) {
+      await loadStudyTree(targetKey)
+    } else {
+      navigate(targetPath)
+    }
   }
 
   return (
