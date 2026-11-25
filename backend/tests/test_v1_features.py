@@ -674,3 +674,101 @@ def test_tts_word_boundary_timings_saved_and_returned(
     assert payload["words"][0]["start"] == 0.0
     assert payload["words"][0]["end"] == 0.3
     assert len(payload["sentences"]) >= 1
+
+
+def test_detect_engine_type_java_sql_and_concept_tree() -> None:
+    from app.services.ingest import ExtractedChunk, detect_engine_type
+
+    java_chunks = [
+        ExtractedChunk(
+            source_file="Guia1.md",
+            section_title="Herencia y Polimorfismo",
+            content="public class Animal { public static void main(String[] args) { System.out.println(1); } }",
+        )
+    ]
+    eng_java, lang_java = detect_engine_type("INF2236", "Programacion Avanzada en Java", java_chunks)
+    assert eng_java == "code_lab"
+    assert lang_java == "java"
+
+    sql_chunks = [
+        ExtractedChunk(
+            source_file="Consultas.md",
+            section_title="Modelo Relacional",
+            content="CREATE TABLE alumnos (id INT PRIMARY KEY); SELECT nombre FROM alumnos INNER JOIN cursos GROUP BY id;",
+        )
+    ]
+    eng_sql, lang_sql = detect_engine_type("INF2240", "Bases de Datos Relacionales", sql_chunks)
+    assert eng_sql == "code_lab"
+    assert lang_sql == "sql"
+
+    concept_chunks = [
+        ExtractedChunk(
+            source_file="Redes.md",
+            section_title="Capas OSI",
+            content="El modelo OSI divide las comunicaciones de red en siete capas jerarquicas desde la capa fisica.",
+        )
+    ]
+    eng_concept, lang_concept = detect_engine_type("INF2324", "Redes de Computadores", concept_chunks)
+    assert eng_concept == "concept_tree"
+    assert lang_concept == "text"
+
+
+def test_code_lab_ingest_generates_code_challenges_and_tree_returns_engine_type(client: TestClient) -> None:
+    java_notes = (
+        b"# Clases, Constructores y Encapsulamiento en Java\n"
+        b"public class CuentaBancaria { private double saldo; public void depositar(double monto) {} }\n"
+        b"El encapsulamiento protege el invariante del objeto usando atributos private y metodos publicos.\n\n"
+        b"# Herencia, Polimorfismo y Sobrescritura con @Override\n"
+        b"class CuentaAhorro extends CuentaBancaria implements Auditable { @Override public void depositar(double m) {} }\n"
+        b"El despacho dinamico en la JVM invoca la implementacion real del objeto en el heap.\n\n"
+        b"# Excepciones Checked vs RuntimeException\n"
+        b"Los bloques try { ... } catch (IOException e) { ... } obligan a declarar o capturar errores verificados.\n"
+    )
+
+    res = client.post(
+        "/api/v1/courses/ingest-local",
+        data={
+            "course_code": "INF2236",
+            "title": "Programacion Orientada a Objetos en Java",
+            "career_id": "cl-pucv-inf-2022",
+            "engine_type": "auto",
+        },
+        files=[("files", ("apuntes_java.md", java_notes, "text/markdown"))],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["engine_type"] == "code_lab"
+    assert body["detected_language"] == "java"
+
+    tree_res = client.get("/api/v1/courses/INF2236/tree")
+    assert tree_res.status_code == 200
+    tree = tree_res.json()
+    assert tree["engine_type"] == "code_lab"
+    assert len(tree["nodes"]) >= 6
+
+    theory_nodes = [n for n in tree["nodes"] if n["branch"] == "theory"]
+    practice_nodes = [n for n in tree["nodes"] if n["branch"] == "practice"]
+    assert len(theory_nodes) >= 4
+    assert len(practice_nodes) >= 1
+
+    # Nodos theory combinan concept + desafios de codigo con starter_code
+    t_prompts = theory_nodes[0]["eval_prompts"]
+    t_types = {p["challenge_type"] for p in t_prompts}
+    assert "concept" in t_types
+    assert bool(t_types & {"debug", "trace", "implement"})
+    code_prompts = [p for p in t_prompts if p["challenge_type"] in ("debug", "trace", "implement")]
+    assert all(p["language"] == "java" and p["starter_code"] and len(p["starter_code"]) > 20 for p in code_prompts)
+
+    # Nodos practice tienen desafios debug/implement con starter_code
+    p_prompts = practice_nodes[0]["eval_prompts"]
+    assert all(p["challenge_type"] in ("debug", "implement", "trace") for p in p_prompts)
+    assert all(p["starter_code"] and "class " in p["starter_code"] for p in p_prompts)
+
+    # Regenerar preguntas en code_lab produce nuevo starter_code distinto
+    prev_debug = next(p for p in t_prompts if p["challenge_type"] == "debug")
+    regen_res = client.post(f"/api/v1/study/INF2236/{theory_nodes[0]['id']}/regenerate-questions")
+    assert regen_res.status_code == 200
+    regen_prompts = regen_res.json()["eval_prompts"]
+    new_debug = next(p for p in regen_prompts if p["id"] == prev_debug["id"])
+    assert new_debug["challenge_type"] == "debug"
+    assert new_debug["starter_code"] != prev_debug["starter_code"]

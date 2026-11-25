@@ -27,6 +27,7 @@ import {
 import type { QuestionStyle } from '../../api/curriculum'
 import { useStudyStore } from '../../store/useStudyStore'
 import MarkdownView from '../common/MarkdownView'
+import CodeChallengeInput from './CodeChallengeInput'
 import { formatRemaining, useNow } from './studyUtils'
 
 interface Props {
@@ -63,6 +64,25 @@ function shuffled(nodeId: string, prompts: EvalPrompt[]): EvalPrompt[] {
   return out
 }
 
+function buildInitialAnswers(prompts: EvalPrompt[]): Record<string, string> {
+  const init: Record<string, string> = {}
+  for (const p of prompts) {
+    if ((p.challenge_type === 'debug' || p.challenge_type === 'implement') && p.starter_code) {
+      init[p.id] = p.starter_code
+    }
+  }
+  return init
+}
+
+function isPromptEditedOrAnswered(q: EvalPrompt, answers: Record<string, string>): boolean {
+  const val = (answers[q.id] ?? '').trim()
+  if (val.length === 0) return false
+  if ((q.challenge_type === 'debug' || q.challenge_type === 'implement') && q.starter_code) {
+    return val !== q.starter_code.trim()
+  }
+  return true
+}
+
 export default function EvalTab({
   node,
   progress,
@@ -75,7 +95,9 @@ export default function EvalTab({
   const questionStyle = useStudyStore((s) => s.questionStyle)
   const setQuestionStyle = useStudyStore((s) => s.setQuestionStyle)
   const [order, setOrder] = useState(() => shuffled(node.id, node.eval_prompts))
-  const [answers, setAnswers] = useState<Record<string, string>>({})
+  const [answers, setAnswers] = useState<Record<string, string>>(() =>
+    buildInitialAnswers(node.eval_prompts),
+  )
   const [phase, setPhase] = useState<Phase>('answering')
   const [covered, setCovered] = useState<Set<string>>(new Set())
   const [result, setResult] = useState<EvaluateResponse | null>(null)
@@ -84,6 +106,7 @@ export default function EvalTab({
 
   useEffect(() => {
     setOrder(shuffled(node.id, node.eval_prompts))
+    setAnswers(buildInitialAnswers(node.eval_prompts))
   }, [node.id, node.eval_prompts])
 
   const cooling = inCooldown(progress)
@@ -98,7 +121,7 @@ export default function EvalTab({
   }, [phase, onInProgressChange])
   useEffect(() => () => onInProgressChange(false), [onInProgressChange])
 
-  const hasAnswer = Object.values(answers).some((t) => t.trim().length > 0)
+  const hasAnswer = order.some((q) => isPromptEditedOrAnswered(q, answers))
 
   const evaluateWithAi = async () => {
     setBusy(true)
@@ -117,7 +140,6 @@ export default function EvalTab({
     setRegeneratingQuestions(true)
     try {
       await onRegenerateQuestions()
-      setAnswers({})
       setCovered(new Set())
       setResult(null)
       setPhase('answering')
@@ -148,7 +170,7 @@ export default function EvalTab({
 
   const retry = () => {
     setOrder(shuffled(node.id, node.eval_prompts))
-    setAnswers({})
+    setAnswers(buildInitialAnswers(node.eval_prompts))
     setCovered(new Set())
     setResult(null)
     setPhase('answering')
@@ -220,18 +242,13 @@ export default function EvalTab({
       {phase === 'answering' && (
         <>
           {order.map((q, i) => (
-            <label key={q.id} className="flex min-w-0 flex-col gap-1.5">
-              <span className="break-words text-sm font-medium">
-                {i + 1}. {q.question}
-              </span>
-              <textarea
-                value={answers[q.id] ?? ''}
-                onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
-                rows={4}
-                className="w-full rounded-md border border-slate-300 bg-white p-2 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 dark:border-slate-600 dark:bg-slate-900"
-                placeholder="Tu respuesta..."
-              />
-            </label>
+            <CodeChallengeInput
+              key={q.id}
+              prompt={q}
+              index={i}
+              value={answers[q.id] ?? ''}
+              onChange={(nextValue) => setAnswers((a) => ({ ...a, [q.id]: nextValue }))}
+            />
           ))}
 
           {busy && (

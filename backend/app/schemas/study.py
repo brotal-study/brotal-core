@@ -23,6 +23,7 @@ class CourseTreeResponse(BaseModel):
     course_id: str
     course_code: str
     title: str
+    engine_type: str = "concept_tree"
     world_metaphor: str | None = None
     nodes: list[PackNode]
     progress: dict[str, NodeProgress]

@@ -1,20 +1,46 @@
 """Esquemas Pydantic v2 para CoursePack y ramos (Issue #3)."""
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.career import CourseStatus
 
 BranchType = Literal["theory", "practice"]
 EngineType = Literal["concept_tree", "code_lab", "language_studio"]
+ChallengeType = Literal["concept", "trace", "debug", "implement"]
+CodeLanguage = Literal["java", "sql", "python", "c", "text"]
+
+_VALID_CHALLENGE_TYPES = {"concept", "trace", "debug", "implement"}
+_VALID_CODE_LANGUAGES = {"java", "sql", "python", "c", "text"}
 
 
 class EvalPrompt(BaseModel):
     id: str
     question: str
     rubric_points: list[str] = Field(min_length=1)
+    challenge_type: ChallengeType = "concept"
+    language: CodeLanguage = "text"
+    starter_code: str | None = None
+
+    @field_validator("challenge_type", mode="before")
+    @classmethod
+    def _normalize_challenge_type(cls, v: Any) -> str:
+        if isinstance(v, str) and v.strip().lower() in _VALID_CHALLENGE_TYPES:
+            return v.strip().lower()
+        return "concept"
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def _normalize_language(cls, v: Any) -> str:
+        if isinstance(v, str):
+            low = v.strip().lower()
+            if low in ("cpp", "c++"):
+                return "c"
+            if low in _VALID_CODE_LANGUAGES:
+                return low
+        return "text"
 
 
 class PackNode(BaseModel):

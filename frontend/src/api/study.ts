@@ -3,11 +3,17 @@ import { api } from './client'
 
 export type Branch = 'theory' | 'practice'
 export type CooldownMode = 'semester' | 'urgency'
+export type ChallengeType = 'concept' | 'trace' | 'debug' | 'implement'
+export type CodeLanguage = 'java' | 'sql' | 'python' | 'c' | 'text'
+export type EngineType = 'concept_tree' | 'code_lab' | 'language_studio'
 
 export interface EvalPrompt {
   id: string
   question: string
   rubric_points: string[]
+  challenge_type?: ChallengeType | null
+  language?: CodeLanguage | null
+  starter_code?: string | null
 }
 
 export interface PackNode {
@@ -37,6 +43,7 @@ export interface CourseTree {
   course_id: string
   course_code: string
   title: string
+  engine_type?: EngineType | string
   world_metaphor: string | null
   nodes: PackNode[]
   progress: Record<string, NodeProgress>

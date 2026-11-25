@@ -144,6 +144,7 @@ def get_course_tree(
         course_id=real_id,
         course_code=course_row["course_code"] or real_id,
         title=course_row["title"],
+        engine_type=course_row["engine_type"] or "concept_tree",
         world_metaphor=world_metaphor,
         nodes=nodes,
         progress=progress,
@@ -192,6 +193,7 @@ def post_evaluate_node(
                 eval_prompts=eval_prompts,
                 answers_by_prompt=answers_by_prompt,
                 preferred_provider=ai_provider,
+                engine_type=course_row["engine_type"] or "concept_tree",
             )
             raw_feedback = evaluate_rubric(eval_prompts, answers_by_prompt, ai_res["covered_points"])
             computed_score = float(ai_res["score"])
@@ -422,6 +424,7 @@ def post_regenerate_questions(
         eval_prompts=eval_prompts,
         preferred_provider=ai_provider,
         question_style=question_style,
+        engine_type=course_row["engine_type"] or "concept_tree",
     )
     validated_prompts = [EvalPrompt.model_validate(p) for p in new_prompts_raw]
 

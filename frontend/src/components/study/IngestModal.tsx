@@ -5,12 +5,15 @@ import {
   ArrowRight,
   CheckCircle2,
   Clock,
+  Code2,
   FilePlus2,
   FileText,
+  GitBranch,
   Layers,
   Loader2,
   RefreshCw,
   ShieldAlert,
+  Sparkles,
   Trash2,
   Upload,
   X,
@@ -18,6 +21,7 @@ import {
 import {
   getCourseFiles,
   ingestLocalFiles,
+  type IngestEngineType,
   type IngestLocalResponse,
   type IngestMode,
 } from '../../api/curriculum'
@@ -51,6 +55,7 @@ export default function IngestModal({
   const [metaphor, setMetaphor] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [mode, setMode] = useState<IngestMode>('append')
+  const [engineType, setEngineType] = useState<IngestEngineType>('auto')
   const [existingFilesCount, setExistingFilesCount] = useState(0)
   const [busy, setBusy] = useState(false)
   const [elapsedSec, setElapsedSec] = useState(0)
@@ -72,6 +77,7 @@ export default function IngestModal({
       setCode(defaultCode)
       setTitle(defaultTitle)
       setMode('append')
+      setEngineType('auto')
       setErr(null)
     }
   }, [open, defaultCode, defaultTitle])
@@ -138,6 +144,7 @@ export default function IngestModal({
         career_id: careerId,
         world_metaphor: metaphor.trim() || undefined,
         mode: effectiveMode,
+        engine_type: engineType,
         files,
       })
       setResult(res)
@@ -239,6 +246,62 @@ export default function IngestModal({
                 className="rounded border border-slate-300 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-950"
               />
             </label>
+
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
+                Motor de estudio
+              </span>
+              <div
+                className="grid grid-cols-1 gap-1.5 sm:grid-cols-3"
+                role="radiogroup"
+                aria-label="Motor de estudio"
+              >
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={engineType === 'auto'}
+                  onClick={() => setEngineType('auto')}
+                  className={`inline-flex items-center justify-center gap-1.5 rounded-md border px-2.5 py-2 text-xs font-medium transition ${
+                    engineType === 'auto'
+                      ? 'border-indigo-600 bg-indigo-50/80 text-indigo-950 dark:border-indigo-500 dark:bg-indigo-950/50 dark:text-indigo-100'
+                      : 'border-slate-300 text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800/50'
+                  }`}
+                >
+                  <Sparkles size={13} className="shrink-0 text-indigo-600 dark:text-indigo-400" />
+                  <span>Auto (recomendado)</span>
+                </button>
+
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={engineType === 'concept_tree'}
+                  onClick={() => setEngineType('concept_tree')}
+                  className={`inline-flex items-center justify-center gap-1.5 rounded-md border px-2.5 py-2 text-xs font-medium transition ${
+                    engineType === 'concept_tree'
+                      ? 'border-indigo-600 bg-indigo-50/80 text-indigo-950 dark:border-indigo-500 dark:bg-indigo-950/50 dark:text-indigo-100'
+                      : 'border-slate-300 text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800/50'
+                  }`}
+                >
+                  <GitBranch size={13} className="shrink-0 text-emerald-600 dark:text-emerald-400" />
+                  <span>Árbol Conceptual</span>
+                </button>
+
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={engineType === 'code_lab'}
+                  onClick={() => setEngineType('code_lab')}
+                  className={`inline-flex items-center justify-center gap-1.5 rounded-md border px-2.5 py-2 text-xs font-medium transition ${
+                    engineType === 'code_lab'
+                      ? 'border-indigo-600 bg-indigo-50/80 text-indigo-950 dark:border-indigo-500 dark:bg-indigo-950/50 dark:text-indigo-100'
+                      : 'border-slate-300 text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800/50'
+                  }`}
+                >
+                  <Code2 size={13} className="shrink-0 text-sky-600 dark:text-sky-400" />
+                  <span>Code Lab (código/SQL)</span>
+                </button>
+              </div>
+            </div>
 
             {hasExistingContent && (
               <div className="flex flex-col gap-2">
@@ -403,7 +466,13 @@ export default function IngestModal({
                     : `Árbol generado: ${result.node_count} nodos (${result.chunks_indexed} secciones en FTS5)`}
                 </div>
                 <p className="mt-0.5">
-                  Motor utilizado: <code className="font-mono">{result.provider}</code> · Modo:{' '}
+                  Motor activado:{' '}
+                  <strong>
+                    {result.engine_type === 'code_lab'
+                      ? `Code Lab${result.detected_language && result.detected_language !== 'text' ? ` (${result.detected_language.toUpperCase()})` : ''}`
+                      : 'Árbol Conceptual'}
+                  </strong>{' '}
+                  · IA: <code className="font-mono">{result.provider}</code> · Modo:{' '}
                   <strong>{result.mode === 'append' ? 'Incremental (progreso conservado)' : 'Árbol completo'}</strong>
                 </p>
               </div>
