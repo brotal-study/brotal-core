@@ -198,6 +198,7 @@ export async function putProvidersSettings(
 }
 
 export type IngestMode = 'append' | 'replace'
+export type IngestEngineType = 'auto' | 'concept_tree' | 'code_lab'
 
 export interface ProcessedFileSummary {
   filename: string
@@ -209,6 +210,8 @@ export interface IngestLocalResponse {
   course_id: string
   course_code: string
   title: string
+  engine_type?: 'concept_tree' | 'code_lab' | string
+  detected_language?: string
   status: CourseStatus
   mode?: IngestMode
   added_nodes?: number
@@ -227,6 +230,7 @@ export async function ingestLocalFiles(params: {
   career_id?: string | null
   world_metaphor?: string
   mode?: IngestMode
+  engine_type?: IngestEngineType
   files: File[]
 }): Promise<IngestLocalResponse> {
   const form = new FormData()
@@ -235,6 +239,7 @@ export async function ingestLocalFiles(params: {
   if (params.career_id) form.append('career_id', params.career_id)
   if (params.world_metaphor) form.append('world_metaphor', params.world_metaphor)
   form.append('mode', params.mode ?? 'replace')
+  form.append('engine_type', params.engine_type ?? 'auto')
   for (const file of params.files) {
     form.append('files', file)
   }

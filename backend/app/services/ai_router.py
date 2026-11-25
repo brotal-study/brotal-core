@@ -282,50 +282,72 @@ def evaluate_with_ai(
     eval_prompts: list[dict[str, Any]],
     answers_by_prompt: dict[str, str],
     preferred_provider: str = "auto",
+    engine_type: str = "concept_tree",
 ) -> dict[str, Any]:
     """Evalua respuestas a ciegas con rigor socratico 1..10 usando el router multi-IA.
 
-    Devuelve dict con:
-    - score: float (1.0 .. 10.0)
-    - covered_points: list[str] (formato "q1::0")
-    - missing_summary: list[str]
-    - imprecisions: list[str]
-    - re_explanation: str | None (si score < 7.0)
-    - provider: str
-    - model: str
+    Cuando engine_type == 'code_lab' o alguna pregunta es 'debug'/'implement'/'trace',
+    actua como Senior Dev / Profesor exigente de programacion y bases de datos.
     """
     rubric_spec: list[dict[str, Any]] = []
     all_keys: list[str] = []
+    has_code_challenge = engine_type == "code_lab"
+
     for q in eval_prompts:
         qid = str(q["id"])
+        ct = str(q.get("challenge_type") or "concept").strip().lower()
+        lang = str(q.get("language") or "text").strip().lower()
+        starter = q.get("starter_code")
+        if ct in ("debug", "implement", "trace") or starter:
+            has_code_challenge = True
         pts = []
         for idx, pt in enumerate(q.get("rubric_points", [])):
             key = f"{qid}::{idx}"
             all_keys.append(key)
             pts.append({"key": key, "criterion": pt})
-        rubric_spec.append(
-            {
-                "prompt_id": qid,
-                "question": q.get("question", ""),
-                "student_answer": answers_by_prompt.get(qid, "").strip(),
-                "rubric_points": pts,
-            }
+        item_spec: dict[str, Any] = {
+            "prompt_id": qid,
+            "challenge_type": ct,
+            "language": lang,
+            "question": q.get("question", ""),
+            "student_answer": answers_by_prompt.get(qid, "").strip(),
+            "rubric_points": pts,
+        }
+        if starter:
+            item_spec["starter_code"] = str(starter)
+        rubric_spec.append(item_spec)
+
+    senior_dev_rules = ""
+    if has_code_challenge:
+        senior_dev_rules = (
+            "\nMODO SENIOR DEV / PROFESOR EXIGENTE DE CODIGO (`code_lab`):\n"
+            "- Evalua el codigo y las trazas del estudiante como un Senior Developer y profesor universitario riguroso.\n"
+            "- Revisa logica, tipos, sintaxis clave (`extends`/`implements`, `super()`, `@Override`, encapsulamiento, "
+            "manejo de excepciones `try/catch/throws`, `null`/casos borde, mutacion de colecciones o consultas SQL "
+            "`JOIN`, `GROUP BY`, `HAVING`).\n"
+            "- En desafios `debug` o `implement`, compara `student_answer` contra `starter_code`: si el estudiante "
+            "dejo el `starter_code` sin corregir el bug o con el `TODO` vacio, NO otorgues esos puntos y califica bajo.\n"
+            "- En `imprecisions`, señala explicitamente QUE LINEA, condicion, firma o detalle tecnico falla.\n"
+            "- Si `score < 7.0`, en `re_explanation` incluye una explicacion directa del fallo acompañada de un "
+            "bloque de codigo Markdown limpio (ej. ```java ... ``` o ```sql ... ```) mostrando la correccion o guia.\n"
         )
 
     system_prompt = (
         "Eres el Evaluador Socratico de Brotal. Evaluas respuestas a ciegas de un estudiante universitario "
-        "con rigor del 1.0 al 10.0 (7.0 o mas aprueba). No regales puntos si la respuesta es vaga o vacia. "
+        "con rigor del 1.0 al 10.0 (7.0 o mas aprueba). No regales puntos si la respuesta es vaga o vacia."
+        f"{senior_dev_rules}\n"
         "Responde UNICAMENTE un objeto JSON valido con esta estructura exacta:\n"
         "{\n"
         '  "score": 7.5,\n'
         '  "covered_points": ["q1::0", "q1::1"],\n'
-        '  "imprecisions": ["Confunde X con Y"],\n'
-        '  "re_explanation": "Breve re-explicacion conversada (solo si score < 7.0, vacio si >= 7.0)"\n'
+        '  "imprecisions": ["En linea X: falta validar null / usar equals() en vez de =="],\n'
+        '  "re_explanation": "Breve re-explicacion conversada y bloque de codigo Markdown si aplica (solo si score < 7.0, vacio si >= 7.0)"\n'
         "}"
     )
     user_prompt = json.dumps(
         {
             "node_title": node_title,
+            "engine_type": engine_type,
             "reference_story": story_script[:2000],
             "evaluation_items": rubric_spec,
         },
@@ -380,6 +402,9 @@ def evaluate_with_ai(
         "provider": completion.provider,
         "model": completion.model,
     }
+
+
+evaluate_answers_with_ai = evaluate_with_ai
 
 
 def _strip_bullets(story: str) -> str:
@@ -517,6 +542,135 @@ def regenerate_story_with_ai(
         return (alt, "local_fallback")
 
 
+def _alternate_starter_code(
+    *,
+    language: str,
+    challenge_type: str,
+    node_title: str,
+    prev_starter: str | None,
+    idx: int = 1,
+) -> str:
+    """Genera un starter_code alternativo distinto al anterior para regeneracion en code_lab."""
+    lang = language if language in ("java", "sql", "python", "c") else "java"
+    clean_cls = re.sub(r"[^a-zA-Z0-9]", "", node_title.title())[:16] or f"Reto{idx}"
+    if not clean_cls[0].isalpha():
+        clean_cls = f"Nodo{clean_cls}"
+
+    variants_java: dict[str, list[str]] = {
+        "debug": [
+            (
+                f"// Variante A (Debugging): {node_title}\n"
+                "import java.util.Map;\n\n"
+                f"public class {clean_cls}Validator {{\n"
+                "    public int obtenerPuntaje(Map<String, Integer> tabla, String clave) {\n"
+                "        // BUG: unboxing directo de null lanza NullPointerException si la clave no existe\n"
+                "        int valor = tabla.get(clave);\n"
+                "        return valor >= 0 ? valor : 0;\n"
+                "    }\n"
+                "}"
+            ),
+            (
+                f"// Variante B (Debugging): {node_title}\n"
+                "import java.util.List;\n\n"
+                f"public class {clean_cls}Processor {{\n"
+                "    public void limpiarInactivos(List<String> codigos) {\n"
+                "        // BUG: remover en for-each lanza ConcurrentModificationException\n"
+                "        for (String c : codigos) {\n"
+                "            if (c == null || c.isBlank()) {\n"
+                "                codigos.remove(c);\n"
+                "            }\n"
+                "        }\n"
+                "    }\n"
+                "}"
+            ),
+        ],
+        "implement": [
+            (
+                f"// Variante A (Implementacion): {node_title}\n"
+                "import java.util.List;\n\n"
+                f"public class {clean_cls}Analyzer {{\n"
+                "    /**\n"
+                "     * Calcula el promedio de los valores positivos de la lista.\n"
+                "     * Si la lista es null o no contiene positivos, retorna 0.0.\n"
+                "     */\n"
+                "    public double promedioPositivos(List<Integer> valores) {\n"
+                "        // TODO: implementar validando null y filtrando valores > 0\n"
+                "        return 0.0;\n"
+                "    }\n"
+                "}"
+            ),
+            (
+                f"// Variante B (Implementacion): {node_title}\n"
+                "import java.util.Map;\n\n"
+                f"public class {clean_cls}Registry {{\n"
+                "    /**\n"
+                "     * Incrementa en 1 el contador asociado a 'id' dentro del mapa.\n"
+                "     * Si 'id' es null o vacio lanza IllegalArgumentException.\n"
+                "     */\n"
+                "    public int registrarEvento(Map<String, Integer> contadores, String id) {\n"
+                "        // TODO: implementar actualizacion segura en el mapa y retornar nuevo total\n"
+                "        return 0;\n"
+                "    }\n"
+                "}"
+            ),
+        ],
+        "trace": [
+            (
+                f"// Variante A (Traza JVM): {node_title}\n"
+                "class Base {\n"
+                "    public String etiqueta() { return \"B\"; }\n"
+                "    public String resumen() { return \"[\" + etiqueta() + \"]\"; }\n"
+                "}\n"
+                f"class {clean_cls}Sub extends Base {{\n"
+                "    @Override\n"
+                "    public String etiqueta() { return \"S\"; }\n"
+                "}\n"
+                f"Base obj = new {clean_cls}Sub();\n"
+                "System.out.println(obj.resumen());"
+            ),
+            (
+                f"// Variante B (Traza JVM): {node_title}\n"
+                "int resultado = 10;\n"
+                "try {\n"
+                "    resultado += 5;\n"
+                "    if (resultado > 12) throw new IllegalStateException(\"limite\");\n"
+                "    resultado += 100;\n"
+                "} catch (IllegalStateException e) {\n"
+                "    resultado *= 2;\n"
+                "} finally {\n"
+                "    resultado -= 3;\n"
+                "}\n"
+                "System.out.println(resultado);"
+            ),
+        ],
+    }
+
+    if lang == "sql":
+        sql_A = (
+            f"-- Variante A ({challenge_type.upper()}): {node_title}\n"
+            "SELECT e.id, e.nombre, AVG(n.calificacion) AS promedio\n"
+            "FROM estudiantes e\n"
+            "INNER JOIN notas n ON n.estudiante_id = e.id\n"
+            "WHERE AVG(n.calificacion) >= 4.0\n"
+            "GROUP BY e.id, e.nombre;"
+        )
+        sql_B = (
+            f"-- Variante B ({challenge_type.upper()}): {node_title}\n"
+            "SELECT c.codigo, COUNT(m.id) AS total\n"
+            "FROM cursos c\n"
+            "LEFT JOIN matriculas m ON m.curso_id = c.id\n"
+            "GROUP BY c.codigo\n"
+            "HAVING COUNT(m.id) > 0\n"
+            "ORDER BY total DESC;"
+        )
+        return sql_B if (prev_starter and "Variante A" in prev_starter) else sql_A
+
+    pool = variants_java.get(challenge_type, variants_java["implement"])
+    if prev_starter and prev_starter.strip() == pool[0].strip():
+        return pool[1]
+    return pool[0]
+
+
 def regenerate_questions_with_ai(
     *,
     course_title: str,
@@ -527,6 +681,7 @@ def regenerate_questions_with_ai(
     eval_prompts: list[dict[str, Any]],
     preferred_provider: str = "auto",
     question_style: str = "direct",
+    engine_type: str = "concept_tree",
 ) -> tuple[list[dict[str, Any]], str]:
     """Redacta preguntas nuevas y distintas evaluando exactamente los mismos rubric_points segun question_style."""
     metaphor_hint = world_metaphor or f"Taller practico de {course_title}"
@@ -538,6 +693,27 @@ def regenerate_questions_with_ai(
             "rubric_points": [f"Explica el concepto central de {node_title}"],
         }
     ]
+    is_code_lab = engine_type == "code_lab" or any(
+        str(p.get("challenge_type") or "concept") in ("debug", "implement", "trace") or p.get("starter_code")
+        for p in source_prompts
+    )
+    inferred_lang = next(
+        (
+            str(p.get("language"))
+            for p in source_prompts
+            if str(p.get("language") or "") in ("java", "sql", "python", "c")
+        ),
+        "java" if is_code_lab else "text",
+    )
+
+    code_lab_regen_rule = ""
+    if is_code_lab:
+        code_lab_regen_rule = (
+            f"\n4. MODO `code_lab` ACTIVO (lenguaje `{inferred_lang}`): Manten o varia los tipos de reto "
+            "(`\"challenge_type\": \"debug\" | \"implement\" | \"trace\" | \"concept\"`, "
+            f"`\"language\": \"{inferred_lang}\"`) y genera un NUEVO `starter_code` COMPLETAMENTE DISTINTO "
+            "al anterior para cada pregunta de codigo (`debug`, `implement`, `trace`).\n"
+        )
 
     try:
         system_prompt = (
@@ -548,11 +724,14 @@ def regenerate_questions_with_ai(
             "1. Conserva los mismos `id` y los mismos `rubric_points` de cada item.\n"
             "2. Cambia por completo la formulacion de cada `question` respetando el estilo solicitado.\n"
             "3. Responde UNICAMENTE un objeto JSON valido con la clave `eval_prompts`:\n"
-            '{"eval_prompts": [{"id": "q1", "question": "Nueva pregunta...", "rubric_points": ["..."]}]}'
+            '{"eval_prompts": [{"id": "q1", "question": "Nueva pregunta...", "rubric_points": ["..."], '
+            '"challenge_type": "concept", "language": "text", "starter_code": null}]}'
+            f"{code_lab_regen_rule}"
         )
         user_prompt = json.dumps(
             {
                 "course_title": course_title,
+                "engine_type": engine_type,
                 "question_style": question_style,
                 "world_metaphor": metaphor_hint,
                 "node_title": node_title,
@@ -576,14 +755,19 @@ def regenerate_questions_with_ai(
         if not isinstance(raw_list, list) or not raw_list:
             raise ValueError("Respuesta sin eval_prompts validos")
 
-        by_id = {str(item.get("id")): str(item.get("question") or "").strip() for item in raw_list if isinstance(item, dict)}
+        items_by_id = {
+            str(item.get("id")): item for item in raw_list if isinstance(item, dict)
+        }
         updated: list[dict[str, Any]] = []
         for idx, orig in enumerate(source_prompts):
             qid = str(orig.get("id") or f"q{idx+1}")
             pts = [str(p) for p in (orig.get("rubric_points") or [])]
-            candidate_q = by_id.get(qid, "")
-            if not candidate_q and idx < len(raw_list) and isinstance(raw_list[idx], dict):
-                candidate_q = str(raw_list[idx].get("question") or "").strip()
+            ai_item = items_by_id.get(qid)
+            if ai_item is None and idx < len(raw_list) and isinstance(raw_list[idx], dict):
+                ai_item = raw_list[idx]
+            ai_item = ai_item or {}
+
+            candidate_q = str(ai_item.get("question") or "").strip()
             if not candidate_q or candidate_q == str(orig.get("question") or "").strip():
                 focus = "; ".join(pts[:2]) if pts else node_summary
                 if question_style == "scenario":
@@ -593,7 +777,40 @@ def regenerate_questions_with_ai(
                     )
                 else:
                     candidate_q = f"En {node_title}, explica de forma precisa como opera y por que es clave que: {focus}."
-            updated.append({"id": qid, "question": candidate_q, "rubric_points": pts})
+
+            orig_ct = str(orig.get("challenge_type") or "concept").strip().lower()
+            raw_ct = str(ai_item.get("challenge_type") or orig_ct).strip().lower()
+            ct = raw_ct if raw_ct in ("concept", "trace", "debug", "implement") else orig_ct
+            lang = str(ai_item.get("language") or orig.get("language") or inferred_lang).strip().lower()
+            if lang not in ("java", "sql", "python", "c", "text"):
+                lang = inferred_lang
+
+            starter: str | None = None
+            raw_starter = ai_item.get("starter_code")
+            if isinstance(raw_starter, str) and raw_starter.strip():
+                starter = raw_starter.strip()
+
+            if ct in ("debug", "implement", "trace"):
+                prev_starter = str(orig.get("starter_code") or "").strip() or None
+                if not starter or (prev_starter and starter == prev_starter):
+                    starter = _alternate_starter_code(
+                        language=lang,
+                        challenge_type=ct,
+                        node_title=node_title,
+                        prev_starter=prev_starter,
+                        idx=idx + 1,
+                    )
+
+            updated.append(
+                {
+                    "id": qid,
+                    "question": candidate_q,
+                    "rubric_points": pts,
+                    "challenge_type": ct,
+                    "language": lang,
+                    "starter_code": starter if ct in ("debug", "implement", "trace") else None,
+                }
+            )
         return (updated, comp.provider)
     except (AiProviderError, ValueError, KeyError, TypeError, json.JSONDecodeError):
         if question_style == "scenario":
@@ -625,5 +842,32 @@ def regenerate_questions_with_ai(
                     course=course_title,
                     focus=focus,
                 )
-            updated_fallback.append({"id": qid, "question": new_q, "rubric_points": pts})
+            ct = str(orig.get("challenge_type") or "concept").strip().lower()
+            if ct not in ("concept", "trace", "debug", "implement"):
+                ct = "concept"
+            lang = str(orig.get("language") or inferred_lang).strip().lower()
+            if lang not in ("java", "sql", "python", "c", "text"):
+                lang = inferred_lang
+            prev_starter = str(orig.get("starter_code") or "").strip() or None
+            starter = (
+                _alternate_starter_code(
+                    language=lang,
+                    challenge_type=ct,
+                    node_title=node_title,
+                    prev_starter=prev_starter,
+                    idx=idx + 1,
+                )
+                if ct in ("debug", "implement", "trace")
+                else None
+            )
+            updated_fallback.append(
+                {
+                    "id": qid,
+                    "question": new_q,
+                    "rubric_points": pts,
+                    "challenge_type": ct,
+                    "language": lang,
+                    "starter_code": starter,
+                }
+            )
         return (updated_fallback, "local_fallback")

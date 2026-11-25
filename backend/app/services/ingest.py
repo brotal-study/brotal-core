@@ -46,6 +46,460 @@ class ExtractedChunk:
     content: str
 
 
+_JAVA_PATTERNS: list[tuple[re.Pattern[str], int]] = [
+    (re.compile(r"\bpublic\s+class\b", re.IGNORECASE), 4),
+    (re.compile(r"\b(?:public|private|protected)\s+static\s+void\s+main\b", re.IGNORECASE), 5),
+    (re.compile(r"\bvoid\s+main\b", re.IGNORECASE), 3),
+    (re.compile(r"\bextends\s+[A-Z]\w*"), 3),
+    (re.compile(r"\bimplements\s+[A-Z]\w*"), 3),
+    (re.compile(r"@Override\b"), 4),
+    (re.compile(r"\bSystem\.out\.print"), 4),
+    (re.compile(r"\btry\s*\{"), 3),
+    (re.compile(r"\bcatch\s*\("), 3),
+    (re.compile(r"\b(?:ArrayList|HashMap|LinkedList|List|Map)<"), 3),
+    (re.compile(r"\b(?:java|jvm|inf2236)\b", re.IGNORECASE), 3),
+]
+
+_SQL_PATTERNS: list[tuple[re.Pattern[str], int]] = [
+    (re.compile(r"\bSELECT\b[\s\S]{1,120}\bFROM\b", re.IGNORECASE), 5),
+    (re.compile(r"\bCREATE\s+TABLE\b", re.IGNORECASE), 5),
+    (re.compile(r"\bINSERT\s+INTO\b", re.IGNORECASE), 4),
+    (re.compile(r"\b(?:INNER|LEFT|RIGHT)\s+JOIN\b", re.IGNORECASE), 4),
+    (re.compile(r"\bGROUP\s+BY\b", re.IGNORECASE), 3),
+    (re.compile(r"\bPRIMARY\s+KEY\b", re.IGNORECASE), 3),
+    (re.compile(r"\bFOREIGN\s+KEY\b", re.IGNORECASE), 3),
+    (re.compile(r"\b(?:sql|postgresql|mysql|sqlite|base\s+de\s+datos|bases\s+de\s+datos)\b", re.IGNORECASE), 4),
+]
+
+_PYTHON_PATTERNS: list[tuple[re.Pattern[str], int]] = [
+    (re.compile(r"(?m)^\s*def\s+[a-zA-Z_]\w*\s*\("), 5),
+    (re.compile(r"\bdef\s+[a-zA-Z_]\w*\s*\("), 3),
+    (re.compile(r"\b__init__\s*\("), 5),
+    (re.compile(r"\bself\.[a-zA-Z_]\w*"), 4),
+    (re.compile(r"(?m)^\s*elif\s+.+:"), 4),
+    (re.compile(r"\bpython\b", re.IGNORECASE), 4),
+]
+
+_C_PATTERNS: list[tuple[re.Pattern[str], int]] = [
+    (re.compile(r"#include\s*<[\w.]+>"), 5),
+    (re.compile(r"\bint\s+main\s*\("), 4),
+    (re.compile(r"\b(?:printf|scanf|malloc|free|sizeof)\s*\("), 4),
+    (re.compile(r"\btypedef\s+struct\b"), 4),
+    (re.compile(r"\b(?:lenguaje\s+c|c\+\+|punteros\s+en\s+c)\b", re.IGNORECASE), 4),
+]
+
+_GENERIC_CODE_TITLE_RE = re.compile(
+    r"\b(?:programaci[oó]n|algoritmos?|estructuras?\s+de\s+datos|bases?\s+de\s+datos|java|sql|python|poo|orientada\s+a\s+objetos)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_engine_type(
+    course_code: str,
+    title: str,
+    chunks: list[ExtractedChunk] | list[Any],
+) -> tuple[str, str]:
+    """Detecta de forma liviana si el ramo corresponde a ('code_lab', lang) o ('concept_tree', 'text')."""
+    header_text = f"{course_code} {title}".strip()
+    chunk_parts: list[str] = []
+    for ch in chunks[:40]:
+        if isinstance(ch, ExtractedChunk):
+            chunk_parts.append(f"{ch.section_title}\n{ch.content[:1500]}")
+        elif isinstance(ch, dict):
+            chunk_parts.append(f"{ch.get('section_title', '')}\n{str(ch.get('content', ''))[:1500]}")
+        else:
+            chunk_parts.append(str(ch)[:1500])
+
+    body_text = "\n".join(chunk_parts)
+    combined = f"{header_text}\n{body_text}"
+
+    scores: dict[str, int] = {"java": 0, "sql": 0, "python": 0, "c": 0}
+
+    for pat, weight in _JAVA_PATTERNS:
+        matches = len(pat.findall(combined))
+        if matches:
+            scores["java"] += weight * min(matches, 4)
+        if pat.search(header_text):
+            scores["java"] += weight * 2
+
+    for pat, weight in _SQL_PATTERNS:
+        matches = len(pat.findall(combined))
+        if matches:
+            scores["sql"] += weight * min(matches, 4)
+        if pat.search(header_text):
+            scores["sql"] += weight * 2
+
+    for pat, weight in _PYTHON_PATTERNS:
+        matches = len(pat.findall(combined))
+        if matches:
+            scores["python"] += weight * min(matches, 4)
+        if pat.search(header_text):
+            scores["python"] += weight * 2
+
+    for pat, weight in _C_PATTERNS:
+        matches = len(pat.findall(combined))
+        if matches:
+            scores["c"] += weight * min(matches, 4)
+        if pat.search(header_text):
+            scores["c"] += weight * 2
+
+    best_lang, best_score = max(scores.items(), key=lambda kv: kv[1])
+    has_title_signal = bool(_GENERIC_CODE_TITLE_RE.search(header_text))
+    has_body_title_signal = len(_GENERIC_CODE_TITLE_RE.findall(body_text)) >= 2
+
+    if best_score >= 4 or has_title_signal or (best_score >= 3 and has_body_title_signal):
+        if best_score == 0:
+            low_header = header_text.lower()
+            if "sql" in low_header or "base de datos" in low_header or "bases de datos" in low_header:
+                best_lang = "sql"
+            elif "python" in low_header:
+                best_lang = "python"
+            elif "estructura de datos" in low_header or "estructuras de datos" in low_header:
+                best_lang = "c" if " c " in f" {low_header} " else "java"
+            else:
+                best_lang = "java"
+        return ("code_lab", best_lang)
+
+    return ("concept_tree", "text")
+
+
+def _fallback_starter_code(
+    *,
+    language: str,
+    challenge_type: str,
+    node_title: str,
+    index: int = 1,
+) -> str:
+    """Genera un starter_code realista y autocontenido segun lenguaje y tipo de desafio."""
+    lang = language if language in ("java", "sql", "python", "c") else "java"
+    clean_cls = re.sub(r"[^a-zA-Z0-9]", "", node_title.title())[:18] or f"Modulo{index}"
+    if not clean_cls[0].isalpha():
+        clean_cls = f"Clase{clean_cls}"
+
+    if lang == "sql":
+        if challenge_type == "debug":
+            return (
+                f"-- Caso: {node_title}\n"
+                "-- BUG: La consulta intenta filtrar una agregacion con WHERE y omite GROUP BY.\n"
+                "SELECT c.id_curso, c.nombre, COUNT(i.id_estudiante) AS total_inscritos\n"
+                "FROM cursos c\n"
+                "INNER JOIN inscripciones i ON c.id_curso = i.id_curso\n"
+                "WHERE COUNT(i.id_estudiante) >= 5\n"
+                "ORDER BY total_inscritos DESC;"
+            )
+        if challenge_type == "trace":
+            return (
+                f"-- Traza SQL: {node_title}\n"
+                "SELECT d.nombre_depto, COUNT(e.id) AS activos, AVG(e.puntaje) AS promedio\n"
+                "FROM departamentos d\n"
+                "LEFT JOIN estudiantes e ON e.depto_id = d.id AND e.activo = 1\n"
+                "GROUP BY d.id, d.nombre_depto\n"
+                "HAVING COUNT(e.id) >= 0\n"
+                "ORDER BY activos DESC;"
+            )
+        return (
+            f"-- Implementa la consulta SQL para: {node_title}\n"
+            "-- Tablas disponibles: estudiantes(id, nombre, promedio, id_carrera), carreras(id, nombre)\n"
+            "SELECT \n"
+            "    -- TODO: selecciona nombre de carrera y promedio de sus estudiantes con promedio >= 5.0\n"
+            "FROM carreras c\n"
+            "-- TODO: completa JOIN, WHERE, GROUP BY y HAVING\n"
+        )
+
+    if lang == "python":
+        if challenge_type == "debug":
+            return (
+                f"# Modulo: {node_title}\n"
+                "def procesar_registros(items: list[int], umbral: int = 0) -> list[int]:\n"
+                "    # BUG: mutar la lista mientras se itera sobre ella salta elementos\n"
+                "    for idx, valor in enumerate(items):\n"
+                "        if valor < umbral:\n"
+                "            items.remove(valor)\n"
+                "    return items\n"
+            )
+        if challenge_type == "trace":
+            return (
+                f"# Traza paso a paso: {node_title}\n"
+                "def acumular(valores: list[int]) -> dict[str, int]:\n"
+                "    estado = {'pares': 0, 'impares': 0}\n"
+                "    for v in valores:\n"
+                "        clave = 'pares' if v % 2 == 0 else 'impares'\n"
+                "        estado[clave] += v\n"
+                "    return estado\n\n"
+                "print(acumular([2, 3, 4, 5]))\n"
+            )
+        return (
+            f"# Implementacion para: {node_title}\n"
+            "def resolver_caso(datos: list[dict[str, int]], limite: int) -> list[str]:\n"
+            "    \"\"\"Filtra y transforma los registros que superan el limite sin lanzar KeyError.\"\"\"\n"
+            "    # TODO: implementar validacion y retorno ordenado\n"
+            "    pass\n"
+        )
+
+    if lang == "c":
+        if challenge_type == "debug":
+            return (
+                f"/* Modulo: {node_title} */\n"
+                "#include <stdio.h>\n\n"
+                "int sumar_arreglo(const int *arr, int n) {\n"
+                "    int total = 0;\n"
+                "    /* BUG: condicion de borde i <= n accede fuera de limites */\n"
+                "    for (int i = 0; i <= n; i++) {\n"
+                "        total += arr[i];\n"
+                "    }\n"
+                "    return total;\n"
+                "}\n"
+            )
+        if challenge_type == "trace":
+            return (
+                f"/* Traza de ejecucion: {node_title} */\n"
+                "#include <stdio.h>\n\n"
+                "int main(void) {\n"
+                "    int datos[4] = {10, 20, 30, 40};\n"
+                "    int *p = datos;\n"
+                "    *(p + 2) += *p;\n"
+                "    printf(\"%d %d\\n\", datos[0], datos[2]);\n"
+                "    return 0;\n"
+                "}\n"
+            )
+        return (
+            f"/* Implementa la funcion para: {node_title} */\n"
+            "#include <stddef.h>\n\n"
+            "int buscar_maximo(const int *valores, size_t n) {\n"
+            "    /* TODO: validar puntero nulo / n == 0 y retornar el mayor elemento */\n"
+            "    return 0;\n"
+            "}\n"
+        )
+
+    # Default: Java (INF2236 / POO)
+    if challenge_type == "debug":
+        return (
+            f"// Contexto: {node_title}\n"
+            "import java.util.List;\n\n"
+            f"public class {clean_cls}Service {{\n"
+            "    private int limiteMaximo;\n\n"
+            f"    public {clean_cls}Service(int limiteMaximo) {{\n"
+            "        // BUG 1: sombreamiento de atributo (falta this.limiteMaximo)\n"
+            "        limiteMaximo = limiteMaximo;\n"
+            "    }\n\n"
+            "    public boolean validarCodigo(String codigo, List<String> registrados) {\n"
+            "        // BUG 2: comparacion de Strings con == y posible NullPointerException\n"
+            "        for (String actual : registrados) {\n"
+            "            if (actual == codigo && actual.length() <= limiteMaximo) {\n"
+            "                return true;\n"
+            "            }\n"
+            "        }\n"
+            "        return false;\n"
+            "    }\n"
+            "}"
+        )
+    if challenge_type == "trace":
+        return (
+            f"// Traza de ejecucion en JVM: {node_title}\n"
+            "class ComponenteBase {\n"
+            "    protected int prioridad = 1;\n"
+            "    public int calcular(int factor) {\n"
+            "        return prioridad + factor;\n"
+            "    }\n"
+            "}\n\n"
+            f"class {clean_cls} extends ComponenteBase {{\n"
+            f"    public {clean_cls}() {{ this.prioridad = 3; }}\n"
+            "    @Override\n"
+            "    public int calcular(int factor) {\n"
+            "        return super.calcular(factor) * 2;\n"
+            "    }\n"
+            "}\n\n"
+            "// ¿Que imprime exactamente este bloque y por que?\n"
+            f"ComponenteBase ref = new {clean_cls}();\n"
+            "System.out.println(ref.calcular(4));"
+        )
+    return (
+        f"// Desafío de implementacion: {node_title}\n"
+        "import java.util.ArrayList;\n"
+        "import java.util.List;\n\n"
+        f"public class {clean_cls}Manager {{\n"
+        "    private final List<String> elementos = new ArrayList<>();\n\n"
+        "    /**\n"
+        "     * Registra un elemento validando el invariante del nodo:\n"
+        "     * - Si 'nuevo' es null o vacio (isBlank), lanza IllegalArgumentException.\n"
+        "     * - Si ya existe en 'elementos', no lo duplica y retorna false.\n"
+        "     * - En caso contrario, lo agrega y retorna true.\n"
+        "     */\n"
+        "    public boolean registrar(String nuevo) {\n"
+        "        // TODO: implementa la logica cumpliendo el contrato y manejo de errores\n"
+        "        return false;\n"
+        "    }\n"
+        "}"
+    )
+
+
+def _build_fallback_code_lab_prompts(
+    *,
+    branch: str,
+    title: str,
+    course_title: str,
+    world_metaphor: str,
+    question_style: str,
+    key_phrases: list[str],
+    default_language: str,
+    node_index: int = 1,
+) -> list[dict[str, Any]]:
+    """Construye los eval_prompts de un nodo code_lab combinando teoria + practica de codigo real."""
+    lang = default_language if default_language in ("java", "sql", "python", "c") else "java"
+    lang_upper = lang.upper()
+    q_concept = _build_fallback_question(
+        question_style=question_style,
+        title=title,
+        course_title=course_title,
+        world_metaphor=world_metaphor,
+    )
+
+    if branch == "practice":
+        return [
+            {
+                "id": "q1",
+                "question": (
+                    f"[Debugging {lang_upper}] En este caso práctico de {title}, el siguiente código contiene "
+                    "errores de lógica, referencias o invariantes. Corrige directamente el código para que cumpla "
+                    "con la especificación."
+                ),
+                "rubric_points": [
+                    f"Corrige los defectos del código aplicando los principios de {title}",
+                    key_phrases[0][:160],
+                ],
+                "challenge_type": "debug",
+                "language": lang,
+                "starter_code": _fallback_starter_code(
+                    language=lang,
+                    challenge_type="debug",
+                    node_title=title,
+                    index=node_index,
+                ),
+            },
+            {
+                "id": "q2",
+                "question": (
+                    f"[Implementación {lang_upper}] Completa el método/consulta para resolver el requerimiento de "
+                    f"{title} en {course_title}, respetando validaciones de borde y manejo de errores."
+                ),
+                "rubric_points": [
+                    f"Implementa la lógica completa requerida para {title}",
+                    key_phrases[1][:160],
+                ],
+                "challenge_type": "implement",
+                "language": lang,
+                "starter_code": _fallback_starter_code(
+                    language=lang,
+                    challenge_type="implement",
+                    node_title=title,
+                    index=node_index,
+                ),
+            },
+        ]
+
+    second_type = "trace" if node_index % 2 == 1 else "implement"
+    second_question = (
+        f"[Traza {lang_upper}] Analiza el siguiente fragmento sobre {title}, indica cuál es su salida exacta "
+        "y explica paso a paso el flujo de ejecución en memoria."
+        if second_type == "trace"
+        else f"[Implementación {lang_upper}] Completa el esqueleto en {lang_upper} aplicando {title} y cuidando los casos borde."
+    )
+
+    return [
+        {
+            "id": "q1",
+            "question": q_concept,
+            "rubric_points": [p[:160] for p in key_phrases[:2]],
+            "challenge_type": "concept",
+            "language": lang,
+            "starter_code": None,
+        },
+        {
+            "id": "q2",
+            "question": (
+                f"[Debugging {lang_upper}] Revisa el siguiente código asociado a {title}, identifica el bug "
+                "y edítalo directamente en el editor para corregirlo."
+            ),
+            "rubric_points": [
+                f"Identifica y corrige el bug técnico en {title}",
+                key_phrases[0][:160],
+            ],
+            "challenge_type": "debug",
+            "language": lang,
+            "starter_code": _fallback_starter_code(
+                language=lang,
+                challenge_type="debug",
+                node_title=title,
+                index=node_index,
+            ),
+        },
+        {
+            "id": "q3",
+            "question": second_question,
+            "rubric_points": [
+                f"Explica o implementa con precisión el comportamiento de {title}",
+                key_phrases[min(1, len(key_phrases) - 1)][:160],
+            ],
+            "challenge_type": second_type,
+            "language": lang,
+            "starter_code": _fallback_starter_code(
+                language=lang,
+                challenge_type=second_type,
+                node_title=title,
+                index=node_index,
+            ),
+        },
+    ]
+
+
+def _normalize_prompt_item(
+    raw_prompt: dict[str, Any],
+    *,
+    p_idx: int,
+    node_title: str,
+    nid: str,
+    engine_type: str,
+    default_language: str,
+) -> dict[str, Any]:
+    """Normaliza un item de eval_prompts preservando challenge_type, language y starter_code."""
+    pts = [str(x).strip() for x in (raw_prompt.get("rubric_points") or []) if str(x).strip()]
+    if not pts:
+        pts = [f"Explica los conceptos centrales de {node_title}"]
+
+    raw_ct = str(raw_prompt.get("challenge_type") or "concept").strip().lower()
+    challenge_type = raw_ct if raw_ct in ("concept", "trace", "debug", "implement") else "concept"
+
+    raw_lang = str(raw_prompt.get("language") or "").strip().lower()
+    if raw_lang in ("cpp", "c++"):
+        raw_lang = "c"
+    if raw_lang in ("java", "sql", "python", "c", "text"):
+        language = raw_lang
+    else:
+        language = default_language if engine_type == "code_lab" else "text"
+
+    starter_raw = raw_prompt.get("starter_code")
+    starter_code = str(starter_raw).strip() if isinstance(starter_raw, str) and starter_raw.strip() else None
+
+    if challenge_type in ("trace", "debug", "implement") and not starter_code:
+        starter_code = _fallback_starter_code(
+            language=language if language != "text" else default_language,
+            challenge_type=challenge_type,
+            node_title=node_title,
+            index=p_idx,
+        )
+        if language == "text":
+            language = default_language if default_language != "text" else "java"
+
+    return {
+        "id": str(raw_prompt.get("id") or f"q{p_idx}"),
+        "question": str(raw_prompt.get("question") or f"Explica con tus palabras {node_title or nid}."),
+        "rubric_points": pts,
+        "challenge_type": challenge_type,
+        "language": language,
+        "starter_code": starter_code,
+    }
+
+
 def _is_valid_title(raw: str) -> bool:
     cleaned = re.sub(r"^[-=*_#:\s.]+|[-=*_#:\s.]+$", "", raw.strip())
     if not cleaned:
@@ -355,6 +809,8 @@ def _fallback_nodes_from_chunks(
     chunks: list[ExtractedChunk],
     explanation_style: str = "narrative",
     question_style: str = "direct",
+    engine_type: str = "concept_tree",
+    default_language: str = "text",
 ) -> list[dict[str, Any]]:
     """Construye de 6 a 8 nodos reales (theory + practice) a partir de los apuntes cuando no hay IA externa."""
     # Agrupar o expandir chunks para tener al menos 6 segmentos tematicos
@@ -413,6 +869,29 @@ def _fallback_nodes_from_chunks(
             world_metaphor=world_metaphor,
         )
 
+        if engine_type == "code_lab":
+            eval_prompts = _build_fallback_code_lab_prompts(
+                branch=branch,
+                title=title,
+                course_title=course_title,
+                world_metaphor=world_metaphor,
+                question_style=question_style,
+                key_phrases=key_phrases,
+                default_language=default_language,
+                node_index=i,
+            )
+        else:
+            eval_prompts = [
+                {
+                    "id": "q1",
+                    "question": q_text,
+                    "rubric_points": [p[:160] for p in key_phrases[:3]],
+                    "challenge_type": "concept",
+                    "language": "text",
+                    "starter_code": None,
+                }
+            ]
+
         nodes.append(
             {
                 "id": nid,
@@ -422,13 +901,7 @@ def _fallback_nodes_from_chunks(
                 "title": title,
                 "summary": f"Comprension aplicada de {title} en el contexto de {course_title}.",
                 "story_script": story_script,
-                "eval_prompts": [
-                    {
-                        "id": "q1",
-                        "question": q_text,
-                        "rubric_points": [p[:160] for p in key_phrases[:3]],
-                    }
-                ],
+                "eval_prompts": eval_prompts,
                 "storyboard_ref": None,
             }
         )
@@ -475,6 +948,23 @@ def _sample_chunks_balanced(
     return "\n\n".join(items)[:max_chars]
 
 
+def _code_lab_architect_rules(default_language: str) -> str:
+    lang = default_language if default_language in ("java", "sql", "python", "c") else "java"
+    return (
+        f"\nMODO ESPECIAL `code_lab` ACTIVO (Lenguaje dominante: `{lang}`):\n"
+        f"- En cada nodo `branch: \"theory\"`: genera 3 `eval_prompts` combinando al menos 1 pregunta conceptual "
+        f"(`\"challenge_type\": \"concept\"`, `\"starter_code\": null`) + 1 a 2 desafios de codigo reales "
+        f"(`\"challenge_type\": \"trace\" | \"debug\" | \"implement\"`, `\"language\": \"{lang}\"`) con `starter_code` "
+        f"concreto y realista en `{lang}` (ej. en Java: clases, constructores, herencia `extends`, interfaces `implements`, "
+        f"polimorfismo `@Override`, excepciones `try/catch`, colecciones `ArrayList`/`HashMap` o patrones; en SQL: "
+        f"`SELECT`, `JOIN`, `GROUP BY`, `HAVING`, subconsultas).\n"
+        f"- En cada nodo `branch: \"practice\"` (Examenes / Laboratorios): genera desafios practicos de codigo reales "
+        f"(`\"challenge_type\": \"debug\"` e `\"implement\"`, `\"language\": \"{lang}\"`) con `starter_code` realista "
+        f"estilo certamen universitario (con el bug concreto a corregir o el esqueleto/firma del metodo a implementar).\n"
+        f"- NUNCA dejes `starter_code` vacio cuando `challenge_type` sea `trace`, `debug` o `implement`.\n"
+    )
+
+
 def _generate_nodes_with_ai(
     *,
     course_code: str,
@@ -484,12 +974,16 @@ def _generate_nodes_with_ai(
     preferred_provider: str = "auto",
     explanation_style: str = "narrative",
     question_style: str = "direct",
+    engine_type: str = "concept_tree",
+    default_language: str = "text",
 ) -> tuple[list[dict[str, Any]], str]:
     """Usa ai_router para sintetizar un arbol profundo de 8..16 nodos (copa theory + raices practice/examenes)."""
     digest_text = _sample_chunks_balanced(chunks)
     files_list = sorted({c.source_file for c in chunks})
     exp_rule = explanation_style_instruction(explanation_style, world_metaphor)
     q_rule = question_style_instruction(question_style, world_metaphor)
+    code_lab_extra = _code_lab_architect_rules(default_language) if engine_type == "code_lab" else ""
+    lang_hint = default_language if engine_type == "code_lab" else "text"
 
     system_prompt = (
         "Eres el Arquitecto Pedagogico de Brotal. Convierte apuntes universitarios en un Arbol de Habilidades "
@@ -505,6 +999,7 @@ def _generate_nodes_with_ai(
         f"4. Cada nodo DEBE incluir `eval_prompts` con 3 a 4 preguntas a ciegas siguiendo este estilo: {q_rule} "
         "Cada pregunta lleva 2 a 3 `rubric_points` concretos y verificables.\n"
         "5. Cubre TODOS los archivos entregados, no solo el primero.\n"
+        f"{code_lab_extra}"
         "Responde UNICAMENTE JSON valido con la clave `nodes`:\n"
         "{\n"
         '  "world_metaphor": "...",\n'
@@ -518,9 +1013,9 @@ def _generate_nodes_with_ai(
         '      "summary": "...",\n'
         '      "story_script": "Parrafo 1...\\n\\nParrafo 2...",\n'
         '      "eval_prompts": [\n'
-        '        {"id": "q1", "question": "...", "rubric_points": ["...", "..."]},\n'
-        '        {"id": "q2", "question": "...", "rubric_points": ["...", "..."]},\n'
-        '        {"id": "q3", "question": "...", "rubric_points": ["...", "..."]}\n'
+        f'        {{"id": "q1", "question": "...", "rubric_points": ["...", "..."], "challenge_type": "concept", "language": "{lang_hint}", "starter_code": null}},\n'
+        f'        {{"id": "q2", "question": "...", "rubric_points": ["...", "..."], "challenge_type": "debug", "language": "{lang_hint}", "starter_code": "..."}},\n'
+        f'        {{"id": "q3", "question": "...", "rubric_points": ["...", "..."], "challenge_type": "implement", "language": "{lang_hint}", "starter_code": "..."}}\n'
         "      ]\n"
         "    }\n"
         "  ]\n"
@@ -529,6 +1024,7 @@ def _generate_nodes_with_ai(
     user_prompt = (
         f"Codigo: {course_code}\n"
         f"Ramo: {course_title}\n"
+        f"Motor de estudio: {engine_type} (lenguaje: {lang_hint})\n"
         f"Estilo de explicacion: {explanation_style}\n"
         f"Estilo de preguntas: {question_style}\n"
         f"Metafora del mundo sugerida: {world_metaphor}\n"
@@ -567,36 +1063,65 @@ def _generate_nodes_with_ai(
             elif idx == len(capped_nodes) - 1 and not any(x.get("branch") == "practice" for x in normalized_nodes):
                 branch = "practice"
 
-            raw_prompts = n.get("eval_prompts") or []
-            clean_prompts = []
-            for p_idx, p in enumerate(raw_prompts[:5], start=1):
-                pts = [str(x).strip() for x in (p.get("rubric_points") or []) if str(x).strip()]
-                if not pts:
-                    pts = [f"Explica los conceptos centrales de {n.get('title', nid)}"]
-                clean_prompts.append(
-                    {
-                        "id": str(p.get("id") or f"q{p_idx}"),
-                        "question": str(p.get("question") or f"Explica con tus palabras {n.get('title', nid)}."),
-                        "rubric_points": pts,
-                    }
-                )
-            if not clean_prompts:
-                clean_prompts = [
-                    {
-                        "id": "q1",
-                        "question": f"¿Como explicarias {n.get('title', nid)} y su aplicacion practica?",
-                        "rubric_points": [
-                            f"Define la idea principal de {n.get('title', nid)}",
-                            "Conecta el concepto con un caso practico del ramo",
-                        ],
-                    }
-                ]
-
             safe_title = _sanitize_title(str(n.get("title") or ""), f"Nodo {idx+1} · {course_title}")
             safe_block = _sanitize_title(
                 str(n.get("block") or ""),
                 "Bloque Practico" if branch == "practice" else "Bloque Conceptual",
             )
+
+            raw_prompts = n.get("eval_prompts") or []
+            clean_prompts = [
+                _normalize_prompt_item(
+                    p,
+                    p_idx=p_idx,
+                    node_title=safe_title,
+                    nid=nid,
+                    engine_type=engine_type,
+                    default_language=default_language,
+                )
+                for p_idx, p in enumerate(raw_prompts[:5], start=1)
+                if isinstance(p, dict)
+            ]
+
+            if engine_type == "code_lab":
+                has_code_challenge = any(
+                    cp.get("challenge_type") in ("trace", "debug", "implement") and cp.get("starter_code")
+                    for cp in clean_prompts
+                )
+                if not has_code_challenge:
+                    fallback_code_prompts = _build_fallback_code_lab_prompts(
+                        branch=branch,
+                        title=safe_title,
+                        course_title=course_title,
+                        world_metaphor=world_metaphor,
+                        question_style=question_style,
+                        key_phrases=[
+                            f"Define y aplica correctamente {safe_title}",
+                            f"Maneja casos borde y sintaxis de {default_language.upper()}",
+                        ],
+                        default_language=default_language,
+                        node_index=idx + 1,
+                    )
+                    if clean_prompts and branch == "theory":
+                        clean_prompts = [clean_prompts[0], *fallback_code_prompts[1:]]
+                    else:
+                        clean_prompts = fallback_code_prompts
+
+            if not clean_prompts:
+                clean_prompts = [
+                    {
+                        "id": "q1",
+                        "question": f"¿Como explicarias {safe_title} y su aplicacion practica?",
+                        "rubric_points": [
+                            f"Define la idea principal de {safe_title}",
+                            "Conecta el concepto con un caso practico del ramo",
+                        ],
+                        "challenge_type": "concept",
+                        "language": lang_hint,
+                        "starter_code": None,
+                    }
+                ]
+
             normalized_nodes.append(
                 {
                     "id": nid,
@@ -619,6 +1144,8 @@ def _generate_nodes_with_ai(
             chunks=chunks,
             explanation_style=explanation_style,
             question_style=question_style,
+            engine_type=engine_type,
+            default_language=default_language,
         )
         return (fallback, "local_fallback")
 
@@ -640,6 +1167,8 @@ def _fallback_append_nodes_from_chunks(
     existing_nodes: list[dict[str, Any]],
     explanation_style: str = "narrative",
     question_style: str = "direct",
+    engine_type: str = "concept_tree",
+    default_language: str = "text",
 ) -> list[dict[str, Any]]:
     """Construye de 2 a 4 nodos nuevos conectados al arbol existente cuando no hay IA externa."""
     existing_ids = {str(n["id"]) for n in existing_nodes}
@@ -703,6 +1232,29 @@ def _fallback_append_nodes_from_chunks(
             world_metaphor=world_metaphor,
         )
 
+        if engine_type == "code_lab":
+            eval_prompts = _build_fallback_code_lab_prompts(
+                branch=branch,
+                title=title,
+                course_title=course_title,
+                world_metaphor=world_metaphor,
+                question_style=question_style,
+                key_phrases=key_phrases,
+                default_language=default_language,
+                node_index=i,
+            )
+        else:
+            eval_prompts = [
+                {
+                    "id": "q1",
+                    "question": q_text,
+                    "rubric_points": [p[:160] for p in key_phrases[:3]],
+                    "challenge_type": "concept",
+                    "language": "text",
+                    "starter_code": None,
+                }
+            ]
+
         nodes.append(
             {
                 "id": nid,
@@ -712,13 +1264,7 @@ def _fallback_append_nodes_from_chunks(
                 "title": title,
                 "summary": f"Extension incremental sobre {title} en {course_title}.",
                 "story_script": story_script,
-                "eval_prompts": [
-                    {
-                        "id": "q1",
-                        "question": q_text,
-                        "rubric_points": [p[:160] for p in key_phrases[:3]],
-                    }
-                ],
+                "eval_prompts": eval_prompts,
                 "storyboard_ref": None,
             }
         )
@@ -736,6 +1282,8 @@ def _generate_append_nodes_with_ai(
     preferred_provider: str = "auto",
     explanation_style: str = "narrative",
     question_style: str = "direct",
+    engine_type: str = "concept_tree",
+    default_language: str = "text",
 ) -> tuple[list[dict[str, Any]], str]:
     """Genera entre 2 y 6 nodos nuevos conectados al arbol existente sin tocar los nodos previos."""
     digest_text = _sample_chunks_balanced(chunks)
@@ -745,6 +1293,7 @@ def _generate_append_nodes_with_ai(
     anchor_id = theory_anchors[-1] if theory_anchors else str(existing_nodes[-1]["id"])
     exp_rule = explanation_style_instruction(explanation_style, world_metaphor)
     q_rule = question_style_instruction(question_style, world_metaphor)
+    code_lab_extra = _code_lab_architect_rules(default_language) if engine_type == "code_lab" else ""
 
     system_prompt = (
         "Eres el Arquitecto Pedagogico de Brotal en MODO INCREMENTAL (`append`).\n"
@@ -757,11 +1306,13 @@ def _generate_append_nodes_with_ai(
         "para que quede integrado en el DAG.\n"
         f"4. `story_script` DEBE seguir esta preferencia: {exp_rule}\n"
         f"5. Cada nodo nuevo DEBE incluir `eval_prompts` con 2 a 4 preguntas a ciegas ({q_rule}) y 2 a 3 `rubric_points` verificables.\n"
+        f"{code_lab_extra}"
         "Responde UNICAMENTE JSON valido con la clave `nodes`."
     )
     user_prompt = (
         f"Codigo: {course_code}\n"
         f"Ramo: {course_title}\n"
+        f"Motor de estudio: {engine_type} (lenguaje: {default_language})\n"
         f"Metafora del mundo: {world_metaphor}\n"
         f"Nodos existentes en el arbol (NO los repitas, usalos para conectar `parent_ids`):\n"
         f"{json.dumps(existing_nodes, ensure_ascii=False)}\n\n"
@@ -817,36 +1368,40 @@ def _generate_append_nodes_with_ai(
                 mapped_parents = [anchor_id if idx == 0 else assigned_ids[idx - 1]]
 
             branch = "practice" if str(n.get("branch")).lower() == "practice" else "theory"
-            raw_prompts = n.get("eval_prompts") or []
-            clean_prompts = []
-            for p_idx, p in enumerate(raw_prompts[:5], start=1):
-                pts = [str(x).strip() for x in (p.get("rubric_points") or []) if str(x).strip()]
-                if not pts:
-                    pts = [f"Explica los conceptos centrales de {n.get('title', nid)}"]
-                clean_prompts.append(
-                    {
-                        "id": str(p.get("id") or f"q{p_idx}"),
-                        "question": str(p.get("question") or f"Explica con tus palabras {n.get('title', nid)}."),
-                        "rubric_points": pts,
-                    }
-                )
-            if not clean_prompts:
-                clean_prompts = [
-                    {
-                        "id": "q1",
-                        "question": f"¿Como explicarias {n.get('title', nid)} y su conexion con el ramo?",
-                        "rubric_points": [
-                            f"Define la idea principal de {n.get('title', nid)}",
-                            "Conecta el concepto con un caso practico del ramo",
-                        ],
-                    }
-                ]
-
             safe_title = _sanitize_title(str(n.get("title") or ""), f"Tema Nuevo {idx + 1} · {course_title}")
             safe_block = _sanitize_title(
                 str(n.get("block") or ""),
                 "Bloque Practico Incremental" if branch == "practice" else "Bloque Conceptual Incremental",
             )
+
+            raw_prompts = n.get("eval_prompts") or []
+            clean_prompts = [
+                _normalize_prompt_item(
+                    p,
+                    p_idx=p_idx,
+                    node_title=safe_title,
+                    nid=nid,
+                    engine_type=engine_type,
+                    default_language=default_language,
+                )
+                for p_idx, p in enumerate(raw_prompts[:5], start=1)
+                if isinstance(p, dict)
+            ]
+            if not clean_prompts:
+                clean_prompts = [
+                    {
+                        "id": "q1",
+                        "question": f"¿Como explicarias {safe_title} y su conexion con el ramo?",
+                        "rubric_points": [
+                            f"Define la idea principal de {safe_title}",
+                            "Conecta el concepto con un caso practico del ramo",
+                        ],
+                        "challenge_type": "concept",
+                        "language": default_language if engine_type == "code_lab" else "text",
+                        "starter_code": None,
+                    }
+                ]
+
             normalized_nodes.append(
                 {
                     "id": nid,
@@ -870,6 +1425,8 @@ def _generate_append_nodes_with_ai(
             existing_nodes=existing_nodes,
             explanation_style=explanation_style,
             question_style=question_style,
+            engine_type=engine_type,
+            default_language=default_language,
         )
         return (fallback, "local_fallback")
 
@@ -886,6 +1443,7 @@ def ingest_local_files(
     mode: Literal["append", "replace"] = "replace",
     explanation_style: str = "narrative",
     question_style: str = "direct",
+    engine_type: Literal["auto", "concept_tree", "code_lab"] = "auto",
 ) -> dict[str, Any]:
     """Procesa 1..N archivos locales, indexa en FTS5 y reemplaza o agrega nodos al ramo ('replace' | 'append')."""
     if not files:
@@ -921,6 +1479,14 @@ def ingest_local_files(
     slug = re.sub(r"[^a-z0-9]+", "-", clean_code.lower()).strip("-") or "course"
     course_id = f"local-{slug}"
 
+    detected_engine, detected_lang = detect_engine_type(clean_code, clean_title, all_chunks)
+    if engine_type in ("concept_tree", "code_lab"):
+        effective_engine: Literal["concept_tree", "code_lab"] = engine_type
+        effective_lang = (detected_lang if detected_lang != "text" else "java") if engine_type == "code_lab" else "text"
+    else:
+        effective_engine = "code_lab" if detected_engine == "code_lab" else "concept_tree"
+        effective_lang = detected_lang if effective_engine == "code_lab" else "text"
+
     existing_row = resolve_course_row(conn, clean_code) or resolve_course_row(conn, course_id)
     existing_node_rows: list[sqlite3.Row] = []
     if existing_row is not None:
@@ -931,6 +1497,11 @@ def ingest_local_files(
 
     if mode == "append" and existing_row is not None and len(existing_node_rows) > 0:
         real_course_id = str(existing_row["id"])
+        if engine_type == "auto" and existing_row["engine_type"] == "code_lab":
+            effective_engine = "code_lab"
+            if effective_lang == "text":
+                effective_lang = "java"
+
         existing_metaphor = ""
         if existing_row["pack_metadata_json"]:
             try:
@@ -959,8 +1530,15 @@ def ingest_local_files(
             preferred_provider=preferred_provider,
             explanation_style=explanation_style,
             question_style=question_style,
+            engine_type=effective_engine,
+            default_language=effective_lang,
         )
         added_count = append_nodes_to_course(conn, real_course_id, new_nodes)
+        conn.execute(
+            "UPDATE courses SET engine_type = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+            (effective_engine, real_course_id),
+        )
+        conn.commit()
         total_chunks = append_chunks_in_fts(conn, real_course_id, all_chunks)
         total_nodes_row = conn.execute(
             "SELECT COUNT(*) AS cnt FROM course_nodes WHERE course_id = ?;",
@@ -972,6 +1550,8 @@ def ingest_local_files(
             "course_id": real_course_id,
             "course_code": str(existing_row["course_code"] or clean_code),
             "title": str(existing_row["title"] or clean_title),
+            "engine_type": effective_engine,
+            "detected_language": effective_lang,
             "status": "active",
             "mode": "append",
             "added_nodes": added_count,
@@ -993,6 +1573,8 @@ def ingest_local_files(
         preferred_provider=preferred_provider,
         explanation_style=explanation_style,
         question_style=question_style,
+        engine_type=effective_engine,
+        default_language=effective_lang,
     )
 
     year_now = datetime.now(UTC).year
@@ -1002,7 +1584,7 @@ def ingest_local_files(
         course_code=clean_code,
         title=clean_title,
         language="es",
-        engine_type="concept_tree",
+        engine_type=effective_engine,
         metadata=PackMetadata(
             university_id="local",
             career_ids=[career_id] if career_id else [],
@@ -1017,10 +1599,10 @@ def ingest_local_files(
     )
 
     installed_id = install_pack(conn, pack_obj.model_dump())
-    # Marcar source_type='local' conservando status='active'
+    # Marcar source_type='local' conservando status='active' y engine_type
     conn.execute(
-        "UPDATE courses SET source_type = 'local', status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
-        (installed_id,),
+        "UPDATE courses SET source_type = 'local', status = 'active', engine_type = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+        (effective_engine, installed_id),
     )
     total_chunks = index_chunks_in_fts(conn, installed_id, all_chunks)
 
@@ -1028,6 +1610,8 @@ def ingest_local_files(
         "course_id": installed_id,
         "course_code": clean_code,
         "title": clean_title,
+        "engine_type": effective_engine,
+        "detected_language": effective_lang,
         "status": "active",
         "mode": "replace",
         "added_nodes": len(pack_obj.nodes),

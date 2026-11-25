@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { FolderOpen, Home, MessageSquare, RotateCcw } from 'lucide-react'
+import { Code2, FolderOpen, Home, MessageSquare, RotateCcw } from 'lucide-react'
 import { inCooldown, type CooldownMode } from '../api/study'
 import { selectCourses, useAppStore } from '../store/useAppStore'
 import { useStudyStore } from '../store/useStudyStore'
@@ -117,7 +117,15 @@ export default function CourseStudyPage() {
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-slate-200 px-3 py-2 sm:px-4 dark:border-slate-800">
         <div className="flex min-w-0 flex-wrap items-center gap-3">
           <div className="min-w-0 max-w-xs sm:max-w-sm">
-            <div className="truncate text-sm font-semibold">{tree.title}</div>
+            <div className="flex items-center gap-2">
+              <div className="truncate text-sm font-semibold">{tree.title}</div>
+              {tree.engine_type === 'code_lab' && (
+                <span className="inline-flex shrink-0 items-center gap-1 rounded border border-indigo-300 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-800 dark:border-indigo-700/80 dark:bg-indigo-950/60 dark:text-indigo-200">
+                  <Code2 size={11} />
+                  Code Lab
+                </span>
+              )}
+            </div>
             <div className="font-mono text-[11px] text-slate-500">{tree.course_code}</div>
           </div>
 
