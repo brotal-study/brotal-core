@@ -893,9 +893,14 @@ def ingest_local_files(
 
     all_chunks: list[ExtractedChunk] = []
     processed_files: list[dict[str, Any]] = []
+    skipped_files: list[dict[str, str]] = []
 
     for fname, raw_bytes in files:
-        file_chunks = extract_chunks_from_bytes(fname, raw_bytes)
+        try:
+            file_chunks = extract_chunks_from_bytes(fname, raw_bytes)
+        except ValueError as exc:
+            skipped_files.append({"filename": Path(fname).name, "reason": str(exc)})
+            continue
         all_chunks.extend(file_chunks)
         processed_files.append(
             {
@@ -904,6 +909,12 @@ def ingest_local_files(
                 "chars": sum(len(c.content) for c in file_chunks),
             }
         )
+
+    if not all_chunks:
+        if len(skipped_files) == 1:
+            raise ValueError(skipped_files[0]["reason"])
+        names = ", ".join(s["filename"] for s in skipped_files)
+        raise ValueError(f"Ninguno de los archivos contiene texto extraible ({names}).")
 
     clean_code = course_code.strip().upper() or "LOCAL101"
     clean_title = title.strip() or clean_code
@@ -967,6 +978,7 @@ def ingest_local_files(
             "node_count": total_node_count,
             "chunks_indexed": total_chunks,
             "processed_files": processed_files,
+            "skipped_files": skipped_files,
             "provider": provider_used,
             "world_metaphor": metaphor,
         }
@@ -1022,6 +1034,7 @@ def ingest_local_files(
         "node_count": len(pack_obj.nodes),
         "chunks_indexed": total_chunks,
         "processed_files": processed_files,
+        "skipped_files": skipped_files,
         "provider": provider_used,
         "world_metaphor": metaphor,
     }
