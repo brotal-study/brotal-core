@@ -166,12 +166,15 @@ export default function StoryTab({
   const speech = useSpeech(node.story_script)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const blobUrlRef = useRef<string | null>(null)
+  const ttsAbortRef = useRef<AbortController | null>(null)
+  const ttsRequestTokenRef = useRef(0)
   const sentenceRefs = useRef<Record<number, HTMLSpanElement | null>>({})
   const wordRefs = useRef<Record<number, HTMLSpanElement | null>>({})
   const lastManualScrollRef = useRef<number>(0)
 
   const [mode, setMode] = useState<'neural' | 'fallback'>('neural')
   const [loadingAudio, setLoadingAudio] = useState(false)
+  const [audioProgressPct, setAudioProgressPct] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [rate, setRate] = useState(1.0)
   const [currentTime, setCurrentTime] = useState(0)
@@ -226,8 +229,33 @@ export default function StoryTab({
     }
   }, [])
 
-  // Limpiar audio al cambiar de nodo o de story_script
+  const cancelPendingTts = () => {
+    ttsRequestTokenRef.current += 1
+    if (ttsAbortRef.current) {
+      ttsAbortRef.current.abort()
+      ttsAbortRef.current = null
+    }
+    setLoadingAudio(false)
+    setAudioProgressPct(0)
+  }
+
+  // Avance compacto en % mientras edge-tts sintetiza el audio (sin ocupar barra extra)
   useEffect(() => {
+    if (!loadingAudio) return
+    const startedAt = Date.now()
+    const expectedMs = Math.max(2400, Math.min(12000, flatWords.length * 24))
+    setAudioProgressPct(6)
+    const id = window.setInterval(() => {
+      const elapsed = Date.now() - startedAt
+      const pct = Math.min(94, Math.round(6 + 88 * (1 - Math.exp((-elapsed / expectedMs) * 2.1))))
+      setAudioProgressPct(pct)
+    }, 120)
+    return () => window.clearInterval(id)
+  }, [loadingAudio, flatWords.length])
+
+  // Limpiar audio y cancelar descargas pendientes al cambiar de nodo o de story_script
+  useEffect(() => {
+    cancelPendingTts()
     if (audioRef.current) {
       audioRef.current.pause()
       audioRef.current = null
@@ -243,6 +271,7 @@ export default function StoryTab({
     setServerWords([])
     setMode('neural')
     return () => {
+      cancelPendingTts()
       if (audioRef.current) {
         audioRef.current.pause()
         audioRef.current = null
@@ -255,13 +284,24 @@ export default function StoryTab({
   }, [courseId, node.id, node.story_script])
 
   const loadNeuralAudio = async (opts?: { seekToWordIdx?: number; seekToSentenceIdx?: number }) => {
+    cancelPendingTts()
+    const token = ttsRequestTokenRef.current
+    const controller = new AbortController()
+    ttsAbortRef.current = controller
     setLoadingAudio(true)
     try {
-      const blob = await fetchNodeTtsBlob(courseId, node.id)
-      const fetchedData = await fetchNodeTtsTimingsData(courseId, node.id)
+      const blob = await fetchNodeTtsBlob(courseId, node.id, controller.signal)
+      if (token !== ttsRequestTokenRef.current || controller.signal.aborted) return
+      setAudioProgressPct(97)
+      const fetchedData = await fetchNodeTtsTimingsData(courseId, node.id, controller.signal)
+      if (token !== ttsRequestTokenRef.current || controller.signal.aborted) return
+      setAudioProgressPct(100)
       setServerTimings(fetchedData.sentences)
       setServerWords(fetchedData.words)
 
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current)
+      }
       const url = URL.createObjectURL(blob)
       blobUrlRef.current = url
       const audio = new Audio(url)
@@ -288,9 +328,16 @@ export default function StoryTab({
         setPlaying(false)
         setCurrentTime(0)
       })
+      if (token !== ttsRequestTokenRef.current || controller.signal.aborted) {
+        URL.revokeObjectURL(url)
+        blobUrlRef.current = null
+        return
+      }
       audioRef.current = audio
       await audio.play()
     } catch {
+      // Si fue cancelado por cambio de nodo, "Detener" u "Otra explicación", descartar sin activar fallback
+      if (token !== ttsRequestTokenRef.current || controller.signal.aborted) return
       // Fallback offline a speechSynthesis del navegador
       setMode('fallback')
       speech.setRate(rate)
@@ -300,7 +347,11 @@ export default function StoryTab({
         speech.play()
       }
     } finally {
-      setLoadingAudio(false)
+      if (token === ttsRequestTokenRef.current) {
+        ttsAbortRef.current = null
+        setLoadingAudio(false)
+        setAudioProgressPct(0)
+      }
     }
   }
 
@@ -344,6 +395,7 @@ export default function StoryTab({
   }
 
   const stopAudio = () => {
+    cancelPendingTts()
     if (mode === 'fallback') {
       speech.stop()
       return
@@ -507,9 +559,9 @@ export default function StoryTab({
           <Volume2 size={16} className="text-slate-500" />
           <button
             type="button"
-            disabled={loadingAudio}
+            disabled={loadingAudio || regenerating}
             onClick={togglePlay}
-            className="inline-flex items-center gap-1 rounded border border-slate-300 px-2.5 py-1 text-xs font-medium hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:hover:bg-slate-800"
+            className="inline-flex items-center gap-1 rounded border border-slate-300 px-2.5 py-1 text-xs font-medium tabular-nums hover:bg-slate-100 disabled:opacity-60 dark:border-slate-600 dark:hover:bg-slate-800"
           >
             {loadingAudio ? (
               <Loader2 size={14} className="animate-spin" />
@@ -518,12 +570,16 @@ export default function StoryTab({
             ) : (
               <Play size={14} />
             )}
-            {loadingAudio ? 'Sintetizando voz...' : isPlaying ? 'Pausar' : 'Escuchar'}
+            {loadingAudio
+              ? `Generando ${audioProgressPct}%`
+              : isPlaying
+                ? 'Pausar'
+                : 'Escuchar'}
           </button>
           <button
             type="button"
             onClick={stopAudio}
-            disabled={!isPlaying && currentTime === 0}
+            disabled={!isPlaying && currentTime === 0 && !loadingAudio}
             className="inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 disabled:opacity-40 dark:border-slate-600 dark:hover:bg-slate-800"
           >
             <Square size={14} /> Detener
@@ -566,16 +622,6 @@ export default function StoryTab({
             </select>
           </label>
         </div>
-
-        {loadingAudio && (
-          <div
-            role="status"
-            className="flex items-center gap-2 rounded bg-slate-100 px-2.5 py-1.5 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-200"
-          >
-            <Loader2 size={13} className="shrink-0 animate-spin" />
-            <span>Generando audio neural en español con edge-tts y guardando en caché local...</span>
-          </div>
-        )}
 
         {mode === 'neural' && (
           <div className="flex items-center gap-2 text-xs text-slate-500">

@@ -837,3 +837,115 @@ def test_career_detail_includes_course_progress_summary(client: TestClient) -> N
     assert prog_inf2324["total"] == len(demo_pack["nodes"])
     assert prog_inf2324["started"] == 1
     assert prog_inf2324["mastered"] == 0
+
+
+def test_exam_route_generation_persistence_and_uncovered_topics(client: TestClient) -> None:
+    from datetime import date, timedelta
+
+    demo_pack = json.loads((fixtures_dir() / "demo_pack.json").read_text(encoding="utf-8"))
+    inst = client.post("/api/v1/courses/install-pack", json=demo_pack)
+    assert inst.status_code == 200
+    cid = "cl-pucv-inf2324-ccna1"
+
+    missing = client.get(f"/api/v1/courses/{cid}/exam-route")
+    assert missing.status_code == 404
+
+    exam_dt = (date.today() + timedelta(days=5)).isoformat()
+    created = client.post(
+        f"/api/v1/courses/{cid}/exam-route",
+        json={
+            "exam_date": exam_dt,
+            "hours_per_day": 3.0,
+            "goal": "Necesito 3.5 para aprobar con 4.0",
+            "exam_topics": "Ethernet y direcciones MAC\nBGP multihoming avanzado",
+        },
+    )
+    assert created.status_code == 200
+    body = created.json()
+    assert body["course_id"] == cid
+    assert body["exam_date"] == exam_dt
+    assert body["days_left"] == 5
+    assert body["recommended_cooldown_mode"] == "urgency"
+    assert len(body["days"]) >= 1
+    valid_ids = {n["id"] for n in demo_pack["nodes"]}
+    step_ids = [s["node_id"] for d in body["days"] for s in d["steps"] if s["node_id"]]
+    assert step_ids
+    assert all(nid in valid_ids for nid in step_ids)
+    assert any("BGP" in t for t in body["uncovered_topics"])
+
+    fetched = client.get(f"/api/v1/courses/{cid}/exam-route")
+    assert fetched.status_code == 200
+    assert fetched.json()["strategy_summary"] == body["strategy_summary"]
+    assert fetched.json()["days"] == body["days"]
+
+
+def test_exam_route_with_ai_sanitizes_unknown_node_ids(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import date, timedelta
+
+    from app.services import ai_router
+
+    demo_pack = json.loads((fixtures_dir() / "demo_pack.json").read_text(encoding="utf-8"))
+    inst = client.post("/api/v1/courses/install-pack", json=demo_pack)
+    assert inst.status_code == 200
+    cid = "cl-pucv-inf2324-ccna1"
+    valid_first = demo_pack["nodes"][0]["id"]
+    exam_dt = (date.today() + timedelta(days=3)).isoformat()
+
+    def fake_complete_chat(_messages: list[dict[str, str]], **_kwargs: Any) -> AiCompletion:
+        payload = {
+            "strategy_summary": "Enfócate primero en bases y luego en el simulacro práctico.",
+            "recommended_cooldown_mode": "urgency",
+            "days": [
+                {
+                    "day_label": "Día 1 (Hoy)",
+                    "date": date.today().isoformat(),
+                    "focus": "Fundamentos clave",
+                    "steps": [
+                        {
+                            "node_id": valid_first,
+                            "node_title": "Cualquier titulo",
+                            "branch": "theory",
+                            "action": "study_and_eval",
+                            "target_mastery": 1,
+                            "estimated_minutes": 40,
+                            "reason": "Base obligatoria.",
+                        },
+                        {
+                            "node_id": "NODO-INEXISTENTE-999",
+                            "node_title": "Repaso externo puntual",
+                            "branch": "review",
+                            "action": "custom",
+                            "target_mastery": 2,
+                            "estimated_minutes": 20,
+                            "reason": "Complemento fuera del árbol.",
+                        },
+                    ],
+                }
+            ],
+            "uncovered_topics": [],
+        }
+        return AiCompletion(text=json.dumps(payload), provider="groq", model="llama-3.3-70b-versatile")
+
+    monkeypatch.setattr(ai_router, "complete_chat", fake_complete_chat)
+
+    res = client.post(
+        f"/api/v1/courses/{cid}/exam-route",
+        json={"exam_date": exam_dt, "hours_per_day": 2.5},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["provider"] == "groq"
+    steps = data["days"][0]["steps"]
+    assert steps[0]["node_id"] == valid_first
+    assert steps[0]["node_title"] == demo_pack["nodes"][0]["title"]
+    assert steps[1]["node_id"] is None
+
+
+def test_spa_index_sets_no_cache_header(client: TestClient) -> None:
+    res = client.get("/")
+    if res.status_code == 200:
+        cc = res.headers.get("cache-control", "").lower()
+        assert "no-cache" in cc

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import Any
 
 import httpx
@@ -870,3 +871,459 @@ def regenerate_questions_with_ai(
                 }
             )
         return (updated_fallback, "local_fallback")
+
+
+_DAY_NAMES_ES = ("Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom")
+_MONTH_NAMES_ES = (
+    "ene",
+    "feb",
+    "mar",
+    "abr",
+    "may",
+    "jun",
+    "jul",
+    "ago",
+    "sep",
+    "oct",
+    "nov",
+    "dic",
+)
+
+
+def _format_day_label_es(idx: int, d: date, total_days: int, exam_dt: date) -> str:
+    wd = _DAY_NAMES_ES[d.weekday()]
+    mon = _MONTH_NAMES_ES[d.month - 1]
+    tag = ""
+    if idx == 0:
+        tag = " (Hoy)"
+    elif d == exam_dt:
+        tag = " (Examen)"
+    elif d == exam_dt - timedelta(days=1) and total_days > 1:
+        tag = " (Víspera)"
+    return f"Día {idx + 1}{tag} · {wd} {d.day} {mon}"
+
+
+def _parse_exam_date(raw: str, today: date) -> tuple[date, int]:
+    cleaned = raw.strip()[:10]
+    try:
+        parsed = date.fromisoformat(cleaned)
+    except ValueError:
+        parsed = today + timedelta(days=5)
+    days_left = max(0, (parsed - today).days)
+    return parsed, days_left
+
+
+def _topological_sort_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id = {str(n["id"]): n for n in nodes}
+    depth_memo: dict[str, int] = {}
+
+    def depth_of(nid: str, seen: set[str]) -> int:
+        if nid in depth_memo:
+            return depth_memo[nid]
+        if nid in seen:
+            return 0
+        seen = seen | {nid}
+        cur = by_id.get(nid)
+        parents = [str(p) for p in (cur.get("parent_ids") or []) if str(p) in by_id] if cur else []
+        d = 1 + max((depth_of(p, seen) for p in parents), default=-1) if parents else 0
+        depth_memo[nid] = d
+        return d
+
+    for n in nodes:
+        depth_of(str(n["id"]), set())
+
+    idx_map = {str(n["id"]): idx for idx, n in enumerate(nodes)}
+    return sorted(nodes, key=lambda n: (depth_memo.get(str(n["id"]), 0), idx_map.get(str(n["id"]), 0)))
+
+
+def _detect_uncovered_topics(exam_topics: str, nodes: list[dict[str, Any]]) -> list[str]:
+    if not exam_topics.strip():
+        return []
+    corpus = " ".join(
+        f"{n.get('title', '')} {n.get('summary', '')} {n.get('block', '')}" for n in nodes
+    ).lower()
+    raw_lines = [
+        line.strip(" -•*\t.:")
+        for line in re.split(r"[\n;]+", exam_topics)
+        if line.strip()
+    ]
+    ignore_headers = {
+        "grammar",
+        "vocabulary",
+        "vocabulario",
+        "gramatica",
+        "gramática",
+        "temario",
+        "contenidos",
+        "contents",
+        "final exam contents",
+        "list of students",
+        "lista",
+    }
+    uncovered: list[str] = []
+    for line in raw_lines:
+        low = line.lower()
+        if len(line) < 3 or low in ignore_headers:
+            continue
+        if any(skip in low for skip in ("clave ", "sala:", "date:", "list of students", "final exam")):
+            continue
+        tokens = [t for t in re.findall(r"[a-zA-ZáéíóúñÁÉÍÓÚÑ0-9]{3,}", low)]
+        if not tokens:
+            continue
+        matched = sum(1 for t in tokens if t in corpus or t[:4] in corpus)
+        if matched / len(tokens) < 0.4:
+            uncovered.append(line)
+    return uncovered[:12]
+
+
+def _build_fallback_exam_route(
+    *,
+    course_title: str,
+    nodes: list[dict[str, Any]],
+    exam_dt: date,
+    today: date,
+    days_left: int,
+    hours_per_day: float,
+    goal: str,
+    exam_topics: str,
+) -> dict[str, Any]:
+    recommended_mode = "urgency" if days_left <= 10 else "semester"
+    study_days = 1 if days_left == 0 else min(max(1, days_left), 10)
+    daily_minutes = max(45, round(hours_per_day * 60))
+
+    theory_nodes = _topological_sort_nodes([n for n in nodes if n.get("branch") != "practice"])
+    practice_nodes = _topological_sort_nodes([n for n in nodes if n.get("branch") == "practice"])
+
+    pending_theory = [n for n in theory_nodes if int(n.get("mastery_level") or 0) < 3]
+    pending_practice = [n for n in practice_nodes if int(n.get("mastery_level") or 0) < 3]
+
+    # Construir cola ordenada: teoría pendiente (0/3 primero), luego repaso 2/3-3/3, luego práctica/simulacro
+    queue: list[dict[str, Any]] = []
+    for n in pending_theory:
+        lvl = int(n.get("mastery_level") or 0)
+        queue.append(
+            {
+                "node_id": str(n["id"]),
+                "node_title": str(n["title"]),
+                "branch": "theory",
+                "action": "study_and_eval" if lvl == 0 else "spaced_review",
+                "target_mastery": min(3, lvl + 1),
+                "estimated_minutes": 40 if lvl == 0 else 25,
+                "reason": (
+                    "Base obligatoria pendiente (0/3): entiende la historia y logra >= 7/10 a ciegas."
+                    if lvl == 0
+                    else f"Consolidación espaciada desde {lvl}/3 hacia {min(3, lvl + 1)}/3."
+                ),
+            }
+        )
+
+    for n in pending_practice:
+        lvl = int(n.get("mastery_level") or 0)
+        queue.append(
+            {
+                "node_id": str(n["id"]),
+                "node_title": str(n["title"]),
+                "branch": "practice",
+                "action": "practice_exam",
+                "target_mastery": min(3, max(1, lvl + 1)),
+                "estimated_minutes": 45,
+                "reason": "Simulacro práctico/examen para validar aplicación sin apuntes.",
+            }
+        )
+
+    # Si ya está casi todo en 3/3 o hay días extra, agregar ronda de repaso de los de menor best_score
+    if len(queue) < study_days * 2 and nodes:
+        weakest = sorted(
+            nodes,
+            key=lambda n: (int(n.get("mastery_level") or 0), float(n.get("best_score") or 0.0)),
+        )[: max(3, study_days)]
+        for n in weakest:
+            queue.append(
+                {
+                    "node_id": str(n["id"]),
+                    "node_title": str(n["title"]),
+                    "branch": str(n.get("branch") or "theory"),
+                    "action": "spaced_review",
+                    "target_mastery": 3,
+                    "estimated_minutes": 25,
+                    "reason": "Repaso de consolidación en orden mezclado para fijar retención antes del examen.",
+                }
+            )
+
+    days: list[dict[str, Any]] = []
+    if study_days == 1:
+        selected_steps: list[dict[str, Any]] = []
+        acc = 0
+        for step in queue:
+            if acc + step["estimated_minutes"] <= daily_minutes + 30 or not selected_steps:
+                selected_steps.append(step)
+                acc += step["estimated_minutes"]
+            if len(selected_steps) >= 6:
+                break
+        d0 = today
+        days.append(
+            {
+                "day_label": _format_day_label_es(0, d0, 1, exam_dt),
+                "date": d0.isoformat(),
+                "focus": "Bloque intensivo de máxima prioridad y simulacro final",
+                "steps": selected_steps,
+            }
+        )
+    else:
+        buckets: list[list[dict[str, Any]]] = [[] for _ in range(study_days)]
+        # Reservar el último día principalmente para práctica / simulacros y repaso final
+        practice_steps = [s for s in queue if s["action"] == "practice_exam"]
+        theory_steps = [s for s in queue if s["action"] != "practice_exam"]
+        theory_span = max(1, study_days - (1 if practice_steps and study_days >= 2 else 0))
+
+        for i, step in enumerate(theory_steps):
+            day_idx = min(theory_span - 1, (i * theory_span) // max(1, len(theory_steps)))
+            buckets[day_idx].append(step)
+
+        for i, step in enumerate(practice_steps):
+            day_idx = study_days - 1 if study_days >= 2 else 0
+            if len(buckets[day_idx]) >= 4 and study_days >= 3:
+                day_idx = study_days - 2
+            buckets[day_idx].append(step)
+
+        # Garantizar que ningún día quede vacío
+        for day_idx in range(study_days):
+            if not buckets[day_idx] and nodes:
+                ref = nodes[day_idx % len(nodes)]
+                buckets[day_idx].append(
+                    {
+                        "node_id": str(ref["id"]),
+                        "node_title": str(ref["title"]),
+                        "branch": str(ref.get("branch") or "theory"),
+                        "action": "spaced_review",
+                        "target_mastery": 3,
+                        "estimated_minutes": 30,
+                        "reason": "Repaso espaciado y verificación a ciegas con nuevas preguntas.",
+                    }
+                )
+
+        for day_idx in range(study_days):
+            cur_date = today + timedelta(days=day_idx)
+            steps = buckets[day_idx][:6]
+            if day_idx == study_days - 1:
+                focus = "Simulacros prácticos y repaso final sin apuntes"
+            elif day_idx == 0:
+                focus = "Bases fundamentales y primeros nodos en 1/3"
+            else:
+                focus = "Avance troncal + consolidación espaciada (2/3 -> 3/3)"
+            days.append(
+                {
+                    "day_label": _format_day_label_es(day_idx, cur_date, study_days, exam_dt),
+                    "date": cur_date.isoformat(),
+                    "focus": focus,
+                    "steps": steps,
+                }
+            )
+
+    goal_note = f" Objetivo declarado: {goal.strip()}." if goal.strip() else ""
+    summary = (
+        f"Plan de {study_days} {'día' if study_days == 1 else 'días'} para {course_title} "
+        f"(faltan {days_left} {'día' if days_left == 1 else 'días'}, ~{hours_per_day:g} h/día). "
+        f"Prioriza cerrar nodos base 0/3 en orden de prerrequisitos, consolidar 2/3–3/3 en bloques separados "
+        f"y rematar con simulacros prácticos.{goal_note}"
+    )
+    return {
+        "strategy_summary": summary,
+        "recommended_cooldown_mode": recommended_mode,
+        "days": days,
+        "uncovered_topics": _detect_uncovered_topics(exam_topics, nodes),
+    }
+
+
+def generate_exam_route_with_ai(
+    *,
+    course_title: str,
+    engine_type: str,
+    nodes: list[dict[str, Any]],
+    exam_date: str,
+    hours_per_day: float = 3.0,
+    goal: str = "",
+    exam_topics: str = "",
+    preferred_provider: str = "auto",
+    today: date | None = None,
+) -> tuple[dict[str, Any], date, int, str]:
+    """Genera una ruta realista día a día para preparar un examen sobre el árbol del ramo."""
+    today_dt = today or date.today()
+    exam_dt, days_left = _parse_exam_date(exam_date, today_dt)
+    study_days = 1 if days_left == 0 else min(max(1, days_left), 10)
+    recommended_mode = "urgency" if days_left <= 10 else "semester"
+
+    valid_by_id = {str(n["id"]): n for n in nodes}
+    valid_by_title = {str(n["title"]).strip().lower(): n for n in nodes}
+
+    compact_nodes = [
+        {
+            "id": str(n["id"]),
+            "title": str(n["title"]),
+            "block": str(n.get("block") or ""),
+            "branch": str(n.get("branch") or "theory"),
+            "parent_ids": list(n.get("parent_ids") or []),
+            "mastery_level": int(n.get("mastery_level") or 0),
+            "best_score": float(n.get("best_score") or 0.0),
+            "summary": str(n.get("summary") or "")[:180],
+        }
+        for n in _topological_sort_nodes(nodes)
+    ]
+
+    day_slots = [
+        {
+            "index": idx,
+            "date": (today_dt + timedelta(days=idx)).isoformat(),
+            "day_label": _format_day_label_es(idx, today_dt + timedelta(days=idx), study_days, exam_dt),
+        }
+        for idx in range(study_days)
+    ]
+
+    try:
+        system_prompt = (
+            "Eres un estratega académico de Brotal (método 5R + sistema 7/10 y retención espaciada 0/3 -> 3/3).\n"
+            "Tu trabajo es diseñar una RUTA REALISTA día a día para preparar un examen con los nodos EXACTOS del árbol.\n"
+            "Reglas estrictas:\n"
+            "- Responde SOLO JSON válido con claves: strategy_summary (string conciso 2-3 oraciones en español), "
+            "recommended_cooldown_mode ('urgency' si faltan <= 10 días, si no 'semester'), "
+            "days (lista de objetos {day_label, date, focus, steps}), "
+            "uncovered_topics (lista de strings con temas del temario del examen que NO estén cubiertos por los nodos actuales; lista vacía si no se dio temario o todo está cubierto).\n"
+            "- Cada step debe tener: node_id (DEBE existir en nodes o null solo si es práctica externa puntual), "
+            "node_title, branch ('theory'|'practice'|'review'), "
+            "action ('study_and_eval' | 'spaced_review' | 'practice_exam' | 'custom'), "
+            "target_mastery (1, 2 o 3), estimated_minutes (15 a 90), reason (1 línea concreta de por qué ahora).\n"
+            "- Respeta los prerrequisitos (parent_ids) y prioriza nodos en 0/3 y 1/3 antes de repetir nodos ya en 3/3.\n"
+            "- Programa repasos espaciados en días posteriores para subir nodos críticos de 1/3 -> 2/3 -> 3/3, y deja los nodos 'practice' (simulacros) para la recta final.\n"
+            "- Respeta las horas/día disponibles (~hours_per_day * 60 minutos por día) y usa EXACTAMENTE los day_slots entregados."
+        )
+        user_payload = {
+            "course_title": course_title,
+            "engine_type": engine_type,
+            "today": today_dt.isoformat(),
+            "exam_date": exam_dt.isoformat(),
+            "days_left": days_left,
+            "hours_per_day": hours_per_day,
+            "goal": goal.strip(),
+            "exam_topics": exam_topics.strip()[:3000],
+            "day_slots": day_slots,
+            "nodes": compact_nodes,
+        }
+        comp = complete_chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            preferred_provider=preferred_provider,
+            json_mode=True,
+            temperature=0.35,
+            max_tokens=4096,
+        )
+        parsed = extract_json_object(comp.text)
+        raw_days = parsed.get("days")
+        if not isinstance(raw_days, list) or not raw_days:
+            raise ValueError("Ruta sin días válidos")
+
+        clean_days: list[dict[str, Any]] = []
+        for idx, raw_day in enumerate(raw_days[:12]):
+            if not isinstance(raw_day, dict):
+                continue
+            slot = day_slots[idx] if idx < len(day_slots) else None
+            d_date = str(raw_day.get("date") or (slot["date"] if slot else today_dt.isoformat()))[:10]
+            d_label = str(raw_day.get("day_label") or (slot["day_label"] if slot else f"Día {idx + 1}")).strip()
+            d_focus = str(raw_day.get("focus") or "Bloque de estudio dirigido").strip()
+            raw_steps = raw_day.get("steps")
+            clean_steps: list[dict[str, Any]] = []
+            if isinstance(raw_steps, list):
+                for st in raw_steps[:8]:
+                    if not isinstance(st, dict):
+                        continue
+                    cand_id = str(st.get("node_id") or "").strip() or None
+                    cand_title = str(st.get("node_title") or "").strip()
+                    matched_node = valid_by_id.get(cand_id) if cand_id else None
+                    if matched_node is None and cand_title:
+                        matched_node = valid_by_title.get(cand_title.lower())
+                    if matched_node is not None:
+                        final_id: str | None = str(matched_node["id"])
+                        final_title = str(matched_node["title"])
+                        final_branch = str(matched_node.get("branch") or "theory")
+                    else:
+                        if not cand_title:
+                            continue
+                        final_id = None
+                        final_title = cand_title
+                        final_branch = str(st.get("branch") or "review")
+
+                    raw_action = str(st.get("action") or "study_and_eval").strip().lower()
+                    if raw_action not in ("study_and_eval", "spaced_review", "practice_exam", "custom"):
+                        raw_action = "practice_exam" if final_branch == "practice" else "study_and_eval"
+                    try:
+                        t_mastery = max(1, min(3, int(st.get("target_mastery") or 1)))
+                    except (TypeError, ValueError):
+                        t_mastery = 1
+                    try:
+                        est_min = max(10, min(180, int(st.get("estimated_minutes") or 35)))
+                    except (TypeError, ValueError):
+                        est_min = 35
+                    reason = str(st.get("reason") or "Paso clave de la ruta de examen.").strip()
+                    clean_steps.append(
+                        {
+                            "node_id": final_id,
+                            "node_title": final_title,
+                            "branch": final_branch,
+                            "action": raw_action,
+                            "target_mastery": t_mastery,
+                            "estimated_minutes": est_min,
+                            "reason": reason,
+                        }
+                    )
+            if clean_steps:
+                clean_days.append(
+                    {
+                        "day_label": d_label,
+                        "date": d_date,
+                        "focus": d_focus,
+                        "steps": clean_steps,
+                    }
+                )
+
+        if not clean_days:
+            raise ValueError("La IA no devolvió pasos válidos")
+
+        raw_uncovered = parsed.get("uncovered_topics")
+        uncovered = (
+            [str(x).strip() for x in raw_uncovered if str(x).strip()][:12]
+            if isinstance(raw_uncovered, list)
+            else []
+        )
+        raw_mode = str(parsed.get("recommended_cooldown_mode") or recommended_mode).strip().lower()
+        final_mode = "urgency" if raw_mode == "urgency" else "semester"
+        summary = str(parsed.get("strategy_summary") or "").strip()
+        if not summary:
+            summary = (
+                f"Ruta de {len(clean_days)} días para {course_title} "
+                f"(faltan {days_left} días, {hours_per_day:g} h/día)."
+            )
+
+        return (
+            {
+                "strategy_summary": summary,
+                "recommended_cooldown_mode": final_mode,
+                "days": clean_days,
+                "uncovered_topics": uncovered,
+            },
+            exam_dt,
+            days_left,
+            comp.provider,
+        )
+    except (AiProviderError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        fallback = _build_fallback_exam_route(
+            course_title=course_title,
+            nodes=nodes,
+            exam_dt=exam_dt,
+            today=today_dt,
+            days_left=days_left,
+            hours_per_day=hours_per_day,
+            goal=goal,
+            exam_topics=exam_topics,
+        )
+        return (fallback, exam_dt, days_left, "local_fallback")

@@ -1,13 +1,21 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { Code2, FolderOpen, Home, MessageSquare, RotateCcw } from 'lucide-react'
-import { inCooldown, type CooldownMode, type CourseTree, type PackNode } from '../api/study'
+import { CalendarClock, Code2, FolderOpen, Home, MessageSquare, RotateCcw } from 'lucide-react'
+import {
+  getExamRoute,
+  inCooldown,
+  type CooldownMode,
+  type CourseTree,
+  type ExamRouteResponse,
+  type PackNode,
+} from '../api/study'
 import { selectCourses, useAppStore } from '../store/useAppStore'
 import { useStudyStore } from '../store/useStudyStore'
 import ChatDrawer from '../components/layout/ChatDrawer'
 import ConfirmDialog from '../components/study/ConfirmDialog'
 import { CourseFilesModal } from '../components/study/CourseFilesPanel'
 import EmptyCourse from '../components/study/EmptyCourse'
+import ExamRouteModal from '../components/study/ExamRouteModal'
 import IngestModal from '../components/study/IngestModal'
 import SkillTree, { type TreeBranchFilter } from '../components/study/SkillTree'
 import StudyStation from '../components/study/StudyStation'
@@ -124,6 +132,8 @@ export default function CourseStudyPage() {
   const [chatBanner, setChatBanner] = useState<string | null>(null)
   const [chatAutoSendTrigger, setChatAutoSendTrigger] = useState(0)
   const [filesOpen, setFilesOpen] = useState(false)
+  const [examRouteOpen, setExamRouteOpen] = useState(false)
+  const [savedExamRoute, setSavedExamRoute] = useState<ExamRouteResponse | null>(null)
   const [ingestOpen, setIngestOpen] = useState(false)
   const [filesRefresh, setFilesRefresh] = useState(0)
   const [branchFilter, setBranchFilter] = useState<TreeBranchFilter>('all')
@@ -138,6 +148,23 @@ export default function CourseStudyPage() {
   useEffect(() => {
     void load(lookupKey)
   }, [lookupKey, load])
+  useEffect(() => {
+    if (!tree?.course_id) {
+      setSavedExamRoute(null)
+      return
+    }
+    let active = true
+    void getExamRoute(tree.course_id)
+      .then((r) => {
+        if (active) setSavedExamRoute(r)
+      })
+      .catch(() => {
+        if (active) setSavedExamRoute(null)
+      })
+    return () => {
+      active = false
+    }
+  }, [tree?.course_id])
 
   const anyCooldown = tree ? Object.values(tree.progress).some((p) => inCooldown(p)) : false
   const now = useNow(anyCooldown)
@@ -276,6 +303,24 @@ export default function CourseStudyPage() {
 
           <button
             type="button"
+            onClick={() => setExamRouteOpen(true)}
+            className={`inline-flex items-center gap-1 rounded border px-2.5 py-1 text-xs font-medium ${
+              savedExamRoute
+                ? 'border-indigo-400 bg-indigo-50 text-indigo-900 hover:bg-indigo-100 dark:border-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-200 dark:hover:bg-indigo-950'
+                : 'border-slate-300 text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800'
+            }`}
+          >
+            <CalendarClock size={13} />
+            Ruta de examen
+            {savedExamRoute && (
+              <span className="rounded bg-indigo-600 px-1 py-0.2 font-mono text-[10px] font-semibold text-white dark:bg-indigo-500">
+                {savedExamRoute.days_left === 0 ? 'Hoy' : `${savedExamRoute.days_left}d`}
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
             onClick={() => setFilesOpen(true)}
             className="inline-flex items-center gap-1 rounded border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
           >
@@ -358,6 +403,17 @@ export default function CourseStudyPage() {
         contextBanner={chatBanner}
         autoSendTrigger={chatAutoSendTrigger}
         onSelectNode={requestSelect}
+      />
+
+      <ExamRouteModal
+        open={examRouteOpen}
+        onClose={() => setExamRouteOpen(false)}
+        tree={tree}
+        cooldownMode={cooldownMode}
+        onChangeCooldownMode={setCooldownMode}
+        onSelectNode={handleSelectNextNode}
+        onAskTutor={openContextualTutor}
+        onRouteUpdated={setSavedExamRoute}
       />
 
       <CourseFilesModal

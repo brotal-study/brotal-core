@@ -110,6 +110,46 @@ export interface ChatResponse {
   suggested_nodes?: SuggestedNode[]
 }
 
+export interface ExamRouteRequest {
+  exam_date: string
+  hours_per_day: number
+  goal?: string
+  exam_topics?: string
+}
+
+export interface ExamRouteStep {
+  node_id: string | null
+  node_title: string
+  branch: string
+  action: 'study_and_eval' | 'spaced_review' | 'practice_exam' | 'custom' | string
+  target_mastery: number
+  estimated_minutes: number
+  reason: string
+}
+
+export interface ExamRouteDay {
+  day_label: string
+  date: string
+  focus: string
+  steps: ExamRouteStep[]
+}
+
+export interface ExamRouteResponse {
+  course_id: string
+  course_title: string
+  exam_date: string
+  days_left: number
+  hours_per_day: number
+  goal: string
+  exam_topics: string
+  strategy_summary: string
+  recommended_cooldown_mode: CooldownMode
+  days: ExamRouteDay[]
+  uncovered_topics: string[]
+  provider: string
+  updated_at: string
+}
+
 export const PASS_SCORE = 7.0
 export const MAX_MASTERY = 3
 export const COOLDOWN_MS: Record<CooldownMode, number> = {
@@ -199,10 +239,14 @@ export interface TtsTimingsData {
 }
 
 /** POST /api/v1/study/{course_id}/{node_id}/tts -> Blob MP3 */
-export async function fetchNodeTtsBlob(courseId: string, nodeId: string): Promise<Blob> {
+export async function fetchNodeTtsBlob(
+  courseId: string,
+  nodeId: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
   const res = await fetch(
     `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/tts`,
-    { method: 'POST' },
+    { method: 'POST', signal },
   )
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.blob()
@@ -212,10 +256,12 @@ export async function fetchNodeTtsBlob(courseId: string, nodeId: string): Promis
 export async function fetchNodeTtsTimingsData(
   courseId: string,
   nodeId: string,
+  signal?: AbortSignal,
 ): Promise<TtsTimingsData> {
   try {
     const res = await api<TtsTimingsResponse>(
       `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/tts-timings`,
+      { signal },
     )
     const sentences = Array.isArray(res.sentences)
       ? res.sentences
@@ -224,9 +270,29 @@ export async function fetchNodeTtsTimingsData(
         : []
     const words = Array.isArray(res.words) ? res.words : []
     return { sentences, words }
-  } catch {
+  } catch (err) {
+    if (signal?.aborted) throw err
     return { sentences: [], words: [] }
   }
+}
+
+/** GET /api/v1/courses/{course_id}/exam-route -> ruta guardada o null si no existe. */
+export async function getExamRoute(courseId: string): Promise<ExamRouteResponse | null> {
+  const res = await fetch(`/api/v1/courses/${encodeURIComponent(courseId)}/exam-route`)
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return (await res.json()) as ExamRouteResponse
+}
+
+/** POST /api/v1/courses/{course_id}/exam-route -> genera y guarda ruta de examen IA. */
+export async function generateExamRoute(
+  courseId: string,
+  req: ExamRouteRequest,
+): Promise<ExamRouteResponse> {
+  return api<ExamRouteResponse>(`/api/v1/courses/${encodeURIComponent(courseId)}/exam-route`, {
+    method: 'POST',
+    body: JSON.stringify(req),
+  })
 }
 
 export async function fetchNodeTtsTimings(

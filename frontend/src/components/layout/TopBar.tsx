@@ -45,9 +45,14 @@ export default function TopBar() {
   const all = useMemo(() => selectCourses({ career, profile, manualCourses }), [career, profile, manualCourses])
   const active = all.filter((c) => statuses[c.id] === 'active')
   const routeId = pathname.startsWith('/course/') ? decodeURIComponent(pathname.slice(8)) : null
-  const current = all.find((c) => c.id === routeId)
-  const activeNode = tree?.nodes.find((n) => n.id === selectedNodeId) ?? null
-  const chatCourseId = tree?.course_id ?? current?.code ?? routeId
+  const isInCourse = routeId !== null
+  const current = isInCourse ? all.find((c) => c.id === routeId) : undefined
+  const activeNode = isInCourse ? (tree?.nodes.find((n) => n.id === selectedNodeId) ?? null) : null
+  const chatCourseId = isInCourse ? (tree?.course_id ?? current?.code ?? routeId) : null
+
+  useEffect(() => {
+    if (!isInCourse) setChatOpen(false)
+  }, [isInCourse])
 
   const item = 'rounded px-2 py-1 hover:bg-slate-200 dark:hover:bg-slate-800'
   return (
@@ -59,7 +64,9 @@ export default function TopBar() {
       <span className="text-slate-400">|</span>
       <div ref={ref} className="relative">
         <button type="button" onClick={() => setMenu((m) => !m)} aria-expanded={menu} className={`flex items-center gap-2 ${item}`}>
-          <span>{current ? current.name : tree ? tree.title : 'Sin ramo activo'}</span>
+          <span>
+            {isInCourse ? (current ? current.name : tree ? tree.title : 'Ramo actual') : 'Cambiar ramo'}
+          </span>
           <ChevronDown size={16} />
         </button>
         {menu && (
