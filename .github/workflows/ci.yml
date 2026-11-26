@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    name: Backend (Pytest + Ruff + Fixtures)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: "backend/pyproject.toml"
+
+      - name: Install backend dependencies
+        run: pip install -e "./backend[dev]"
+
+      - name: Run pytest
+        working-directory: backend
+        run: pytest -q
+
+      - name: Run ruff linter
+        working-directory: backend
+        run: ruff check app tests
+
+      - name: Validate Pydantic fixtures
+        run: python3 scripts/validate_fixtures.py
+
+  frontend:
+    name: Frontend (Build + Zero Emojis)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: "frontend/package-lock.json"
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Typecheck and build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Check zero Unicode emojis in frontend/src
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+
+          pattern = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]")
+          hits = []
+          for path in sorted(pathlib.Path("frontend/src").rglob("*")):
+              if path.is_file():
+                  text = path.read_text(encoding="utf-8", errors="ignore")
+                  for lineno, line in enumerate(text.splitlines(), 1):
+                      if pattern.search(line):
+                          hits.append(f"{path}:{lineno}: {line.strip()}")
+          if hits:
+              print("ERROR: Emojis Unicode detectados en frontend/src (usa lucide-react):")
+              print("\n".join(hits))
+              sys.exit(1)
+          print("OK: 0 emojis Unicode en frontend/src")
+          PY
