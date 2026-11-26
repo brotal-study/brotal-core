@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,6 +15,8 @@ from app.schemas.study import (
     CourseTreeResponse,
     EvaluateRequest,
     EvaluateResponse,
+    ExamRouteRequest,
+    ExamRouteResponse,
     NodeProgress,
     PointFeedback,
     RegenerateQuestionsResponse,
@@ -24,6 +26,7 @@ from app.schemas.study import (
 from app.services.ai_router import (
     AiProviderError,
     evaluate_with_ai,
+    generate_exam_route_with_ai,
     regenerate_questions_with_ai,
     regenerate_story_with_ai,
 )
@@ -545,3 +548,152 @@ def reset_course_progress(
     conn.execute("DELETE FROM evaluation_attempts WHERE course_id = ?;", (real_course_id,))
     conn.commit()
     return {"course_id": real_course_id, "reset": True}
+
+
+@router.get("/courses/{course_id}/exam-route", response_model=ExamRouteResponse)
+def get_exam_route(
+    course_id: str,
+    conn: DbConn,
+) -> ExamRouteResponse:
+    course_row = resolve_course_row(conn, course_id)
+    if course_row is None:
+        raise HTTPException(status_code=404, detail=f"Course '{course_id}' not found")
+
+    real_course_id = course_row["id"]
+    row = conn.execute(
+        "SELECT * FROM exam_routes WHERE course_id = ?;",
+        (real_course_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No exam route saved for '{course_id}'")
+
+    try:
+        payload = json.loads(row["route_json"] or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Stored exam route is corrupted") from exc
+
+    try:
+        exam_dt = date.fromisoformat(str(row["exam_date"])[:10])
+        days_left = max(0, (exam_dt - date.today()).days)
+    except ValueError:
+        days_left = 0
+
+    return ExamRouteResponse(
+        course_id=real_course_id,
+        course_title=course_row["title"],
+        exam_date=row["exam_date"],
+        days_left=days_left,
+        hours_per_day=float(row["hours_per_day"] or 3.0),
+        goal=row["goal"] or "",
+        exam_topics=row["exam_topics"] or "",
+        strategy_summary=str(payload.get("strategy_summary") or ""),
+        recommended_cooldown_mode="urgency"
+        if payload.get("recommended_cooldown_mode") == "urgency"
+        else "semester",
+        days=payload.get("days") or [],
+        uncovered_topics=payload.get("uncovered_topics") or [],
+        provider=row["provider"] or "local_fallback",
+        updated_at=row["updated_at"],
+    )
+
+
+@router.post("/courses/{course_id}/exam-route", response_model=ExamRouteResponse)
+def post_exam_route(
+    course_id: str,
+    req: ExamRouteRequest,
+    conn: DbConn,
+) -> ExamRouteResponse:
+    course_row = resolve_course_row(conn, course_id)
+    if course_row is None:
+        raise HTTPException(status_code=404, detail=f"Course '{course_id}' not found")
+
+    real_course_id = course_row["id"]
+    node_rows = conn.execute(
+        "SELECT * FROM course_nodes WHERE course_id = ? ORDER BY rowid ASC;",
+        (real_course_id,),
+    ).fetchall()
+    if not node_rows:
+        raise HTTPException(status_code=404, detail=f"Course '{course_id}' has no skill tree installed")
+
+    prog_rows = conn.execute(
+        "SELECT * FROM node_progress WHERE course_id = ?;",
+        (real_course_id,),
+    ).fetchall()
+    prog_by_id = {r["node_id"]: r for r in prog_rows}
+
+    nodes_payload: list[dict[str, Any]] = []
+    for r in node_rows:
+        pr = prog_by_id.get(r["id"])
+        nodes_payload.append(
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "block": r["block_label"] or "",
+                "branch": r["branch"],
+                "summary": r["summary"] or "",
+                "parent_ids": json.loads(r["parent_ids_json"] or "[]"),
+                "mastery_level": int(pr["mastery_level"]) if pr else 0,
+                "best_score": float(pr["best_score"]) if pr else 0.0,
+            }
+        )
+
+    conn.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1);")
+    prof_row = conn.execute("SELECT ai_provider FROM user_profile WHERE id = 1;").fetchone()
+    ai_provider = prof_row["ai_provider"] if prof_row else "auto"
+
+    route_data, exam_dt, days_left, provider = generate_exam_route_with_ai(
+        course_title=course_row["title"],
+        engine_type=course_row["engine_type"] or "concept_tree",
+        nodes=nodes_payload,
+        exam_date=req.exam_date,
+        hours_per_day=req.hours_per_day,
+        goal=req.goal,
+        exam_topics=req.exam_topics,
+        preferred_provider=ai_provider,
+    )
+
+    now_iso = _format_iso(datetime.now(UTC)) or datetime.now(UTC).isoformat()
+    exam_date_iso = exam_dt.isoformat()
+    conn.execute(
+        """
+        INSERT INTO exam_routes (
+            course_id, exam_date, hours_per_day, goal, exam_topics, route_json, provider, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(course_id) DO UPDATE SET
+            exam_date = excluded.exam_date,
+            hours_per_day = excluded.hours_per_day,
+            goal = excluded.goal,
+            exam_topics = excluded.exam_topics,
+            route_json = excluded.route_json,
+            provider = excluded.provider,
+            updated_at = excluded.updated_at;
+        """,
+        (
+            real_course_id,
+            exam_date_iso,
+            req.hours_per_day,
+            req.goal.strip(),
+            req.exam_topics.strip(),
+            json.dumps(route_data, ensure_ascii=False),
+            provider,
+            now_iso,
+        ),
+    )
+    conn.commit()
+
+    return ExamRouteResponse(
+        course_id=real_course_id,
+        course_title=course_row["title"],
+        exam_date=exam_date_iso,
+        days_left=days_left,
+        hours_per_day=req.hours_per_day,
+        goal=req.goal.strip(),
+        exam_topics=req.exam_topics.strip(),
+        strategy_summary=route_data["strategy_summary"],
+        recommended_cooldown_mode=route_data["recommended_cooldown_mode"],
+        days=route_data["days"],
+        uncovered_topics=route_data["uncovered_topics"],
+        provider=provider,
+        updated_at=now_iso,
+    )

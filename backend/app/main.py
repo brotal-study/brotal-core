@@ -66,4 +66,7 @@ def serve_spa(full_path: str) -> FileResponse:
         candidate = (FRONTEND_DIST / full_path).resolve()
         if candidate.is_file() and str(candidate).startswith(str(FRONTEND_DIST.resolve())):
             return FileResponse(candidate)
-    return FileResponse(index_file)
+    return FileResponse(
+        index_file,
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )

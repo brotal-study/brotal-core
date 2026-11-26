@@ -97,3 +97,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS local_chunks_fts USING fts5(
   section_title,
   content
 );
+
+-- 9. Ruta de preparación para examen por ramo (v1.1.2)
+CREATE TABLE IF NOT EXISTS exam_routes (
+  course_id         TEXT PRIMARY KEY REFERENCES courses(id) ON DELETE CASCADE,
+  exam_date         TEXT NOT NULL,
+  hours_per_day     REAL NOT NULL DEFAULT 3.0,
+  goal              TEXT NOT NULL DEFAULT '',
+  exam_topics       TEXT NOT NULL DEFAULT '',
+  route_json        TEXT NOT NULL,
+  provider          TEXT NOT NULL DEFAULT 'local_fallback',
+  updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

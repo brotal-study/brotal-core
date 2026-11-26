@@ -73,6 +73,46 @@ class RegenerateQuestionsResponse(BaseModel):
     provider: str
 
 
+class ExamRouteRequest(BaseModel):
+    exam_date: str = Field(..., min_length=8, max_length=32)
+    hours_per_day: float = Field(default=3.0, ge=0.5, le=14.0)
+    goal: str = Field(default="", max_length=400)
+    exam_topics: str = Field(default="", max_length=4000)
+
+
+class ExamRouteStep(BaseModel):
+    node_id: str | None = None
+    node_title: str
+    branch: str = "theory"
+    action: str = "study_and_eval"
+    target_mastery: int = Field(default=1, ge=1, le=3)
+    estimated_minutes: int = Field(default=35, ge=5, le=240)
+    reason: str = ""
+
+
+class ExamRouteDay(BaseModel):
+    day_label: str
+    date: str
+    focus: str
+    steps: list[ExamRouteStep] = Field(default_factory=list)
+
+
+class ExamRouteResponse(BaseModel):
+    course_id: str
+    course_title: str
+    exam_date: str
+    days_left: int
+    hours_per_day: float
+    goal: str = ""
+    exam_topics: str = ""
+    strategy_summary: str
+    recommended_cooldown_mode: CooldownMode = "urgency"
+    days: list[ExamRouteDay] = Field(default_factory=list)
+    uncovered_topics: list[str] = Field(default_factory=list)
+    provider: str = "local_fallback"
+    updated_at: str
+
+
 def normalize_answers(
     raw_answers: list[AnswerItem] | list[str] | dict[str, str] | Any,
     eval_prompts: list[dict[str, Any]],
