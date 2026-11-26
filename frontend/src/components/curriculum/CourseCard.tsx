@@ -6,6 +6,7 @@ import {
   CircleDashed,
   Package,
 } from 'lucide-react'
+import type { CourseProgressSummary } from '../../api/curriculum'
 import type { Course, CourseStatus, PackSummary } from '../../api/types'
 import { STATUS_LABEL } from '../../store/useAppStore'
 
@@ -21,6 +22,7 @@ interface Props {
   color: string
   status: CourseStatus
   pack?: PackSummary
+  progressSummary?: CourseProgressSummary
   hasContent?: boolean
   dimmed: boolean
   quickApproveMode?: boolean
@@ -33,6 +35,7 @@ export default function CourseCard({
   color,
   status,
   pack,
+  progressSummary,
   hasContent = false,
   dimmed,
   quickApproveMode = false,
@@ -41,6 +44,15 @@ export default function CourseCard({
 }: Props) {
   const Icon = STATUS_ICON[status]
   const showStudyBtn = (status === 'active' || hasContent) && !quickApproveMode && !!onStudy
+  const showActiveProgress =
+    status === 'active' && !!progressSummary && progressSummary.total > 0
+  const masteredPct = showActiveProgress
+    ? Math.round((progressSummary.mastered / progressSummary.total) * 100)
+    : 0
+  const startedPct = showActiveProgress
+    ? Math.round((progressSummary.started / progressSummary.total) * 100)
+    : 0
+  const barPct = Math.max(masteredPct, Math.min(100, Math.round(startedPct * 0.45 + masteredPct * 0.55)))
 
   const cardStyleByStatus =
     status === 'passed'
@@ -88,6 +100,20 @@ export default function CourseCard({
           <span className="ml-1 text-[11px] font-normal text-slate-500">(opcional)</span>
         )}
       </div>
+      {showActiveProgress && progressSummary && (
+        <div className="flex flex-col gap-1 pt-0.5">
+          <div className="truncate text-[10px] font-medium text-indigo-900/80 dark:text-indigo-200/80">
+            {progressSummary.started}/{progressSummary.total} iniciados · {progressSummary.mastered}/
+            {progressSummary.total} en 3/3
+          </div>
+          <div className="h-1 overflow-hidden rounded-full bg-indigo-200/80 dark:bg-indigo-900/70">
+            <div
+              className="h-full bg-indigo-600 transition-all dark:bg-indigo-400"
+              style={{ width: `${barPct}%` }}
+            />
+          </div>
+        </div>
+      )}
       <div className="mt-auto flex flex-wrap items-center justify-between gap-1.5 pt-1.5 text-[11px]">
         <div className="flex flex-wrap items-center gap-1.5">
           <span

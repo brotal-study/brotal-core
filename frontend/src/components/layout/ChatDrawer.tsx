@@ -19,6 +19,7 @@ interface Props {
   nodeTitle: string | null
   initialPrompt?: string | null
   contextBanner?: string | null
+  autoSendTrigger?: number
   onSelectNode?: (nodeId: string) => void
 }
 
@@ -47,6 +48,7 @@ export default function ChatDrawer({
   nodeTitle,
   initialPrompt = null,
   contextBanner = null,
+  autoSendTrigger = 0,
   onSelectNode,
 }: Props) {
   const selectInStore = useStudyStore((s) => s.select)
@@ -58,6 +60,7 @@ export default function ChatDrawer({
   const [err, setErr] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const lastAutoSentTriggerRef = useRef(0)
 
   const handleGoToNode = (targetNodeId: string) => {
     if (onSelectNode) {
@@ -67,32 +70,8 @@ export default function ChatDrawer({
     }
   }
 
-  useEffect(() => {
-    if (!open || !courseId) return
-    setErr(null)
-    void getChatHistory(courseId)
-      .then((hist) => setMessages(hist))
-      .catch(() => setErr('No se pudo cargar el historial del tutor.'))
-  }, [open, courseId])
-
-  useEffect(() => {
-    if (open && initialPrompt) {
-      setInput(initialPrompt)
-      setTimeout(() => inputRef.current?.focus(), 60)
-    }
-  }, [open, initialPrompt])
-
-  useEffect(() => {
-    if (open) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }
-  }, [messages, open])
-
-  if (!open) return null
-
-  const send = async (e: React.FormEvent) => {
-    e.preventDefault()
-    const text = input.trim()
+  const sendDirect = async (rawText: string) => {
+    const text = rawText.trim()
     if (!text || busy) return
     setBusy(true)
     setErr(null)
@@ -117,6 +96,39 @@ export default function ChatDrawer({
     } finally {
       setBusy(false)
     }
+  }
+
+  useEffect(() => {
+    if (!open || !courseId) return
+    setErr(null)
+    void getChatHistory(courseId)
+      .then((hist) => setMessages(hist))
+      .catch(() => setErr('No se pudo cargar el historial del tutor.'))
+  }, [open, courseId])
+
+  useEffect(() => {
+    if (!open || !initialPrompt) return
+    if (autoSendTrigger > 0 && lastAutoSentTriggerRef.current !== autoSendTrigger) {
+      lastAutoSentTriggerRef.current = autoSendTrigger
+      void sendDirect(initialPrompt)
+    } else if (autoSendTrigger === 0) {
+      setInput(initialPrompt)
+      setTimeout(() => inputRef.current?.focus(), 60)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, initialPrompt, autoSendTrigger])
+
+  useEffect(() => {
+    if (open) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [messages, open])
+
+  if (!open) return null
+
+  const send = async (e: React.FormEvent) => {
+    e.preventDefault()
+    await sendDirect(input)
   }
 
   const handleClear = async () => {

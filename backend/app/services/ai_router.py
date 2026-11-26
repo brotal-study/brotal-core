@@ -334,7 +334,10 @@ def evaluate_with_ai(
 
     system_prompt = (
         "Eres el Evaluador Socratico de Brotal. Evaluas respuestas a ciegas de un estudiante universitario "
-        "con rigor del 1.0 al 10.0 (7.0 o mas aprueba). No regales puntos si la respuesta es vaga o vacia."
+        "con rigor del 1.0 al 10.0 (7.0 o mas aprueba). No regales puntos si la respuesta es vaga o vacia.\n"
+        "REGLA DE CONSISTENCIA 10/10: Si pones una nota menor a 10.0, DEBES incluir al menos una observación "
+        "concreta en `imprecisions` explicando qué faltó o qué se puede mejorar para llegar a 10.0. "
+        "Nunca descuentes puntos sin explicar por qué."
         f"{senior_dev_rules}\n"
         "Responde UNICAMENTE un objeto JSON valido con esta estructura exacta:\n"
         "{\n"
@@ -377,6 +380,9 @@ def evaluate_with_ai(
         score = round(1.0 + 9.0 * ratio, 1)
 
     imprecisions = [str(x).strip() for x in (parsed.get("imprecisions") or []) if str(x).strip()]
+    if all_keys and len(set(covered_points)) == len(valid_keys) and not imprecisions and score < 10.0:
+        score = 10.0
+
     re_exp_raw = str(parsed.get("re_explanation") or "").strip()
     re_explanation = re_exp_raw if (score < 7.0 and re_exp_raw) else None
 
@@ -585,34 +591,8 @@ def _alternate_starter_code(
             ),
         ],
         "implement": [
-            (
-                f"// Variante A (Implementacion): {node_title}\n"
-                "import java.util.List;\n\n"
-                f"public class {clean_cls}Analyzer {{\n"
-                "    /**\n"
-                "     * Calcula el promedio de los valores positivos de la lista.\n"
-                "     * Si la lista es null o no contiene positivos, retorna 0.0.\n"
-                "     */\n"
-                "    public double promedioPositivos(List<Integer> valores) {\n"
-                "        // TODO: implementar validando null y filtrando valores > 0\n"
-                "        return 0.0;\n"
-                "    }\n"
-                "}"
-            ),
-            (
-                f"// Variante B (Implementacion): {node_title}\n"
-                "import java.util.Map;\n\n"
-                f"public class {clean_cls}Registry {{\n"
-                "    /**\n"
-                "     * Incrementa en 1 el contador asociado a 'id' dentro del mapa.\n"
-                "     * Si 'id' es null o vacio lanza IllegalArgumentException.\n"
-                "     */\n"
-                "    public int registrarEvento(Map<String, Integer> contadores, String id) {\n"
-                "        // TODO: implementar actualizacion segura en el mapa y retornar nuevo total\n"
-                "        return 0;\n"
-                "    }\n"
-                "}"
-            ),
+            "// Implementa tu solución en Java aquí",
+            f"// Implementa tu solución en Java para: {node_title}",
         ],
         "trace": [
             (
@@ -646,6 +626,10 @@ def _alternate_starter_code(
     }
 
     if lang == "sql":
+        if challenge_type == "implement":
+            sql_impl_a = "-- Implementa tu consulta SQL aquí"
+            sql_impl_b = f"-- Implementa tu consulta SQL para: {node_title}"
+            return sql_impl_b if (prev_starter and prev_starter.strip() == sql_impl_a) else sql_impl_a
         sql_A = (
             f"-- Variante A ({challenge_type.upper()}): {node_title}\n"
             "SELECT e.id, e.nombre, AVG(n.calificacion) AS promedio\n"
@@ -711,8 +695,14 @@ def regenerate_questions_with_ai(
         code_lab_regen_rule = (
             f"\n4. MODO `code_lab` ACTIVO (lenguaje `{inferred_lang}`): Manten o varia los tipos de reto "
             "(`\"challenge_type\": \"debug\" | \"implement\" | \"trace\" | \"concept\"`, "
-            f"`\"language\": \"{inferred_lang}\"`) y genera un NUEVO `starter_code` COMPLETAMENTE DISTINTO "
-            "al anterior para cada pregunta de codigo (`debug`, `implement`, `trace`).\n"
+            f"`\"language\": \"{inferred_lang}\"`) respetando estrictamente estas reglas de `starter_code`:\n"
+            "   - `debug` y `trace`: SI incluyen un NUEVO codigo completo y distinto al anterior en `starter_code`.\n"
+            "   - `implement` en nodos basicos/intermedios (clases, constructores, arreglos, herencia basica, "
+            "excepciones basicas): `starter_code` DEBE ir vacio (`\"\"`) o solo un comentario de 1 linea "
+            "(`// Implementa tu solución en Java aquí`) — PROHIBIDO regalar el esqueleto resuelto de la clase/metodos con `// TODO`.\n"
+            "   - `implement` en nodos avanzados (patrones de diseno, Swing/MVC, integraciones): solo puede incluir "
+            "clases/interfaces auxiliares de contexto que el estudiante usara, NUNCA el esqueleto ya resuelto del metodo "
+            "o clase que debe construir.\n"
         )
 
     try:
@@ -787,10 +777,10 @@ def regenerate_questions_with_ai(
 
             starter: str | None = None
             raw_starter = ai_item.get("starter_code")
-            if isinstance(raw_starter, str) and raw_starter.strip():
+            if isinstance(raw_starter, str):
                 starter = raw_starter.strip()
 
-            if ct in ("debug", "implement", "trace"):
+            if ct in ("debug", "trace"):
                 prev_starter = str(orig.get("starter_code") or "").strip() or None
                 if not starter or (prev_starter and starter == prev_starter):
                     starter = _alternate_starter_code(
@@ -800,6 +790,15 @@ def regenerate_questions_with_ai(
                         prev_starter=prev_starter,
                         idx=idx + 1,
                     )
+            elif ct == "implement" and starter is None:
+                prev_starter = str(orig.get("starter_code") or "").strip() or None
+                starter = _alternate_starter_code(
+                    language=lang,
+                    challenge_type="implement",
+                    node_title=node_title,
+                    prev_starter=prev_starter,
+                    idx=idx + 1,
+                )
 
             updated.append(
                 {

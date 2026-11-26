@@ -197,14 +197,7 @@ def _fallback_starter_code(
                 "HAVING COUNT(e.id) >= 0\n"
                 "ORDER BY activos DESC;"
             )
-        return (
-            f"-- Implementa la consulta SQL para: {node_title}\n"
-            "-- Tablas disponibles: estudiantes(id, nombre, promedio, id_carrera), carreras(id, nombre)\n"
-            "SELECT \n"
-            "    -- TODO: selecciona nombre de carrera y promedio de sus estudiantes con promedio >= 5.0\n"
-            "FROM carreras c\n"
-            "-- TODO: completa JOIN, WHERE, GROUP BY y HAVING\n"
-        )
+        return "-- Implementa tu consulta SQL aquí"
 
     if lang == "python":
         if challenge_type == "debug":
@@ -228,13 +221,7 @@ def _fallback_starter_code(
                 "    return estado\n\n"
                 "print(acumular([2, 3, 4, 5]))\n"
             )
-        return (
-            f"# Implementacion para: {node_title}\n"
-            "def resolver_caso(datos: list[dict[str, int]], limite: int) -> list[str]:\n"
-            "    \"\"\"Filtra y transforma los registros que superan el limite sin lanzar KeyError.\"\"\"\n"
-            "    # TODO: implementar validacion y retorno ordenado\n"
-            "    pass\n"
-        )
+        return "# Implementa tu solución en Python aquí"
 
     if lang == "c":
         if challenge_type == "debug":
@@ -262,14 +249,7 @@ def _fallback_starter_code(
                 "    return 0;\n"
                 "}\n"
             )
-        return (
-            f"/* Implementa la funcion para: {node_title} */\n"
-            "#include <stddef.h>\n\n"
-            "int buscar_maximo(const int *valores, size_t n) {\n"
-            "    /* TODO: validar puntero nulo / n == 0 y retornar el mayor elemento */\n"
-            "    return 0;\n"
-            "}\n"
-        )
+        return "/* Implementa tu solución en C aquí */"
 
     # Default: Java (INF2236 / POO)
     if challenge_type == "debug":
@@ -313,24 +293,7 @@ def _fallback_starter_code(
             f"ComponenteBase ref = new {clean_cls}();\n"
             "System.out.println(ref.calcular(4));"
         )
-    return (
-        f"// Desafío de implementacion: {node_title}\n"
-        "import java.util.ArrayList;\n"
-        "import java.util.List;\n\n"
-        f"public class {clean_cls}Manager {{\n"
-        "    private final List<String> elementos = new ArrayList<>();\n\n"
-        "    /**\n"
-        "     * Registra un elemento validando el invariante del nodo:\n"
-        "     * - Si 'nuevo' es null o vacio (isBlank), lanza IllegalArgumentException.\n"
-        "     * - Si ya existe en 'elementos', no lo duplica y retorna false.\n"
-        "     * - En caso contrario, lo agrega y retorna true.\n"
-        "     */\n"
-        "    public boolean registrar(String nuevo) {\n"
-        "        // TODO: implementa la logica cumpliendo el contrato y manejo de errores\n"
-        "        return false;\n"
-        "    }\n"
-        "}"
-    )
+    return "// Implementa tu solución en Java aquí"
 
 
 def _build_fallback_code_lab_prompts(
@@ -478,15 +441,28 @@ def _normalize_prompt_item(
         language = default_language if engine_type == "code_lab" else "text"
 
     starter_raw = raw_prompt.get("starter_code")
-    starter_code = str(starter_raw).strip() if isinstance(starter_raw, str) and starter_raw.strip() else None
+    if isinstance(starter_raw, str):
+        starter_code: str | None = starter_raw.strip()
+    else:
+        starter_code = None
 
-    if challenge_type in ("trace", "debug", "implement") and not starter_code:
+    if challenge_type in ("trace", "debug") and not starter_code:
         starter_code = _fallback_starter_code(
             language=language if language != "text" else default_language,
             challenge_type=challenge_type,
             node_title=node_title,
             index=p_idx,
         )
+        if language == "text":
+            language = default_language if default_language != "text" else "java"
+    elif challenge_type == "implement":
+        if starter_code is None:
+            starter_code = _fallback_starter_code(
+                language=language if language != "text" else default_language,
+                challenge_type="implement",
+                node_title=node_title,
+                index=p_idx,
+            )
         if language == "text":
             language = default_language if default_language != "text" else "java"
 
@@ -834,14 +810,17 @@ def _fallback_nodes_from_chunks(
         is_theory = i <= theory_count
         branch = "theory" if is_theory else "practice"
         nid = f"N{i}"
-        if i == 1:
-            parents: list[str] = []
-        elif is_theory:
-            parents = [f"N{i - 1}"]
+        if is_theory:
+            # Organizar teoria en 3 columnas paralelas (2 livelli por columna) en vez de 1 torre vertical
+            col_idx = ((i - 1) // 2) + 1
+            if i % 2 == 1:
+                parents: list[str] = []
+            else:
+                parents = [f"N{i - 1}"]
+            block = f"Bloque {col_idx} · Fundamentos Teoricos"
         else:
             parents = ["N1"] if i == theory_count + 1 else [f"N{i - 1}"]
-
-        block = "Bloque 1 · Fundamentos Teoricos" if is_theory else "Bloque 2 · Practica y Casos"
+            block = "Bloque Practico · Examenes y Casos"
         raw_sec = re.sub(r"^(Seccion|Pagina|Slide)\s+\d+[:\s]*", "", sec_title).strip()
         clean_title = _sanitize_title(raw_sec, f"Concepto {i}")
         title = f"{clean_title[:70]}" if is_theory else f"Taller Practico: {clean_title[:58]}"
@@ -954,14 +933,18 @@ def _code_lab_architect_rules(default_language: str) -> str:
         f"\nMODO ESPECIAL `code_lab` ACTIVO (Lenguaje dominante: `{lang}`):\n"
         f"- En cada nodo `branch: \"theory\"`: genera 3 `eval_prompts` combinando al menos 1 pregunta conceptual "
         f"(`\"challenge_type\": \"concept\"`, `\"starter_code\": null`) + 1 a 2 desafios de codigo reales "
-        f"(`\"challenge_type\": \"trace\" | \"debug\" | \"implement\"`, `\"language\": \"{lang}\"`) con `starter_code` "
-        f"concreto y realista en `{lang}` (ej. en Java: clases, constructores, herencia `extends`, interfaces `implements`, "
-        f"polimorfismo `@Override`, excepciones `try/catch`, colecciones `ArrayList`/`HashMap` o patrones; en SQL: "
-        f"`SELECT`, `JOIN`, `GROUP BY`, `HAVING`, subconsultas).\n"
+        f"(`\"challenge_type\": \"trace\" | \"debug\" | \"implement\"`, `\"language\": \"{lang}\"`).\n"
         f"- En cada nodo `branch: \"practice\"` (Examenes / Laboratorios): genera desafios practicos de codigo reales "
-        f"(`\"challenge_type\": \"debug\"` e `\"implement\"`, `\"language\": \"{lang}\"`) con `starter_code` realista "
-        f"estilo certamen universitario (con el bug concreto a corregir o el esqueleto/firma del metodo a implementar).\n"
-        f"- NUNCA dejes `starter_code` vacio cuando `challenge_type` sea `trace`, `debug` o `implement`.\n"
+        f"(`\"challenge_type\": \"debug\"` e `\"implement\"`, `\"language\": \"{lang}\"`) estilo certamen universitario.\n"
+        f"- REGLA ESTRICTA DE `starter_code`:\n"
+        f"  * `debug` y `trace`: SI incluyen el codigo completo necesario en `starter_code` (con el bug concreto a "
+        f"corregir o el fragmento completo a trazar paso a paso).\n"
+        f"  * `implement` en nodos basicos/intermedios (clases, constructores, arreglos, herencia basica, excepciones basicas): "
+        f"`starter_code` DEBE ir vacio (`\"\"`) o solo un comentario de 1 linea (`// Implementa tu solución en Java aquí`) "
+        f"— PROHIBIDO regalar el esqueleto resuelto de la clase/metodos con `// TODO`.\n"
+        f"  * `implement` en nodos avanzados (patrones de diseno, Swing/MVC, integraciones): solo puede incluir "
+        f"clases/interfaces auxiliares de contexto que el estudiante usara, NUNCA el esqueleto ya resuelto del metodo o "
+        f"clase que debe construir.\n"
     )
 
 
@@ -988,14 +971,18 @@ def _generate_nodes_with_ai(
     system_prompt = (
         "Eres el Arquitecto Pedagogico de Brotal. Convierte apuntes universitarios en un Arbol de Habilidades "
         "JSON profundo y exigente con ENTRE 8 Y 16 NODOS (si el material es muy corto, minimo 6):\n"
-        "- COPA SUPERIOR (`branch: \"theory\"`): entre 6 y 11 nodos conceptuales ordenados por prerequisito y agrupados en bloques claros.\n"
+        "- COPA SUPERIOR (`branch: \"theory\"`): entre 6 y 11 nodos conceptuales organizados en **3 a 4 ramas/bloques "
+        "paralelos** (PROHIBIDO formar una sola torre vertical de 1 columna). El primer nodo de cada bloque principal "
+        "DEBE llevar `parent_ids: []` para salir directo desde el nucleo central, y cada columna/bloque crece solo "
+        "2 a 3 niveles hacia arriba.\n"
         "- RAICES INFERIORES (`branch: \"practice\"`): entre 3 y 5 nodos explicitos de EXAMENES, CONTROLES, LABS o CASOS REALES "
         "(ej. 'Examen Parcial 1 · ...', 'Caso Practico / Debugging · ...', 'Simulacro Examen Final'), "
         "conectados en `parent_ids` a los nodos 'theory' que ponen a prueba.\n"
         "REGLAS OBLIGATORIAS:\n"
         f"1. `story_script` DEBE seguir esta preferencia del estudiante: {exp_rule}\n"
         "2. Ningun titulo (`title`) puede ser una linea separadora (`---`, `===`, `***`) ni tener menos de 3 caracteres alfanumericos.\n"
-        "3. El primer nodo 'theory' lleva `parent_ids: []`. Todos los demas conectan `parent_ids` formando un DAG valido.\n"
+        "3. Los nodos iniciales de los 3 a 4 bloques 'theory' llevan `parent_ids: []`. Los siguientes niveles de cada bloque "
+        "conectan `parent_ids` al nodo inferior de su bloque formando 3 a 4 columnas paralelas de 2 a 3 niveles.\n"
         f"4. Cada nodo DEBE incluir `eval_prompts` con 3 a 4 preguntas a ciegas siguiendo este estilo: {q_rule} "
         "Cada pregunta lleva 2 a 3 `rubric_points` concretos y verificables.\n"
         "5. Cubre TODOS los archivos entregados, no solo el primero.\n"
@@ -1015,7 +1002,7 @@ def _generate_nodes_with_ai(
         '      "eval_prompts": [\n'
         f'        {{"id": "q1", "question": "...", "rubric_points": ["...", "..."], "challenge_type": "concept", "language": "{lang_hint}", "starter_code": null}},\n'
         f'        {{"id": "q2", "question": "...", "rubric_points": ["...", "..."], "challenge_type": "debug", "language": "{lang_hint}", "starter_code": "..."}},\n'
-        f'        {{"id": "q3", "question": "...", "rubric_points": ["...", "..."], "challenge_type": "implement", "language": "{lang_hint}", "starter_code": "..."}}\n'
+        f'        {{"id": "q3", "question": "...", "rubric_points": ["...", "..."], "challenge_type": "implement", "language": "{lang_hint}", "starter_code": "// Implementa tu solución en Java aquí"}}\n'
         "      ]\n"
         "    }\n"
         "  ]\n"
@@ -1085,7 +1072,7 @@ def _generate_nodes_with_ai(
 
             if engine_type == "code_lab":
                 has_code_challenge = any(
-                    cp.get("challenge_type") in ("trace", "debug", "implement") and cp.get("starter_code")
+                    cp.get("challenge_type") in ("trace", "debug", "implement")
                     for cp in clean_prompts
                 )
                 if not has_code_challenge:

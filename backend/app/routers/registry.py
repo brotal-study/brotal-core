@@ -13,6 +13,7 @@ from app.schemas.career import (
     CareerCourse,
     CareerDetailResponse,
     CareerSummary,
+    CourseProgressSummary,
     CourseStatus,
     Semester,
 )
@@ -78,6 +79,45 @@ def get_career_detail(
         if r["pack_version"]:
             installed_packs[code] = r["pack_version"]
 
+    prog_rows = conn.execute(
+        """
+        SELECT
+            c.id AS course_id,
+            c.course_code AS course_code,
+            COUNT(cn.id) AS total,
+            SUM(CASE WHEN COALESCE(np.mastery_level, 0) >= 3 THEN 1 ELSE 0 END) AS mastered,
+            SUM(
+                CASE
+                    WHEN COALESCE(np.mastery_level, 0) > 0
+                      OR COALESCE(np.training_reps, 0) > 0
+                      OR COALESCE(np.best_score, 0) > 0
+                      OR np.last_practiced_at IS NOT NULL
+                    THEN 1 ELSE 0
+                END
+            ) AS started
+        FROM courses c
+        INNER JOIN course_nodes cn ON cn.course_id = c.id
+        LEFT JOIN node_progress np ON np.course_id = c.id AND np.node_id = cn.id
+        WHERE c.career_id = ? OR c.course_code IS NOT NULL
+        GROUP BY c.id;
+        """,
+        (career_id,),
+    ).fetchall()
+
+    course_progress: dict[str, CourseProgressSummary] = {}
+    for pr in prog_rows:
+        code = str(pr["course_code"] or pr["course_id"])
+        total = int(pr["total"] or 0)
+        mastered = int(pr["mastered"] or 0)
+        started = int(pr["started"] or 0)
+        existing = course_progress.get(code)
+        if existing is None or (total, mastered, started) > (existing.total, existing.mastered, existing.started):
+            course_progress[code] = CourseProgressSummary(
+                mastered=mastered,
+                total=total,
+                started=started,
+            )
+
     statuses: dict[str, CourseStatus] = {}
     semesters_out: list[Semester] = []
     credits_total = 0
@@ -109,6 +149,7 @@ def get_career_detail(
         semesters=semesters_out,
         statuses=statuses,
         installed_packs=installed_packs,
+        course_progress=course_progress,
         credits_total=credits_total,
         credits_passed=credits_passed,
         credits_approved=credits_passed,

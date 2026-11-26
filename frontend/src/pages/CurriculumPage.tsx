@@ -24,6 +24,7 @@ export default function CurriculumPage() {
     career,
     packs,
     installedPacks,
+    courseProgress,
     statuses,
     setStatus,
     setActiveCourse,
@@ -39,8 +40,8 @@ export default function CurriculumPage() {
   const [quickApprove, setQuickApprove] = useState(false)
 
   useEffect(() => {
-    if (!career) void loadCareer()
-  }, [career, loadCareer])
+    void loadCareer()
+  }, [loadCareer])
 
   const courses = useMemo(
     () => selectCourses({ career, profile, manualCourses }),
@@ -74,7 +75,7 @@ export default function CurriculumPage() {
       curriculumMode === 'realistic' &&
       st !== 'passed' &&
       missingPrereqs(c, statuses).length > 0
-    const hasContent = Boolean(installedPacks[c.code] || packs[c.code])
+     const hasContent = Boolean(installedPacks[c.code] || packs[c.code] || courseProgress[c.code]?.total)
     return (
       <CourseCard
         key={c.id}
@@ -82,6 +83,7 @@ export default function CurriculumPage() {
         color={categoryColor(categories, c.category)}
         status={st}
         pack={packs[c.code]}
+        progressSummary={courseProgress[c.code]}
         hasContent={hasContent}
         dimmed={dimmed}
         quickApproveMode={quickApprove}

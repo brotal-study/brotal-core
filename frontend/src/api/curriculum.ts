@@ -30,9 +30,16 @@ export interface ApiProfilePatch {
   question_style?: QuestionStyle
 }
 
+export interface CourseProgressSummary {
+  mastered: number
+  total: number
+  started: number
+}
+
 export interface CareerDetail extends CareerManifest {
   statuses: Record<string, CourseStatus>
   installed_packs: Record<string, string>
+  course_progress?: Record<string, CourseProgressSummary>
   credits_total: number
   credits_passed: number
   courses_total: number

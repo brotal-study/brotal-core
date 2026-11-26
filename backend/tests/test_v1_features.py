@@ -757,12 +757,22 @@ def test_code_lab_ingest_generates_code_challenges_and_tree_returns_engine_type(
     assert "concept" in t_types
     assert bool(t_types & {"debug", "trace", "implement"})
     code_prompts = [p for p in t_prompts if p["challenge_type"] in ("debug", "trace", "implement")]
-    assert all(p["language"] == "java" and p["starter_code"] and len(p["starter_code"]) > 20 for p in code_prompts)
+    assert all(p["language"] == "java" and p["starter_code"] is not None for p in code_prompts)
+    # debug y trace llevan el codigo completo; implement lleva comentario breve de 1 linea o vacio (sin esqueleto resuelto)
+    for p in code_prompts:
+        if p["challenge_type"] in ("debug", "trace"):
+            assert len(p["starter_code"]) > 20 and "class " in p["starter_code"]
+        elif p["challenge_type"] == "implement":
+            assert "TODO" not in p["starter_code"]
 
-    # Nodos practice tienen desafios debug/implement con starter_code
+    # Nodos practice tienen desafios debug/implement con starter_code cumpliendo la regla
     p_prompts = practice_nodes[0]["eval_prompts"]
     assert all(p["challenge_type"] in ("debug", "implement", "trace") for p in p_prompts)
-    assert all(p["starter_code"] and "class " in p["starter_code"] for p in p_prompts)
+    for p in p_prompts:
+        if p["challenge_type"] == "debug":
+            assert p["starter_code"] and "class " in p["starter_code"]
+        elif p["challenge_type"] == "implement":
+            assert p["starter_code"] is not None and "TODO" not in p["starter_code"]
 
     # Regenerar preguntas en code_lab produce nuevo starter_code distinto
     prev_debug = next(p for p in t_prompts if p["challenge_type"] == "debug")
@@ -772,3 +782,58 @@ def test_code_lab_ingest_generates_code_challenges_and_tree_returns_engine_type(
     new_debug = next(p for p in regen_prompts if p["id"] == prev_debug["id"])
     assert new_debug["challenge_type"] == "debug"
     assert new_debug["starter_code"] != prev_debug["starter_code"]
+
+
+def test_evaluate_with_ai_normalizes_score_to_10_when_100_percent_covered_without_imprecisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import ai_router
+
+    def fake_complete_chat(_messages: list[dict[str, str]], **_kwargs: Any) -> AiCompletion:
+        # El LLM devuelve 9.5 aunque cubrio todos los rubric_points y no puso imprecisions
+        payload = {
+            "score": 9.5,
+            "covered_points": ["q1::0", "q1::1", "q2::0"],
+            "imprecisions": [],
+            "re_explanation": "",
+        }
+        return AiCompletion(text=json.dumps(payload), provider="groq", model="llama-3.3-70b-versatile")
+
+    monkeypatch.setattr(ai_router, "complete_chat", fake_complete_chat)
+
+    res = ai_router.evaluate_with_ai(
+        node_title="Arreglos y Constructores en Java",
+        story_script="En Java los arreglos tienen tamano fijo y los constructores inicializan el estado.",
+        eval_prompts=[
+            {"id": "q1", "question": "Explica arreglos", "rubric_points": ["Tamano fijo", "Indices 0..n-1"]},
+            {"id": "q2", "question": "Implementa constructor", "rubric_points": ["Inicializa atributos"]},
+        ],
+        answers_by_prompt={"q1": "Tamano fijo e indices desde 0", "q2": "public Foo() { this.x = 1; }"},
+        engine_type="code_lab",
+    )
+    assert res["score"] == 10.0
+    assert res["imprecisions"] == []
+    assert set(res["covered_points"]) == {"q1::0", "q1::1", "q2::0"}
+
+
+def test_career_detail_includes_course_progress_summary(client: TestClient) -> None:
+    demo_pack = json.loads((fixtures_dir() / "demo_pack.json").read_text(encoding="utf-8"))
+    inst = client.post("/api/v1/courses/install-pack", json=demo_pack)
+    assert inst.status_code == 200
+
+    # Evaluar B1-P1 una vez para que cuente como 'started' (mastery_level = 1)
+    ev = client.post(
+        "/api/v1/study/cl-pucv-inf2324-ccna1/B1-P1/evaluate",
+        json={"answers": [{"prompt_id": "q1", "text": "Respuesta completa"}], "score": 9.0},
+    )
+    assert ev.status_code == 200
+
+    career_res = client.get("/api/v1/careers/cl-pucv-inf-2022")
+    assert career_res.status_code == 200
+    career_data = career_res.json()
+    assert "course_progress" in career_data
+    prog_inf2324 = career_data["course_progress"].get("INF2324")
+    assert prog_inf2324 is not None
+    assert prog_inf2324["total"] == len(demo_pack["nodes"])
+    assert prog_inf2324["started"] == 1
+    assert prog_inf2324["mastered"] == 0

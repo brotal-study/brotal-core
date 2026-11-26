@@ -8,6 +8,7 @@ import {
   Play,
   RefreshCw,
   Rewind,
+  Send,
   Square,
   Swords,
   Volume2,
@@ -34,7 +35,7 @@ interface Props {
   worldMetaphor: string | null
   onEvaluate: () => void
   onRegenerateStory: () => Promise<void>
-  onAskTutor: (ctx: { prompt: string; banner: string }) => void
+  onAskTutor: (ctx: { prompt: string; banner: string; autoSend?: boolean }) => void
 }
 
 function formatTime(sec: number): string {
@@ -178,6 +179,7 @@ export default function StoryTab({
   const [serverTimings, setServerTimings] = useState<TtsSentenceTiming[]>([])
   const [serverWords, setServerWords] = useState<TtsWordTiming[]>([])
   const [regenerating, setRegenerating] = useState(false)
+  const [quickQuestion, setQuickQuestion] = useState('')
 
   const {
     paragraphs: structuredParagraphs,
@@ -611,9 +613,9 @@ export default function StoryTab({
                   ref={(el) => {
                     sentenceRefs.current[s.globalIndex] = el
                   }}
-                  className={`rounded px-0.5 py-0.5 transition-colors ${
+                  className={`rounded-[2px] transition-colors ${
                     isActiveSentence
-                      ? 'bg-amber-100/45 underline decoration-amber-400/70 decoration-1 underline-offset-4 dark:bg-indigo-950/45 dark:decoration-indigo-500/70'
+                      ? 'bg-indigo-50/70 dark:bg-indigo-950/40'
                       : ''
                   }`}
                 >
@@ -635,10 +637,14 @@ export default function StoryTab({
                               void handleWordClick(w.globalWordIndex, s.globalIndex)
                             }
                           }}
-                          className={`cursor-pointer rounded px-0.5 transition-colors ${
+                          className={`cursor-pointer rounded-[2px] transition-colors ${
+                            w.inlineCode
+                              ? 'font-mono text-[0.9em] bg-slate-100 dark:bg-slate-800 px-1 rounded'
+                              : ''
+                          } ${
                             isActiveWord
-                              ? 'bg-amber-300 font-semibold text-slate-950 ring-1 ring-amber-400 dark:bg-indigo-500 dark:text-white dark:ring-indigo-400'
-                              : 'hover:bg-slate-200/70 dark:hover:bg-slate-800'
+                              ? 'bg-indigo-100 dark:bg-indigo-900/60 border-b-2 border-indigo-500 dark:border-indigo-400 rounded-[2px]'
+                              : 'hover:bg-slate-200/60 dark:hover:bg-slate-800/70'
                           }`}
                         >
                           {w.text}
@@ -655,26 +661,48 @@ export default function StoryTab({
         ))}
       </article>
 
-      <div className="flex flex-wrap items-center gap-2 pt-1">
-        <button
-          type="button"
-          onClick={onEvaluate}
-          className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
-        >
-          <Swords size={16} /> Evaluarme a ciegas
-        </button>
-        <button
-          type="button"
-          onClick={() =>
+      <div className="flex flex-col gap-3 pt-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onEvaluate}
+            className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
+          >
+            <Swords size={16} /> Evaluarme a ciegas
+          </button>
+        </div>
+
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            const q = quickQuestion.trim()
+            if (!q) return
+            setQuickQuestion('')
             onAskTutor({
-              prompt: `Tengo una duda sobre la explicación de "${node.title}": `,
+              prompt: q,
               banner: `Consultando sobre la historia del nodo "${node.title}" (${node.block}).`,
+              autoSend: true,
             })
-          }
-          className="inline-flex items-center justify-center gap-1.5 rounded-md border border-slate-300 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
+          }}
+          className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50/70 p-2 dark:border-slate-700 dark:bg-slate-800/50"
         >
-          <MessageSquare size={15} /> Tengo una duda sobre esta historia
-        </button>
+          <MessageSquare size={15} className="ml-1 shrink-0 text-slate-500 dark:text-slate-400" />
+          <input
+            type="text"
+            value={quickQuestion}
+            onChange={(e) => setQuickQuestion(e.target.value)}
+            placeholder="¿Alguna duda sobre este tema? Pregúntale al tutor..."
+            className="min-w-0 flex-1 rounded border border-slate-300 bg-white px-2.5 py-1.5 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:border-slate-600 dark:bg-slate-900"
+          />
+          <button
+            type="submit"
+            disabled={!quickQuestion.trim()}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-40 dark:bg-indigo-500 dark:hover:bg-indigo-400"
+          >
+            <Send size={13} />
+            Enviar
+          </button>
+        </form>
       </div>
     </div>
   )
