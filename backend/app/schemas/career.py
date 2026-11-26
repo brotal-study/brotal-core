@@ -53,9 +53,16 @@ class CareerManifest(BaseModel):
     semesters: list[Semester]
 
 
+class CourseProgressSummary(BaseModel):
+    mastered: int = 0
+    total: int = 0
+    started: int = 0
+
+
 class CareerDetailResponse(CareerManifest):
     statuses: dict[str, CourseStatus] = Field(default_factory=dict)
     installed_packs: dict[str, str] = Field(default_factory=dict)
+    course_progress: dict[str, CourseProgressSummary] = Field(default_factory=dict)
     credits_total: int = 0
     credits_passed: int = 0
     credits_approved: int = 0

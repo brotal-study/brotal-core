@@ -5,6 +5,7 @@ export interface StoryWord {
   sentenceIndex: number
   wordInSentenceIndex: number
   text: string
+  inlineCode?: boolean
 }
 
 export interface StorySentence {
@@ -12,6 +13,40 @@ export interface StorySentence {
   paragraphIndex: number
   text: string
   words: StoryWord[]
+}
+
+function tokenizeSentenceWords(
+  sText: string,
+  sIdx: number,
+  startGlobalWordIndex: number,
+  flatWords: StoryWord[],
+): { words: StoryWord[]; nextGlobalWordIndex: number } {
+  const words: StoryWord[] = []
+  let globalWordIndex = startGlobalWordIndex
+  let wordInSentenceIndex = 0
+
+  // Separar segmentos entre backticks simples (`...`) del texto normal sin mostrar los backticks crudos
+  const segments = sText.split(/(`[^`\n]+`)/g).filter(Boolean)
+  for (const seg of segments) {
+    const isCode = seg.length >= 2 && seg.startsWith('`') && seg.endsWith('`')
+    const cleanSeg = isCode ? seg.slice(1, -1).trim() : seg
+    const tokens = cleanSeg.split(/\s+/).filter(Boolean)
+    for (const wText of tokens) {
+      const wItem: StoryWord = {
+        globalWordIndex,
+        sentenceIndex: sIdx,
+        wordInSentenceIndex,
+        text: wText,
+        inlineCode: isCode,
+      }
+      globalWordIndex += 1
+      wordInSentenceIndex += 1
+      flatWords.push(wItem)
+      words.push(wItem)
+    }
+  }
+
+  return { words, nextGlobalWordIndex: globalWordIndex }
 }
 
 export function splitStoryParagraphSentences(rawText: string): {
@@ -39,22 +74,17 @@ export function splitStoryParagraphSentences(rawText: string): {
     const sentenceTexts = parts.length > 0 ? parts : [p]
     const pSentences: StorySentence[] = sentenceTexts.map((sText) => {
       const sIdx = globalIndex
-      const tokens = sText.split(/\s+/).filter(Boolean)
-      const words: StoryWord[] = tokens.map((wText, wIdx) => {
-        const wItem: StoryWord = {
-          globalWordIndex,
-          sentenceIndex: sIdx,
-          wordInSentenceIndex: wIdx,
-          text: wText,
-        }
-        globalWordIndex += 1
-        flatWords.push(wItem)
-        return wItem
-      })
+      const { words, nextGlobalWordIndex } = tokenizeSentenceWords(
+        sText,
+        sIdx,
+        globalWordIndex,
+        flatWords,
+      )
+      globalWordIndex = nextGlobalWordIndex
       const item: StorySentence = {
         globalIndex: sIdx,
         paragraphIndex,
-        text: sText,
+        text: sText.replace(/`([^`\n]+)`/g, '$1'),
         words,
       }
       globalIndex += 1

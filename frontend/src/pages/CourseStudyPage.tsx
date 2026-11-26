@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Code2, FolderOpen, Home, MessageSquare, RotateCcw } from 'lucide-react'
-import { inCooldown, type CooldownMode } from '../api/study'
+import { inCooldown, type CooldownMode, type CourseTree, type PackNode } from '../api/study'
 import { selectCourses, useAppStore } from '../store/useAppStore'
 import { useStudyStore } from '../store/useStudyStore'
 import ChatDrawer from '../components/layout/ChatDrawer'
@@ -12,6 +12,71 @@ import IngestModal from '../components/study/IngestModal'
 import SkillTree, { type TreeBranchFilter } from '../components/study/SkillTree'
 import StudyStation from '../components/study/StudyStation'
 import { useNow } from '../components/study/studyUtils'
+
+function computeTopologicalNodes(nodes: PackNode[]): PackNode[] {
+  const byId = Object.fromEntries(nodes.map((n) => [n.id, n]))
+  const depthMemo: Record<string, number> = {}
+  const depthOf = (id: string, seen: Set<string> = new Set()): number => {
+    if (depthMemo[id] !== undefined) return depthMemo[id]
+    if (seen.has(id)) return 0
+    seen.add(id)
+    const cur = byId[id]
+    const validParents = (cur?.parent_ids ?? []).filter((p) => byId[p] !== undefined)
+    return (depthMemo[id] = validParents.length
+      ? 1 + Math.max(...validParents.map((p) => depthOf(p, new Set(seen))))
+      : 0)
+  }
+  nodes.forEach((n) => depthOf(n.id))
+  const indexMap = Object.fromEntries(nodes.map((n, idx) => [n.id, idx]))
+  return [...nodes].sort((a, b) => {
+    const da = depthMemo[a.id] ?? 0
+    const db = depthMemo[b.id] ?? 0
+    if (da !== db) return da - db
+    return (indexMap[a.id] ?? 0) - (indexMap[b.id] ?? 0)
+  })
+}
+
+function computeNextRecommendedNode(
+  tree: CourseTree | null,
+  currentNodeId: string | null,
+): PackNode | null {
+  if (!tree || !currentNodeId) return null
+  const topoTheory = computeTopologicalNodes(tree.nodes.filter((n) => n.branch === 'theory'))
+  const topoPractice = computeTopologicalNodes(tree.nodes.filter((n) => n.branch === 'practice'))
+
+  const isPending = (n: PackNode) => (tree.progress[n.id]?.mastery_level ?? 0) < 3
+
+  // Si estamos en un nodo theory, priorizar el siguiente theory pendiente después del actual en orden topológico
+  const currentTheoryIdx = topoTheory.findIndex((n) => n.id === currentNodeId)
+  if (currentTheoryIdx !== -1) {
+    const afterCurrent = topoTheory
+      .slice(currentTheoryIdx + 1)
+      .find((n) => n.id !== currentNodeId && isPending(n))
+    if (afterCurrent) return afterCurrent
+  }
+
+  const anyPendingTheory = topoTheory.find((n) => n.id !== currentNodeId && isPending(n))
+  if (anyPendingTheory) return anyPendingTheory
+
+  const currentPracticeIdx = topoPractice.findIndex((n) => n.id === currentNodeId)
+  if (currentPracticeIdx !== -1) {
+    const afterPractice = topoPractice
+      .slice(currentPracticeIdx + 1)
+      .find((n) => n.id !== currentNodeId && isPending(n))
+    if (afterPractice) return afterPractice
+  }
+
+  const anyPendingPractice = topoPractice.find((n) => n.id !== currentNodeId && isPending(n))
+  if (anyPendingPractice) return anyPendingPractice
+
+  // Si todos los demás están en 3/3, sugerir el siguiente en orden topológico general
+  const allTopo = [...topoTheory, ...topoPractice]
+  const curIdx = allTopo.findIndex((n) => n.id === currentNodeId)
+  if (curIdx !== -1 && allTopo.length > 1) {
+    return allTopo[(curIdx + 1) % allTopo.length]
+  }
+  return allTopo.find((n) => n.id !== currentNodeId) ?? null
+}
 
 const MODES: { id: CooldownMode; label: string; hint: string; activeNote: string }[] = [
   {
@@ -57,6 +122,7 @@ export default function CourseStudyPage() {
   const [chatOpen, setChatOpen] = useState(false)
   const [chatPrompt, setChatPrompt] = useState<string | null>(null)
   const [chatBanner, setChatBanner] = useState<string | null>(null)
+  const [chatAutoSendTrigger, setChatAutoSendTrigger] = useState(0)
   const [filesOpen, setFilesOpen] = useState(false)
   const [ingestOpen, setIngestOpen] = useState(false)
   const [filesRefresh, setFilesRefresh] = useState(0)
@@ -97,6 +163,7 @@ export default function CourseStudyPage() {
   }
 
   const node = tree.nodes.find((n) => n.id === selectedNodeId) ?? null
+  const nextRecommendedNode = computeNextRecommendedNode(tree, selectedNodeId)
   const activeModeMeta = MODES.find((m) => m.id === cooldownMode) ?? MODES[0]
 
   const requestSelect = (nid: string) => {
@@ -105,9 +172,23 @@ export default function CourseStudyPage() {
     else select(nid)
   }
 
-  const openContextualTutor = (ctx: { prompt: string; banner: string }) => {
+  const handleSelectNextNode = (nid: string) => {
+    const target = tree.nodes.find((n) => n.id === nid)
+    if (target && branchFilter !== 'all' && branchFilter !== target.branch) {
+      setBranchFilter('all')
+    }
+    setInProgress(false)
+    select(nid)
+  }
+
+  const openContextualTutor = (ctx: { prompt: string; banner: string; autoSend?: boolean }) => {
     setChatPrompt(ctx.prompt)
     setChatBanner(ctx.banner)
+    if (ctx.autoSend) {
+      setChatAutoSendTrigger((n) => n + 1)
+    } else {
+      setChatAutoSendTrigger(0)
+    }
     setChatOpen(true)
   }
 
@@ -206,6 +287,7 @@ export default function CourseStudyPage() {
             onClick={() => {
               setChatPrompt(null)
               setChatBanner(null)
+              setChatAutoSendTrigger(0)
               setChatOpen(true)
             }}
             className="inline-flex items-center gap-1 rounded border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
@@ -245,6 +327,8 @@ export default function CourseStudyPage() {
               courseId={tree.course_id}
               node={node}
               progress={tree.progress[node.id]}
+              nextNode={nextRecommendedNode}
+              onSelectNextNode={handleSelectNextNode}
               worldMetaphor={tree.world_metaphor}
               now={now}
               onSubmit={(req) => submit(node.id, req)}
@@ -272,6 +356,7 @@ export default function CourseStudyPage() {
         nodeTitle={node?.title ?? null}
         initialPrompt={chatPrompt}
         contextBanner={chatBanner}
+        autoSendTrigger={chatAutoSendTrigger}
         onSelectNode={requestSelect}
       />
 

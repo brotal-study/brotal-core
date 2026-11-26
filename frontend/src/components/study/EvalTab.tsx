@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   AlertTriangle,
+  ArrowRight,
   CheckCircle2,
   CircleX,
   Cpu,
@@ -11,6 +12,7 @@ import {
   MessageSquare,
   RefreshCw,
   RotateCcw,
+  Send,
   Shuffle,
 } from 'lucide-react'
 import {
@@ -33,13 +35,15 @@ import { formatRemaining, useNow } from './studyUtils'
 interface Props {
   node: PackNode
   progress: NodeProgress
+  nextNode?: PackNode | null
+  onSelectNextNode?: (nodeId: string) => void
   onSubmit: (req: {
     answers: { prompt_id: string; text: string }[]
     covered_points?: string[]
   }) => Promise<EvaluateResponse>
   onRegenerateQuestions: () => Promise<void>
   onBackToStory: () => void
-  onAskTutor: (ctx: { prompt: string; banner: string }) => void
+  onAskTutor: (ctx: { prompt: string; banner: string; autoSend?: boolean }) => void
   /** true mientras hay respuestas/revision sin cerrar (para pedir confirmacion al salir). */
   onInProgressChange: (v: boolean) => void
 }
@@ -86,6 +90,8 @@ function isPromptEditedOrAnswered(q: EvalPrompt, answers: Record<string, string>
 export default function EvalTab({
   node,
   progress,
+  nextNode = null,
+  onSelectNextNode,
   onSubmit,
   onRegenerateQuestions,
   onBackToStory,
@@ -371,6 +377,8 @@ export default function EvalTab({
           nodeTitle={node.title}
           result={result}
           now={now}
+          nextNode={nextNode}
+          onSelectNextNode={onSelectNextNode}
           regeneratingQuestions={regeneratingQuestions}
           onRetry={retry}
           onRegenerateQuestions={handleRegenerateQuestions}
@@ -386,6 +394,8 @@ function Result({
   nodeTitle,
   result,
   now,
+  nextNode,
+  onSelectNextNode,
   regeneratingQuestions,
   onRetry,
   onRegenerateQuestions,
@@ -395,12 +405,15 @@ function Result({
   nodeTitle: string
   result: EvaluateResponse
   now: number
+  nextNode?: PackNode | null
+  onSelectNextNode?: (nodeId: string) => void
   regeneratingQuestions: boolean
   onRetry: () => void
   onRegenerateQuestions: () => Promise<void>
   onBackToStory: () => void
-  onAskTutor: (ctx: { prompt: string; banner: string }) => void
+  onAskTutor: (ctx: { prompt: string; banner: string; autoSend?: boolean }) => void
 }) {
+  const [quickQuestion, setQuickQuestion] = useState('')
   const p = result.progress
   const cooling = inCooldown(p, now)
   const remaining = cooling ? formatRemaining(new Date(p.next_review_at!).getTime() - now) : null
@@ -431,19 +444,14 @@ function Result({
     message = `No alcanza ${PASS_SCORE.toFixed(1)}. Tu nivel (${p.mastery_level}/3) no baja; repasa lo que faltó y reintenta.`
   }
 
-  const askTutorAboutCorrection = () => {
+  const buildCorrectionBanner = () => {
     const missedSummary =
       missed.length > 0
         ? `Puntos faltantes: ${missed.map((m) => m.point).join('; ')}.`
         : 'Cubrí todos los puntos de la rúbrica.'
     const impSummary =
       imprecisions.length > 0 ? ` Imprecisiones: ${imprecisions.join('; ')}.` : ''
-    const banner = `Corrección en "${nodeTitle}": Nota ${result.score.toFixed(1)}/10. ${missedSummary}${impSummary}`
-    const prompt =
-      missed.length > 0 || imprecisions.length > 0
-        ? `Obtuve ${result.score.toFixed(1)}/10 en "${nodeTitle}". ¿Me puedes explicar con un ejemplo cómo entender lo que me faltó o corregirme la imprecisión?`
-        : `Obtuve ${result.score.toFixed(1)}/10 en "${nodeTitle}". ¿Cómo puedo profundizar este concepto con un caso más avanzado?`
-    onAskTutor({ prompt, banner })
+    return `Corrección en "${nodeTitle}": Nota ${result.score.toFixed(1)}/10. ${missedSummary}${impSummary}`
   }
 
   return (
@@ -536,6 +544,16 @@ function Result({
       </p>
 
       <div className="flex flex-wrap gap-2">
+        {result.passed && nextNode && onSelectNextNode && (
+          <button
+            type="button"
+            onClick={() => onSelectNextNode(nextNode.id)}
+            className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-xs hover:bg-emerald-500 dark:bg-emerald-500 dark:text-slate-950 dark:hover:bg-emerald-400"
+          >
+            <span>Siguiente: {nextNode.title}</span>
+            <ArrowRight size={16} className="shrink-0" />
+          </button>
+        )}
         <button
           type="button"
           onClick={onRetry}
@@ -555,20 +573,44 @@ function Result({
         </button>
         <button
           type="button"
-          onClick={askTutorAboutCorrection}
-          className="inline-flex items-center gap-1.5 rounded-md border border-indigo-300 bg-indigo-50 px-3.5 py-2 text-sm font-medium text-indigo-900 hover:bg-indigo-100 dark:border-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-200 dark:hover:bg-indigo-900/60"
-        >
-          <MessageSquare size={15} />
-          Preguntar al tutor sobre esta corrección
-        </button>
-        <button
-          type="button"
           onClick={onBackToStory}
           className="rounded-md border border-slate-300 px-4 py-2 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
         >
           Volver a la historia
         </button>
       </div>
+
+      <form
+        onSubmit={(e) => {
+          e.preventDefault()
+          const q = quickQuestion.trim()
+          if (!q) return
+          setQuickQuestion('')
+          onAskTutor({
+            prompt: q,
+            banner: buildCorrectionBanner(),
+            autoSend: true,
+          })
+        }}
+        className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50/70 p-2 dark:border-slate-700 dark:bg-slate-800/50"
+      >
+        <MessageSquare size={15} className="ml-1 shrink-0 text-slate-500 dark:text-slate-400" />
+        <input
+          type="text"
+          value={quickQuestion}
+          onChange={(e) => setQuickQuestion(e.target.value)}
+          placeholder="¿Alguna duda sobre este tema? Pregúntale al tutor..."
+          className="min-w-0 flex-1 rounded border border-slate-300 bg-white px-2.5 py-1.5 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:border-slate-600 dark:bg-slate-900"
+        />
+        <button
+          type="submit"
+          disabled={!quickQuestion.trim()}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-40 dark:bg-indigo-500 dark:hover:bg-indigo-400"
+        >
+          <Send size={13} />
+          Enviar
+        </button>
+      </form>
     </div>
   )
 }

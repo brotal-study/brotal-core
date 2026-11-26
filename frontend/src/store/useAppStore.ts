@@ -10,6 +10,7 @@ import {
   listUserCourses,
   patchCourseStatus,
   patchProfile,
+  type CourseProgressSummary,
 } from '../api/curriculum'
 import type { CareerManifest, Course, CourseStatus, PackSummary } from '../api/types'
 import { useStudyStore } from './useStudyStore'
@@ -62,6 +63,7 @@ interface AppState {
   // Datos de malla y packs disponibles
   career: CareerManifest | null
   packs: Record<string, PackSummary> // por course_code
+  courseProgress: Record<string, CourseProgressSummary> // por course_code
   loadCareer: () => Promise<void>
 }
 
@@ -217,10 +219,11 @@ export const useAppStore = create<AppState>()((set, get) => ({
 
   career: null,
   packs: {},
+  courseProgress: {},
   loadCareer: async () => {
     const p = get().profile
     if (!p || p.mode !== 'career' || !p.careerId) {
-      set({ career: null, packs: {} })
+      set({ career: null, packs: {}, courseProgress: {} })
       return
     }
     const [careerDetail, packs] = await Promise.all([
@@ -230,6 +233,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
     set((st) => ({
       career: careerDetail,
       packs: Object.fromEntries(packs.map((k) => [k.course_code, k])),
+      courseProgress: careerDetail?.course_progress ?? st.courseProgress,
       statuses: careerDetail ? { ...st.statuses, ...careerDetail.statuses } : st.statuses,
       installedPacks: careerDetail
         ? { ...st.installedPacks, ...careerDetail.installed_packs }

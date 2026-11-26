@@ -10,6 +10,8 @@ interface Props {
   courseId: string
   node: PackNode
   progress: NodeProgress
+  nextNode?: PackNode | null
+  onSelectNextNode?: (nodeId: string) => void
   worldMetaphor: string | null
   now: number
   onSubmit: (req: {
@@ -18,7 +20,7 @@ interface Props {
   }) => Promise<EvaluateResponse>
   onRegenerateStory: () => Promise<void>
   onRegenerateQuestions: () => Promise<void>
-  onAskTutor: (ctx: { prompt: string; banner: string }) => void
+  onAskTutor: (ctx: { prompt: string; banner: string; autoSend?: boolean }) => void
   onInProgressChange: (v: boolean) => void
 }
 
@@ -29,6 +31,8 @@ export default function StudyStation({
   courseId,
   node,
   progress,
+  nextNode = null,
+  onSelectNextNode,
   worldMetaphor,
   now,
   onSubmit,
@@ -129,6 +133,8 @@ export default function StudyStation({
           <EvalTab
             node={node}
             progress={progress}
+            nextNode={nextNode}
+            onSelectNextNode={onSelectNextNode}
             onSubmit={onSubmit}
             onRegenerateQuestions={onRegenerateQuestions}
             onBackToStory={() => setTab('story')}
