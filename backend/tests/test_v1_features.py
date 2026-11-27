@@ -949,3 +949,292 @@ def test_spa_index_sets_no_cache_header(client: TestClient) -> None:
     if res.status_code == 200:
         cc = res.headers.get("cache-control", "").lower()
         assert "no-cache" in cc
+
+
+def test_evaluate_with_ai_and_endpoint_return_prompt_reviews_code_fixes_and_routing_suggestion(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import ai_router
+
+    code_pack = {
+        "schema_version": "1.0",
+        "id": "local-inf2236-eval",
+        "course_code": "INF2236",
+        "title": "Programacion Avanzada en Java",
+        "language": "es",
+        "engine_type": "code_lab",
+        "metadata": {
+            "university_id": "local",
+            "career_ids": ["cl-pucv-inf-2022"],
+            "created_year": 2026,
+            "updated_year": 2026,
+            "version": "1.0.0",
+            "authors": ["Test"],
+            "license": "CC-BY-SA-4.0",
+            "world_metaphor": "Fabrica Modular JVM",
+        },
+        "nodes": [
+            {
+                "id": "N1",
+                "parent_ids": [],
+                "branch": "theory",
+                "block": "Bloque 1 · POO",
+                "title": "Comparacion de Objetos y Polimorfismo",
+                "summary": "Uso de equals() y @Override en Java",
+                "story_script": (
+                    "En Java, **equals()** compara contenido mientras `==` compara referencias. "
+                    "Al sobrescribir con **@Override** se garantiza despacho dinamico."
+                ),
+                "eval_prompts": [
+                    {
+                        "id": "q1",
+                        "question": "Explica la diferencia entre == y equals() en Java.",
+                        "rubric_points": ["Diferencia referencia vs contenido", "Menciona NullPointerException"],
+                        "challenge_type": "concept",
+                        "language": "java",
+                        "starter_code": None,
+                    },
+                    {
+                        "id": "q2",
+                        "question": "Corrige el bug de comparacion de Strings en el siguiente validador.",
+                        "rubric_points": ["Reemplaza == por equals()", "Valida null de forma segura"],
+                        "challenge_type": "debug",
+                        "language": "java",
+                        "starter_code": (
+                            "public class Validador {\n"
+                            "    public boolean esIgual(String a, String b) {\n"
+                            "        return a == b;\n"
+                            "    }\n"
+                            "}"
+                        ),
+                    },
+                ],
+            }
+        ],
+    }
+    inst = client.post("/api/v1/courses/install-pack", json=code_pack)
+    assert inst.status_code == 200
+
+    # 1. Con IA devolviendo prompt_reviews, code_fixes, corrected_solution y routing_suggestion
+    def fake_complete_chat(_messages: list[dict[str, str]], **_kwargs: Any) -> AiCompletion:
+        payload = {
+            "score": 6.5,
+            "covered_points": ["q1::0", "q1::1"],
+            "imprecisions": ["En q2 mantuviste a == b sin usar equals() ni validar null."],
+            "re_explanation": "Recuerda que en Java los Strings son objetos y deben compararse con equals().",
+            "routing_suggestion": "Revisa la corrección línea por línea de la Pregunta 2 y reintenta este nodo.",
+            "prompt_reviews": [
+                {
+                    "prompt_id": "q1",
+                    "status": "passed",
+                    "diagnosis": "Explicaste correctamente la diferencia entre referencia en memoria y contenido.",
+                    "code_fixes": [],
+                    "corrected_solution": None,
+                },
+                {
+                    "prompt_id": "q2",
+                    "status": "failed",
+                    "diagnosis": "Dejaste la comparación por referencia == que falla con instancias distintas.",
+                    "code_fixes": [
+                        {
+                            "broken_snippet": "return a == b;",
+                            "fixed_snippet": "return a != null && a.equals(b);",
+                            "why": "Este cambio permite comparar el valor de los Strings y evita un NullPointerException si a es null.",
+                        }
+                    ],
+                    "corrected_solution": (
+                        "```java\n"
+                        "public class Validador {\n"
+                        "    public boolean esIgual(String a, String b) {\n"
+                        "        return a != null && a.equals(b);\n"
+                        "    }\n"
+                        "}\n"
+                        "```"
+                    ),
+                },
+            ],
+        }
+        return AiCompletion(text=json.dumps(payload), provider="groq", model="llama-3.3-70b-versatile")
+
+    monkeypatch.setattr(ai_router, "complete_chat", fake_complete_chat)
+
+    ev_res = client.post(
+        "/api/v1/study/local-inf2236-eval/N1/evaluate",
+        json={
+            "answers": [
+                {"prompt_id": "q1", "text": "== compara referencias en memoria y equals compara contenido evitando null"},
+                {"prompt_id": "q2", "text": "public class Validador { public boolean esIgual(String a, String b) { return a == b; } }"},
+            ],
+            "cooldown_mode": "semester",
+        },
+    )
+    assert ev_res.status_code == 200
+    body = ev_res.json()
+    assert body["score"] == 6.5
+    assert body["routing_suggestion"] == "Revisa la corrección línea por línea de la Pregunta 2 y reintenta este nodo."
+    assert len(body["prompt_reviews"]) == 2
+
+    pr1, pr2 = body["prompt_reviews"]
+    assert pr1["prompt_id"] == "q1"
+    assert pr1["status"] == "passed"
+    assert pr1["code_fixes"] == []
+    assert pr1["corrected_solution"] is None
+
+    assert pr2["prompt_id"] == "q2"
+    assert pr2["status"] == "failed"
+    assert len(pr2["code_fixes"]) == 1
+    assert pr2["code_fixes"][0]["broken_snippet"] == "return a == b;"
+    assert pr2["code_fixes"][0]["fixed_snippet"] == "return a != null && a.equals(b);"
+    assert "Este cambio permite" in pr2["code_fixes"][0]["why"]
+    # Los fences ```java ... ``` se limpian para renderizar el codigo directo en CodeMirror
+    assert pr2["corrected_solution"] is not None
+    assert "```" not in pr2["corrected_solution"]
+    assert "a.equals(b)" in pr2["corrected_solution"]
+
+    # 2. Fallback determinista limpio cuando el proveedor falla
+    def fake_fail(*_args: Any, **_kwargs: Any) -> AiCompletion:
+        raise ai_router.AiProviderError("Sin conexion")
+
+    monkeypatch.setattr(ai_router, "complete_chat", fake_fail)
+
+    fb_res = client.post(
+        "/api/v1/study/local-inf2236-eval/N1/evaluate",
+        json={
+            "answers": [
+                {"prompt_id": "q1", "text": "Diferencia referencia vs contenido y NullPointerException"},
+                {"prompt_id": "q2", "text": "return a == b;"},
+            ],
+            "cooldown_mode": "semester",
+        },
+    )
+    assert fb_res.status_code == 200
+    fb_body = fb_res.json()
+    assert fb_body["evaluated_by"] == "local_fallback"
+    assert fb_body["routing_suggestion"]
+    assert len(fb_body["prompt_reviews"]) == 2
+    fb_q2 = next(r for r in fb_body["prompt_reviews"] if r["prompt_id"] == "q2")
+    assert fb_q2["status"] in ("failed", "partial")
+    assert len(fb_q2["code_fixes"]) >= 1
+    assert fb_q2["corrected_solution"] is not None
+
+
+def test_sanitize_code_prompt_strips_duplicate_code_and_formats_multiline_starter() -> None:
+    from app.services.ai_router import sanitize_code_prompt
+    from app.services.ingest import _normalize_prompt_item
+
+    one_line_starter = (
+        "public class Cuenta { private int saldo; public Cuenta(int saldo) { saldo = saldo; } "
+        "public int getSaldo() { return saldo; } }"
+    )
+    duplicated_question = (
+        f"[Debugging JAVA] Corrige el bug de sombreamiento de atributo en la siguiente clase: {one_line_starter}"
+    )
+
+    clean_q, clean_starter = sanitize_code_prompt(duplicated_question, one_line_starter, "java")
+
+    assert clean_starter is not None
+    assert "\n" in clean_starter
+    assert clean_starter.count("\n") >= 4
+    assert "    private int saldo;" in clean_starter
+    assert "public class Cuenta" not in clean_q
+    assert "getSaldo()" not in clean_q
+    assert "Corrige el bug de sombreamiento" in clean_q
+
+    # Tambien funciona cuando question trae el codigo en un bloque cercado ```java ... ```
+    fenced_q = (
+        "Identifica la salida exacta de este fragmento:\n"
+        "```java\n"
+        "public class Cuenta {\n    private int saldo;\n}\n"
+        "```"
+    )
+    clean_q2, _ = sanitize_code_prompt(fenced_q, one_line_starter, "java")
+    assert "```" not in clean_q2
+    assert "private int saldo" not in clean_q2
+    assert "Identifica la salida exacta" in clean_q2
+
+    # _normalize_prompt_item aplica sanitize_code_prompt automaticamente
+    norm = _normalize_prompt_item(
+        {
+            "id": "q1",
+            "question": duplicated_question,
+            "rubric_points": ["Usa this.saldo = saldo"],
+            "challenge_type": "debug",
+            "language": "java",
+            "starter_code": one_line_starter,
+        },
+        p_idx=1,
+        node_title="Constructores y this",
+        nid="N1",
+        engine_type="code_lab",
+        default_language="java",
+    )
+    assert "public class Cuenta" not in norm["question"]
+    assert norm["starter_code"].count("\n") >= 4
+
+
+def test_strip_code_blocks_and_markdown_for_tts_and_code_lab_story_regeneration(
+    client: TestClient,
+) -> None:
+    from app.services.tts import (
+        split_story_sentences,
+        strip_code_blocks_and_markdown_for_tts,
+    )
+
+    raw_story = (
+        "En Java, el **polimorfismo dinámico** permite invocar métodos sobrescritos con **`@Override`** "
+        "según el objeto real en el heap.\n\n"
+        "```java\n"
+        "class Animal {\n"
+        "    public String sonido() {\n"
+        "        return \"...\";\n"
+        "    }\n"
+        "}\n"
+        "class Perro extends Animal {\n"
+        "    @Override\n"
+        "    public String sonido() {\n"
+        "        return \"Guau\";\n"
+        "    }\n"
+        "}\n"
+        "```\n\n"
+        "Al usar **`super()`**, la subclase reutiliza la lógica base manteniendo el **encapsulamiento**."
+    )
+
+    cleaned = strip_code_blocks_and_markdown_for_tts(raw_story)
+    assert "```" not in cleaned
+    assert "**" not in cleaned
+    assert "`" not in cleaned
+    assert "class Animal" not in cleaned
+    assert "return \"Guau\"" not in cleaned
+    assert "polimorfismo dinámico" in cleaned
+    assert "@Override" in cleaned
+    assert "encapsulamiento" in cleaned
+
+    sentences = split_story_sentences(raw_story)
+    assert len(sentences) == 2
+    assert all("class Animal" not in s and "**" not in s for s in sentences)
+
+    # Regenerar historia en un ramo code_lab incluye **negrita** y bloque de codigo cercado con indentacion intacta
+    java_notes = (
+        b"# Herencia y Polimorfismo en Java\n"
+        b"public class Base { public static void main(String[] args) { System.out.println(1); } }\n"
+        b"Las subclases usan extends y @Override para especializar metodos.\n"
+    )
+    ing = client.post(
+        "/api/v1/courses/ingest-local",
+        data={
+            "course_code": "INF2236",
+            "title": "Programacion Orientada a Objetos",
+            "engine_type": "code_lab",
+        },
+        files=[("files", ("herencia.md", java_notes, "text/markdown"))],
+    )
+    assert ing.status_code == 200
+    cid = ing.json()["course_id"]
+
+    regen = client.post(f"/api/v1/study/{cid}/N1/regenerate-story")
+    assert regen.status_code == 200
+    new_story = regen.json()["story_script"]
+    assert "**" in new_story
+    assert "```java" in new_story
+    assert "    private final String" in new_story

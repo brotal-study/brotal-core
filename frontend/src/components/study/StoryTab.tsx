@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import CodeMirror from '@uiw/react-codemirror'
+import { oneDark } from '@codemirror/theme-one-dark'
 import {
+  Check,
+  Code2,
+  Copy,
   FastForward,
   Gauge,
   Loader2,
@@ -21,7 +26,9 @@ import {
   type TtsSentenceTiming,
   type TtsWordTiming,
 } from '../../api/study'
+import { useAppStore } from '../../store/useAppStore'
 import { useStudyStore } from '../../store/useStudyStore'
+import { getLanguageExtension } from './CodeChallengeInput'
 import {
   splitStoryParagraphSentences,
   useSpeech,
@@ -185,7 +192,7 @@ export default function StoryTab({
   const [quickQuestion, setQuickQuestion] = useState('')
 
   const {
-    paragraphs: structuredParagraphs,
+    blocks: storyBlocks,
     flat: flatSentences,
     flatWords,
   } = useMemo(() => splitStoryParagraphSentences(node.story_script), [node.story_script])
@@ -649,62 +656,77 @@ export default function StoryTab({
       </div>
 
       <article className="flex min-w-0 flex-col gap-3 break-words text-[15px] leading-relaxed">
-        {structuredParagraphs.map((pSentences, pIdx) => (
-          <p key={pIdx} className="break-words">
-            {pSentences.map((s, sIdx) => {
-              const isActiveSentence = activeSentenceIndex === s.globalIndex
-              return (
-                <span
-                  key={s.globalIndex}
-                  ref={(el) => {
-                    sentenceRefs.current[s.globalIndex] = el
-                  }}
-                  className={`rounded-[2px] transition-colors ${
-                    isActiveSentence
-                      ? 'bg-indigo-50/70 dark:bg-indigo-950/40'
-                      : ''
-                  }`}
-                >
-                  {s.words.map((w, wIdx) => {
-                    const isActiveWord = activeWordIndex === w.globalWordIndex
-                    return (
-                      <span key={w.globalWordIndex}>
-                        <span
-                          ref={(el) => {
-                            wordRefs.current[w.globalWordIndex] = el
-                          }}
-                          role="button"
-                          tabIndex={0}
-                          title="Clic para saltar a esta palabra en el audio"
-                          onClick={() => void handleWordClick(w.globalWordIndex, s.globalIndex)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault()
-                              void handleWordClick(w.globalWordIndex, s.globalIndex)
-                            }
-                          }}
-                          className={`cursor-pointer rounded-[2px] transition-colors ${
-                            w.inlineCode
-                              ? 'font-mono text-[0.9em] bg-slate-100 dark:bg-slate-800 px-1 rounded'
-                              : ''
-                          } ${
-                            isActiveWord
-                              ? 'bg-indigo-100 dark:bg-indigo-900/60 border-b-2 border-indigo-500 dark:border-indigo-400 rounded-[2px]'
-                              : 'hover:bg-slate-200/60 dark:hover:bg-slate-800/70'
-                          }`}
-                        >
-                          {w.text}
+        {storyBlocks.map((block, bIdx) => {
+          if (block.type === 'code') {
+            return (
+              <StoryCodeBlock
+                key={`code-${bIdx}`}
+                language={block.language}
+                code={block.code}
+              />
+            )
+          }
+
+          const pSentences = block.sentences
+          return (
+            <p key={`p-${block.paragraphIndex}-${bIdx}`} className="break-words">
+              {pSentences.map((s, sIdx) => {
+                const isActiveSentence = activeSentenceIndex === s.globalIndex
+                return (
+                  <span
+                    key={s.globalIndex}
+                    ref={(el) => {
+                      sentenceRefs.current[s.globalIndex] = el
+                    }}
+                    className={`rounded-[2px] transition-colors ${
+                      isActiveSentence ? 'bg-indigo-50/70 dark:bg-indigo-950/40' : ''
+                    }`}
+                  >
+                    {s.words.map((w, wIdx) => {
+                      const isActiveWord = activeWordIndex === w.globalWordIndex
+                      return (
+                        <span key={w.globalWordIndex}>
+                          <span
+                            ref={(el) => {
+                              wordRefs.current[w.globalWordIndex] = el
+                            }}
+                            role="button"
+                            tabIndex={0}
+                            title="Clic para saltar a esta palabra en el audio"
+                            onClick={() => void handleWordClick(w.globalWordIndex, s.globalIndex)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault()
+                                void handleWordClick(w.globalWordIndex, s.globalIndex)
+                              }
+                            }}
+                            className={`cursor-pointer rounded-[2px] transition-colors ${
+                              w.inlineCode
+                                ? 'font-mono text-[0.9em] bg-slate-100 dark:bg-slate-800 px-1 rounded'
+                                : ''
+                            } ${
+                              w.highlighted
+                                ? 'font-semibold text-slate-950 dark:text-white bg-amber-100/75 dark:bg-amber-900/35 px-0.5 rounded-[2px]'
+                                : ''
+                            } ${
+                              isActiveWord
+                                ? 'bg-indigo-100 dark:bg-indigo-900/60 border-b-2 border-indigo-500 dark:border-indigo-400 rounded-[2px]'
+                                : 'hover:bg-slate-200/60 dark:hover:bg-slate-800/70'
+                            }`}
+                          >
+                            {w.text}
+                          </span>
+                          {wIdx < s.words.length - 1 ? ' ' : ''}
                         </span>
-                        {wIdx < s.words.length - 1 ? ' ' : ''}
-                      </span>
-                    )
-                  })}
-                  {sIdx < pSentences.length - 1 ? ' ' : ''}
-                </span>
-              )
-            })}
-          </p>
-        ))}
+                      )
+                    })}
+                    {sIdx < pSentences.length - 1 ? ' ' : ''}
+                  </span>
+                )
+              })}
+            </p>
+          )
+        })}
       </article>
 
       <div className="flex flex-col gap-3 pt-1">
@@ -750,6 +772,55 @@ export default function StoryTab({
           </button>
         </form>
       </div>
+    </div>
+  )
+}
+
+function StoryCodeBlock({ language, code }: { language: string; code: string }) {
+  const theme = useAppStore((s) => s.theme)
+  const [copied, setCopied] = useState(false)
+  const extensions = useMemo(() => getLanguageExtension(language), [language])
+  const cmTheme = theme === 'dark' ? oneDark : 'light'
+  const langLabel = (language || 'java').toUpperCase()
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1800)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  return (
+    <div className="my-1 overflow-hidden rounded-md border border-slate-300 bg-slate-50 text-xs dark:border-slate-700 dark:bg-slate-900/80">
+      <div className="flex items-center justify-between border-b border-slate-200 bg-slate-100/80 px-3 py-1.5 dark:border-slate-700 dark:bg-slate-800/80">
+        <span className="inline-flex items-center gap-1.5 font-mono text-[11px] font-semibold uppercase text-slate-700 dark:text-slate-300">
+          <Code2 size={13} className="text-indigo-600 dark:text-indigo-400" />
+          Ejemplo · {langLabel}
+        </span>
+        <button
+          type="button"
+          onClick={() => void handleCopy()}
+          className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+        >
+          {copied ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+          {copied ? 'Copiado' : 'Copiar'}
+        </button>
+      </div>
+      <CodeMirror
+        value={code}
+        editable={false}
+        readOnly={true}
+        theme={cmTheme}
+        extensions={extensions}
+        basicSetup={{
+          lineNumbers: true,
+          foldGutter: false,
+          highlightActiveLine: false,
+        }}
+      />
     </div>
   )
 }

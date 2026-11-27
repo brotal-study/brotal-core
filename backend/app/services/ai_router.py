@@ -276,6 +276,415 @@ def complete_chat(
     raise AiProviderError("Todos los proveedores IA fallaron: " + " | ".join(errors))
 
 
+def _is_placeholder_starter(code: str | None) -> bool:
+    if not code:
+        return True
+    s = code.strip()
+    if not s:
+        return True
+    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    return len(lines) == 1 and (
+        lines[0].startswith(("//", "--", "#"))
+        or (lines[0].startswith("/*") and lines[0].endswith("*/"))
+    )
+
+
+def _expand_single_line_brace_code(raw_code: str) -> str:
+    """Formatea codigo Java/C de una sola linea con llaves y punto y coma en multiples lineas indentadas."""
+    indent = 0
+    out_lines: list[str] = []
+    buf: list[str] = []
+    paren_depth = 0
+    in_str: str | None = None
+    escape = False
+    i = 0
+    n = len(raw_code)
+
+    def flush_line() -> None:
+        line = re.sub(r"[ \t]+", " ", "".join(buf)).strip()
+        buf.clear()
+        if line:
+            out_lines.append(("    " * indent) + line)
+
+    while i < n:
+        ch = raw_code[i]
+        if in_str is not None:
+            buf.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == in_str:
+                in_str = None
+            i += 1
+            continue
+
+        if ch in ('"', "'"):
+            in_str = ch
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == "/" and i + 1 < n and raw_code[i + 1] == "*":
+            end_comment = raw_code.find("*/", i + 2)
+            if end_comment == -1:
+                buf.append(raw_code[i:])
+                break
+            comment_block = raw_code[i : end_comment + 2]
+            if "".join(buf).strip():
+                flush_line()
+            buf.append(comment_block)
+            flush_line()
+            i = end_comment + 2
+            continue
+
+        if ch == "/" and i + 1 < n and raw_code[i + 1] == "/":
+            end_ln = raw_code.find("\n", i + 2)
+            if "".join(buf).strip():
+                flush_line()
+            if end_ln == -1:
+                buf.append(raw_code[i:])
+                flush_line()
+                break
+            buf.append(raw_code[i:end_ln])
+            flush_line()
+            i = end_ln + 1
+            continue
+
+        if ch == "(":
+            paren_depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            paren_depth = max(0, paren_depth - 1)
+            buf.append(ch)
+        elif ch == "{" and paren_depth == 0:
+            cur = "".join(buf).rstrip()
+            buf.clear()
+            if cur:
+                buf.append(cur + " {")
+            else:
+                buf.append("{")
+            flush_line()
+            indent += 1
+        elif ch == "}" and paren_depth == 0:
+            flush_line()
+            indent = max(0, indent - 1)
+            j = i + 1
+            while j < n and raw_code[j] in " \t":
+                j += 1
+            if j < n and raw_code[j] == ";":
+                out_lines.append(("    " * indent) + "};")
+                i = j + 1
+                continue
+            out_lines.append(("    " * indent) + "}")
+        elif ch == ";" and paren_depth == 0:
+            buf.append(";")
+            flush_line()
+        elif ch == "\n":
+            flush_line()
+        else:
+            buf.append(ch)
+        i += 1
+
+    flush_line()
+    return "\n".join(out_lines)
+
+
+def format_multiline_starter_code(starter_code: str | None, language: str = "java") -> str | None:
+    """Garantiza que starter_code con codigo real nunca quede aplastado en una sola linea."""
+    if starter_code is None:
+        return None
+    cleaned = starter_code.strip()
+    if not cleaned or _is_placeholder_starter(cleaned):
+        return cleaned
+
+    lang = (language or "java").strip().lower()
+    raw_lines = [ln for ln in cleaned.splitlines() if ln.strip()]
+    non_comment_lines = [
+        ln
+        for ln in raw_lines
+        if not ln.strip().startswith(("//", "--", "#"))
+        and not (ln.strip().startswith("/*") and ln.strip().endswith("*/"))
+    ]
+
+    if lang == "sql" or (
+        "{" not in cleaned
+        and re.search(r"\bSELECT\b[\s\S]+\bFROM\b", cleaned, re.IGNORECASE)
+    ):
+        if len(non_comment_lines) <= 1:
+            formatted_sql = re.sub(
+                r"\s+\b((?:INNER|LEFT|RIGHT|FULL)\s+JOIN|JOIN|FROM|WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|VALUES|SET)\b",
+                r"\n\1",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+            return formatted_sql.strip()
+        return cleaned
+
+    needs_brace_expand = len(non_comment_lines) <= 1 and ("{" in cleaned or cleaned.count(";") >= 2)
+    if not needs_brace_expand and len(non_comment_lines) <= 2:
+        for ln in non_comment_lines:
+            if "{" in ln and "}" in ln and ";" in ln:
+                needs_brace_expand = True
+                break
+
+    if needs_brace_expand:
+        return _expand_single_line_brace_code(cleaned)
+
+    return cleaned
+
+
+def _strip_code_comments(code: str) -> str:
+    no_block = re.sub(r"/\*[\s\S]*?\*/", " ", code)
+    lines = []
+    for ln in no_block.splitlines():
+        s = ln.strip()
+        if s.startswith(("//", "--", "#")):
+            continue
+        s = re.sub(r"//.*$", "", s).strip()
+        if s:
+            lines.append(s)
+    return "\n".join(lines)
+
+
+def sanitize_code_prompt(
+    question: str,
+    starter_code: str | None,
+    language: str = "java",
+) -> tuple[str, str | None]:
+    """Formatea starter_code multilinea y elimina codigo duplicado embebido en question."""
+    q_orig = (question or "").strip()
+    if starter_code is None:
+        return (q_orig, None)
+
+    raw_starter = starter_code.strip()
+    formatted_starter = format_multiline_starter_code(raw_starter, language)
+    if not raw_starter or _is_placeholder_starter(raw_starter):
+        return (q_orig, formatted_starter)
+
+    q_clean = re.sub(r"```[\s\S]*?```", " ", q_orig)
+
+    candidates = [raw_starter]
+    if formatted_starter and formatted_starter != raw_starter:
+        candidates.append(formatted_starter)
+    stripped_comments = _strip_code_comments(raw_starter)
+    if stripped_comments and stripped_comments not in candidates:
+        candidates.append(stripped_comments)
+
+    for cand in candidates:
+        tokens = [t for t in re.split(r"\s+", cand.strip()) if t]
+        if len(tokens) >= 3:
+            pat = r"[:\s]*`?" + r"\s+".join(re.escape(t) for t in tokens) + r"`?"
+            q_clean = re.sub(pat, " ", q_clean, flags=re.IGNORECASE)
+
+    # Recortar bloque de codigo duplicado al final tras ':' o salto de linea
+    q_clean = re.sub(
+        r"[:\n]\s*`?(?:import\s+[\w.]+;\s*)*(?:(?:public|private|protected|static|final|abstract)\s+)*"
+        r"(?:class|interface|void|int|double|float|long|boolean|String|List|Map|Set)\b[\s\S]*\{[\s\S]*\}[\s;]*`?\s*$",
+        ".",
+        q_clean,
+    )
+    q_clean = re.sub(
+        r"[:\n]\s*`?SELECT\s+[\s\S]+\s+FROM\s+[\s\S]+;?\s*`?\s*$",
+        ".",
+        q_clean,
+        flags=re.IGNORECASE,
+    )
+    q_clean = re.sub(
+        r"[:\n]\s*`?def\s+[A-Za-z_]\w*\s*\([^)]*\)\s*(?:->\s*[^:]+)?:\s+[\s\S]+`?\s*$",
+        ".",
+        q_clean,
+    )
+
+    q_clean = re.sub(r"[ \t]+", " ", q_clean)
+    q_clean = re.sub(r"\n{2,}", "\n", q_clean).strip()
+    q_clean = re.sub(r"\s*:\s*$", ".", q_clean)
+    q_clean = re.sub(r"\.{2,}$", ".", q_clean).strip()
+
+    if len(q_clean) < 10:
+        q_clean = "Analiza el código del editor, identifica el problema técnico y resuélvelo según los criterios del nodo."
+
+    return (q_clean, formatted_starter)
+
+
+def _clean_fenced_solution(raw_sol: Any) -> str | None:
+    if not isinstance(raw_sol, str):
+        return None
+    s = raw_sol.strip()
+    if not s:
+        return None
+    m = re.match(r"^```[a-zA-Z0-9_+-]*[ \t]*\n([\s\S]*?)\n?```$", s)
+    if m:
+        return m.group(1).strip() or None
+    return s
+
+
+def build_prompt_reviews_and_routing(
+    *,
+    node_title: str,
+    eval_prompts: list[dict[str, Any]],
+    answers_by_prompt: dict[str, str],
+    covered_points: list[str],
+    score: float,
+    imprecisions: list[str] | None = None,
+    raw_prompt_reviews: Any = None,
+    raw_routing_suggestion: Any = None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Valida/sanitiza prompt_reviews y routing_suggestion o construye un fallback determinista limpio."""
+    covered_set = set(covered_points)
+    imp_list = [str(x).strip() for x in (imprecisions or []) if str(x).strip()]
+
+    raw_by_id: dict[str, dict[str, Any]] = {}
+    raw_list: list[dict[str, Any]] = []
+    if isinstance(raw_prompt_reviews, list):
+        for item in raw_prompt_reviews:
+            if isinstance(item, dict):
+                raw_list.append(item)
+                pid = str(item.get("prompt_id") or item.get("id") or "").strip()
+                if pid:
+                    raw_by_id[pid] = item
+
+    reviews_out: list[dict[str, Any]] = []
+    for idx, q in enumerate(eval_prompts):
+        qid = str(q.get("id") or f"q{idx + 1}")
+        ct = str(q.get("challenge_type") or "concept").strip().lower()
+        lang = str(q.get("language") or "java").strip().lower()
+        starter = str(q.get("starter_code") or "").strip()
+        student_ans = (answers_by_prompt.get(qid) or "").strip()
+        r_points = [str(p) for p in (q.get("rubric_points") or [])]
+        q_keys = [f"{qid}::{i}" for i in range(len(r_points))]
+
+        covered_count = sum(1 for k in q_keys if k in covered_set)
+        missed_criteria = [r_points[i] for i, k in enumerate(q_keys) if k not in covered_set]
+        covered_criteria = [r_points[i] for i, k in enumerate(q_keys) if k in covered_set]
+
+        if q_keys:
+            if covered_count == len(q_keys):
+                derived_status = "passed"
+            elif covered_count == 0:
+                derived_status = "failed"
+            else:
+                derived_status = "partial"
+        else:
+            derived_status = "passed" if score >= 7.0 else "failed"
+
+        raw_item = raw_by_id.get(qid)
+        if raw_item is None and idx < len(raw_list):
+            candidate_item = raw_list[idx]
+            cand_pid = str(candidate_item.get("prompt_id") or candidate_item.get("id") or "").strip()
+            if not cand_pid or cand_pid not in {str(p.get("id")) for p in eval_prompts}:
+                raw_item = candidate_item
+        raw_item = raw_item or {}
+
+        code_fixes: list[dict[str, str]] = []
+        raw_fixes = raw_item.get("code_fixes")
+        if isinstance(raw_fixes, list):
+            for cf in raw_fixes[:6]:
+                if isinstance(cf, dict):
+                    broken = str(cf.get("broken_snippet") or "").strip()
+                    fixed = str(cf.get("fixed_snippet") or "").strip()
+                    why = str(cf.get("why") or "").strip()
+                    if (broken or fixed) and why:
+                        code_fixes.append(
+                            {
+                                "broken_snippet": broken or "(código incompleto u omitido)",
+                                "fixed_snippet": fixed or "(aplicar corrección)",
+                                "why": why,
+                            }
+                        )
+
+        raw_status = str(raw_item.get("status") or "").strip().lower()
+        if raw_status in ("passed", "partial", "failed"):
+            status = raw_status
+        else:
+            status = derived_status
+
+        if score == 10.0 and covered_count == len(q_keys) and not code_fixes and not imp_list:
+            status = "passed"
+        elif status == "passed" and (code_fixes or covered_count < len(q_keys)):
+            status = "partial" if covered_count > 0 or code_fixes else "failed"
+
+        # Si es reto de codigo no aprobado y no vinieron code_fixes del proveedor, generar guia puntual
+        if ct in ("debug", "implement", "trace") and status != "passed" and not code_fixes:
+            formatted_starter = format_multiline_starter_code(starter, lang) or starter
+            code_lines = [
+                ln.strip()
+                for ln in (student_ans or formatted_starter).splitlines()
+                if ln.strip() and not ln.strip().startswith("//") and not ln.strip().startswith("--")
+            ]
+            sample_broken = code_lines[0] if code_lines else (student_ans or starter or "(respuesta vacía)")
+            target_criterion = missed_criteria[0] if missed_criteria else f"Cumplir la especificación de {node_title}"
+            code_fixes.append(
+                {
+                    "broken_snippet": sample_broken[:180],
+                    "fixed_snippet": f"/* Ajustar implementación para: {target_criterion} */",
+                    "why": f"Este cambio permite cumplir con el criterio técnico evaluado: {target_criterion}.",
+                }
+            )
+
+        raw_diag = str(raw_item.get("diagnosis") or "").strip()
+        if raw_diag:
+            diagnosis = raw_diag
+        else:
+            if status == "passed":
+                diagnosis = "Respuesta correcta: cubriste con precisión todos los criterios evaluados en esta pregunta."
+            elif status == "partial":
+                if covered_criteria and missed_criteria:
+                    diagnosis = (
+                        f"Respuesta parcial: acertaste en {'; '.join(covered_criteria[:2])}, "
+                        f"pero faltó precisar {'; '.join(missed_criteria[:2])}."
+                    )
+                elif missed_criteria:
+                    diagnosis = f"Respuesta parcial: faltó desarrollar {'; '.join(missed_criteria[:2])}."
+                else:
+                    diagnosis = "Respuesta con observaciones técnicas puntuales a corregir."
+            else:
+                if missed_criteria:
+                    diagnosis = f"Respuesta incompleta o incorrecta: debes demostrar que {'; '.join(missed_criteria[:3])}."
+                else:
+                    diagnosis = "No se cubrieron los criterios mínimos exigidos en esta pregunta."
+
+        corrected_solution = _clean_fenced_solution(raw_item.get("corrected_solution"))
+        if status == "passed" and not code_fixes:
+            corrected_solution = None
+        elif corrected_solution is None and status != "passed" and r_points:
+            if ct in ("debug", "implement"):
+                comment_prefix = "--" if lang == "sql" else ("#" if lang == "python" else "//")
+                corrected_solution = "\n".join(
+                    [f"{comment_prefix} Solución de referencia ({node_title}):"]
+                    + [f"{comment_prefix} {i + 1}. {pt}" for i, pt in enumerate(r_points)]
+                )
+            else:
+                corrected_solution = "\n".join(f"- {pt}" for pt in r_points)
+
+        reviews_out.append(
+            {
+                "prompt_id": qid,
+                "status": status,
+                "diagnosis": diagnosis,
+                "code_fixes": code_fixes,
+                "corrected_solution": corrected_solution,
+            }
+        )
+
+    routing = str(raw_routing_suggestion or "").strip()
+    if not routing:
+        if score >= 8.5:
+            routing = f"Dominio sólido en {node_title}: avanza al siguiente nodo del árbol."
+        elif score >= 7.0:
+            routing = (
+                f"Aprobaste {node_title}, pero revisa las correcciones puntuales de tus respuestas "
+                "antes de avanzar al siguiente nodo."
+            )
+        else:
+            routing = (
+                f"Aún no alcanzas 7.0 en {node_title}: revisa el diagnóstico pregunta por pregunta, "
+                "repasa la explicación del nodo y vuelve a intentarlo."
+            )
+
+    return (reviews_out, routing)
+
+
 def evaluate_with_ai(
     *,
     node_title: str,
@@ -329,6 +738,12 @@ def evaluate_with_ai(
             "- En desafios `debug` o `implement`, compara `student_answer` contra `starter_code`: si el estudiante "
             "dejo el `starter_code` sin corregir el bug o con el `TODO` vacio, NO otorgues esos puntos y califica bajo.\n"
             "- En `imprecisions`, señala explicitamente QUE LINEA, condicion, firma o detalle tecnico falla.\n"
+            "- Para retos de codigo (`debug`, `implement`, `trace`): si el codigo del estudiante tiene errores o "
+            "imprecisiones, DEBES llenar `code_fixes` dentro del `prompt_reviews` de esa pregunta señalando "
+            "EXACTAMENTE cada fragmento erroneo del codigo del estudiante (`broken_snippet`), el fragmento corregido "
+            "(`fixed_snippet`) y el motivo concreto (`why`: explicacion explicita tipo 'Este cambio permite...' o "
+            "'Sin esto ocurre...'), y ademas `corrected_solution` con la solucion limpia completa solo si "
+            "`status != \"passed\"` (o si hubo imprecisiones).\n"
             "- Si `score < 7.0`, en `re_explanation` incluye una explicacion directa del fallo acompañada de un "
             "bloque de codigo Markdown limpio (ej. ```java ... ``` o ```sql ... ```) mostrando la correccion o guia.\n"
         )
@@ -338,14 +753,36 @@ def evaluate_with_ai(
         "con rigor del 1.0 al 10.0 (7.0 o mas aprueba). No regales puntos si la respuesta es vaga o vacia.\n"
         "REGLA DE CONSISTENCIA 10/10: Si pones una nota menor a 10.0, DEBES incluir al menos una observación "
         "concreta en `imprecisions` explicando qué faltó o qué se puede mejorar para llegar a 10.0. "
-        "Nunca descuentes puntos sin explicar por qué."
+        "Nunca descuentes puntos sin explicar por qué.\n"
+        "REVISION PREGUNTA POR PREGUNTA OBLIGATORIA:\n"
+        "- Devuelve `prompt_reviews` con 1 item por cada `prompt_id` evaluado (`status`: 'passed' | 'partial' | 'failed', "
+        "`diagnosis`, `code_fixes` y `corrected_solution`).\n"
+        "- Devuelve `routing_suggestion`: 1 oracion accionable indicando si conviene repasar un prerrequisito, "
+        "reintentar este nodo o avanzar al siguiente.\n"
+        "- NUNCA incluyas claves internas como `q1::0` o `q2::1` en los textos visibles de `imprecisions`, `diagnosis` ni `re_explanation`."
         f"{senior_dev_rules}\n"
         "Responde UNICAMENTE un objeto JSON valido con esta estructura exacta:\n"
         "{\n"
         '  "score": 7.5,\n'
         '  "covered_points": ["q1::0", "q1::1"],\n'
         '  "imprecisions": ["En linea X: falta validar null / usar equals() en vez de =="],\n'
-        '  "re_explanation": "Breve re-explicacion conversada y bloque de codigo Markdown si aplica (solo si score < 7.0, vacio si >= 7.0)"\n'
+        '  "re_explanation": "Breve re-explicacion conversada y bloque de codigo Markdown si aplica (solo si score < 7.0, vacio si >= 7.0)",\n'
+        '  "routing_suggestion": "Reintenta este nodo corrigiendo la comparacion de Strings antes de avanzar.",\n'
+        '  "prompt_reviews": [\n'
+        "    {\n"
+        '      "prompt_id": "q1",\n'
+        '      "status": "partial",\n'
+        '      "diagnosis": "Identificaste el flujo general pero mantuviste la comparacion por referencia.",\n'
+        '      "code_fixes": [\n'
+        "        {\n"
+        '          "broken_snippet": "if (actual == codigo)",\n'
+        '          "fixed_snippet": "if (codigo != null && codigo.equals(actual))",\n'
+        '          "why": "Este cambio permite comparar el contenido de los Strings por valor y evita NullPointerException."\n'
+        "        }\n"
+        "      ],\n"
+        '      "corrected_solution": "public boolean validar(...) {\\n    ...\\n}"\n'
+        "    }\n"
+        "  ]\n"
         "}"
     )
     user_prompt = json.dumps(
@@ -380,7 +817,12 @@ def evaluate_with_ai(
         ratio = len(covered_points) / len(all_keys) if all_keys else 0.0
         score = round(1.0 + 9.0 * ratio, 1)
 
-    imprecisions = [str(x).strip() for x in (parsed.get("imprecisions") or []) if str(x).strip()]
+    imprecisions = [
+        re.sub(r"^(?:q\d+|p\d+)(?:::\d+)?\s*[:\-–]\s*", "", str(x).strip(), flags=re.IGNORECASE).strip()
+        for x in (parsed.get("imprecisions") or [])
+        if str(x).strip()
+    ]
+    imprecisions = [x for x in imprecisions if x]
     if all_keys and len(set(covered_points)) == len(valid_keys) and not imprecisions and score < 10.0:
         score = 10.0
 
@@ -401,11 +843,24 @@ def evaluate_with_ai(
                 + "."
             )
 
+    prompt_reviews, routing_suggestion = build_prompt_reviews_and_routing(
+        node_title=node_title,
+        eval_prompts=eval_prompts,
+        answers_by_prompt=answers_by_prompt,
+        covered_points=covered_points,
+        score=score,
+        imprecisions=imprecisions,
+        raw_prompt_reviews=parsed.get("prompt_reviews"),
+        raw_routing_suggestion=parsed.get("routing_suggestion"),
+    )
+
     return {
         "score": score,
         "covered_points": covered_points,
         "imprecisions": imprecisions,
         "re_explanation": re_explanation,
+        "prompt_reviews": prompt_reviews,
+        "routing_suggestion": routing_suggestion,
         "provider": completion.provider,
         "model": completion.model,
     }
@@ -417,12 +872,20 @@ evaluate_answers_with_ai = evaluate_with_ai
 def _strip_bullets(story: str) -> str:
     lines = story.splitlines()
     cleaned_lines: list[str] = []
+    in_code_block = False
     for ln in lines:
-        s = ln.strip()
-        if not s:
+        stripped = ln.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            cleaned_lines.append(stripped)
+            continue
+        if in_code_block:
+            cleaned_lines.append(ln.rstrip())
+            continue
+        if not stripped:
             cleaned_lines.append("")
             continue
-        s = re.sub(r"^[-*•]\s+", "", s)
+        s = re.sub(r"^[-*•]\s+", "", stripped)
         s = re.sub(r"^\d+[.)]\s+", "", s)
         cleaned_lines.append(s)
     prose = "\n".join(cleaned_lines)
@@ -461,6 +924,63 @@ def question_style_instruction(question_style: str, world_metaphor: str) -> str:
     )
 
 
+def _fallback_story_code_block(node_title: str, language: str = "java") -> str:
+    lang = language if language in ("java", "sql", "python", "c") else "java"
+    clean_cls = re.sub(r"[^a-zA-Z0-9]", "", node_title.title())[:16] or "EjemploNodo"
+    if not clean_cls[0].isalpha():
+        clean_cls = f"Nodo{clean_cls}"
+    if lang == "sql":
+        return (
+            "```sql\n"
+            f"-- Ejemplo aplicado: {node_title}\n"
+            "SELECT c.id_curso, c.nombre, COUNT(i.id_estudiante) AS inscritos\n"
+            "FROM cursos c\n"
+            "INNER JOIN inscripciones i ON i.id_curso = c.id_curso\n"
+            "GROUP BY c.id_curso, c.nombre\n"
+            "HAVING COUNT(i.id_estudiante) >= 1\n"
+            "ORDER BY inscritos DESC;\n"
+            "```"
+        )
+    if lang == "python":
+        return (
+            "```python\n"
+            f"# Ejemplo aplicado: {node_title}\n"
+            "def filtrar_activos(valores: list[int], minimo: int = 0) -> list[int]:\n"
+            "    resultado: list[int] = []\n"
+            "    for actual in valores:\n"
+            "        if actual >= minimo:\n"
+            "            resultado.append(actual)\n"
+            "    return resultado\n"
+            "```"
+        )
+    if lang == "c":
+        return (
+            "```c\n"
+            f"/* Ejemplo aplicado: {node_title} */\n"
+            "int sumar_rango(const int *datos, int n) {\n"
+            "    int acumulador = 0;\n"
+            "    for (int i = 0; i < n; i++) {\n"
+            "        acumulador += datos[i];\n"
+            "    }\n"
+            "    return acumulador;\n"
+            "}\n"
+            "```"
+        )
+    return (
+        "```java\n"
+        f"public class {clean_cls}Demo {{\n"
+        "    private final String identificador;\n\n"
+        f"    public {clean_cls}Demo(String identificador) {{\n"
+        "        this.identificador = identificador != null ? identificador.trim() : \"\";\n"
+        "    }\n\n"
+        "    public boolean coincideCon(String candidato) {\n"
+        "        return candidato != null && this.identificador.equals(candidato);\n"
+        "    }\n"
+        "}\n"
+        "```"
+    )
+
+
 def regenerate_story_with_ai(
     *,
     course_title: str,
@@ -471,35 +991,74 @@ def regenerate_story_with_ai(
     eval_prompts: list[dict[str, Any]],
     preferred_provider: str = "auto",
     explanation_style: str = "narrative",
+    engine_type: str = "concept_tree",
 ) -> tuple[str, str]:
     """Genera una explicacion alternativa respetando explanation_style ('narrative' | 'direct' | 'structured').
 
-    Siempre 2 a 3 parrafos continuos (~180-240 palabras en total), sin listas con vinetas.
-    Si no hay IA configurada, genera una version determinista alternativa segun el estilo elegido.
+    Siempre 2 a 3 parrafos continuos (~180-240 palabras de prosa), sin listas con vinetas.
+    Marca de 3 a 6 conceptos clave en **negrita** y, si engine_type == 'code_lab', incluye 1 bloque de codigo cercado.
+    Garantiza cobertura explicita de todos los rubric_points de eval_prompts.
     Devuelve (new_story_script, provider_used).
     """
     rubric_points = [
-        pt
+        str(pt).strip()
         for q in eval_prompts
-        for pt in q.get("rubric_points", [])
+        for pt in (q.get("rubric_points") or [])
+        if str(pt).strip()
     ]
+    prompt_questions = [
+        str(q.get("question") or "").strip()
+        for q in eval_prompts
+        if str(q.get("question") or "").strip()
+    ]
+    is_code_lab = engine_type == "code_lab" or any(
+        str(q.get("challenge_type") or "concept") in ("debug", "implement", "trace") or q.get("starter_code")
+        for q in eval_prompts
+    )
+    inferred_lang = next(
+        (
+            str(q.get("language")).strip().lower()
+            for q in eval_prompts
+            if str(q.get("language") or "").strip().lower() in ("java", "sql", "python", "c")
+        ),
+        "java" if is_code_lab else "text",
+    )
     metaphor_hint = world_metaphor or f"Taller practico de {course_title}"
     style_rule = explanation_style_instruction(explanation_style, metaphor_hint)
+
+    code_lab_story_rule = ""
+    if is_code_lab:
+        code_lab_story_rule = (
+            f"\n- MODO `code_lab` ACTIVO (lenguaje `{inferred_lang}`): Incluye 1 ejemplo de codigo real corto y limpio "
+            f"(de 10 a 22 lineas) en un bloque Markdown cercado (```{inferred_lang} ... ```) — o hasta 2 micro-fragmentos "
+            "de 4 a 8 lineas si contrastan un error vs. su correccion — que ilustre las sintaxis, anotaciones y reglas "
+            "clave del nodo."
+        )
 
     try:
         system_prompt = (
             "Eres el autor pedagogico de Brotal. Tu tarea es explicar un concepto universitario "
-            "en espanol en 2 a 3 parrafos continuos (~180 a 240 palabras en total).\n"
+            "en espanol en 2 a 3 parrafos continuos de prosa (~180 a 240 palabras).\n"
             f"{style_rule}\n"
-            "PROHIBIDO usar listas con vinetas, numeraciones o encabezados markdown: entrega unicamente los 2 a 3 parrafos "
-            "que cubran todos los conceptos clave de la rubrica."
+            "REGLAS INNEGOCIABLES:\n"
+            "- CONTRATO ESTRICTO DE COBERTURA EXPLICACION <-> PREGUNTAS: CADA `rubric_point` listado y toda sintaxis, "
+            "anotacion o mecanismo evaluado en `eval_prompts` DEBE quedar explicitamente explicado y ejemplificado en esta "
+            "nueva explicacion (ej. si la rubrica o pregunta evalua `@Override`, `super()`, `equals()`, `GROUP BY` o `HAVING`, "
+            "debes enseñarlo explicitamente).\n"
+            "- DESTACADOS VISUALES: Marca entre 3 y 6 conceptos, reglas o palabras clave fundamentales por historia con "
+            "`**negrita**` (ej. `**polimorfismo dinamico**`, `**@Override**`, `**pasa por valor**`)."
+            f"{code_lab_story_rule}\n"
+            "- PROHIBIDO usar listas con vinetas, numeraciones o encabezados markdown: entrega unicamente los parrafos "
+            "de prosa (y el bloque de codigo cercado si es `code_lab`)."
         )
         user_prompt = (
             f"Ramo: {course_title}\n"
+            f"Motor: {engine_type} (lenguaje: {inferred_lang})\n"
             f"Estilo solicitado: {explanation_style}\n"
             f"Metafora del mundo (solo si el estilo es narrative): {metaphor_hint}\n"
             f"Nodo: {node_title} ({node_summary})\n"
-            f"Conceptos que deben quedar claros: {', '.join(rubric_points)}\n"
+            f"Preguntas del nodo que tu explicacion debe respaldar: {' | '.join(prompt_questions)}\n"
+            f"Rubric points OBLIGATORIOS a cubrir y ejemplificar: {', '.join(rubric_points)}\n"
             f"Explicacion anterior (usa otro enfoque/ejemplo distinto manteniendo ~180-240 palabras en 2 a 3 parrafos):\n"
             f"{current_story}\n"
         )
@@ -515,36 +1074,44 @@ def regenerate_story_with_ai(
         return (_strip_bullets(comp.text), comp.provider)
     except AiProviderError:
         concepts_prose = ". Asimismo, ".join(rubric_points) if rubric_points else node_summary
+        code_block_section = (
+            f"\n\n{_fallback_story_code_block(node_title, inferred_lang)}\n\n"
+            if is_code_lab
+            else "\n\n"
+        )
         if explanation_style == "direct":
             alt = _strip_bullets(
-                f"{node_title} en {course_title} define un mecanismo tecnico fundamental cuyo objetivo directo es "
-                f"resolver: {node_summary}. Su operacion se basa en reglas verificables que determinan el comportamiento "
-                f"exacto del sistema sin ambiguedades.\n\n"
-                f"En terminos técnicos, el funcionamiento exige cumplir que {concepts_prose}. Cada parametro y condicion "
-                f"afecta de forma directa la eficiencia, correccion y estabilidad de la implementacion.\n\n"
-                f"Para validar {node_title} en la practica, se comprueba directamente que se cumplan estas propiedades "
-                f"tecnicas ante entradas normales y casos de borde."
+                f"**{node_title}** en {course_title} define un **mecanismo técnico** fundamental cuyo objetivo directo es "
+                f"resolver: {node_summary}. Su operación se basa en **reglas verificables** que determinan el comportamiento "
+                f"exacto del sistema sin ambigüedades.\n\n"
+                f"En términos técnicos, el funcionamiento exige cumplir que {concepts_prose}. Cada **invariante** y condición "
+                f"afecta de forma directa la eficiencia, corrección y estabilidad de la implementación."
+                f"{code_block_section}"
+                f"Para validar **{node_title}** en la práctica, se comprueba directamente que se cumplan estas propiedades "
+                f"técnicas ante entradas normales y **casos de borde**."
             )
         elif explanation_style == "structured":
             alt = _strip_bullets(
-                f"Concepto central: {node_title} dentro de {course_title} establece la base estructural para abordar "
-                f"{node_summary}, definiendo los limites y responsabilidades del componente en el sistema.\n\n"
-                f"Causa y efecto: El mecanismo opera garantizando que {concepts_prose}. Cuando una de estas condiciones "
-                f"varia, el efecto directo se propaga sobre el rendimiento y la consistencia del resultado.\n\n"
-                f"Ejemplo concreto: En una implementacion real de {course_title}, aplicar {node_title} permite verificar "
-                f"paso a paso cada criterio tecnico y diagnosticar con exactitud cualquier desviacion."
+                f"Concepto central: **{node_title}** dentro de {course_title} establece la **base estructural** para abordar "
+                f"{node_summary}, definiendo los límites y responsabilidades del componente en el sistema.\n\n"
+                f"Causa y efecto: El mecanismo opera garantizando que {concepts_prose}. Cuando una de estas **condiciones críticas** "
+                f"varía, el **efecto directo** se propaga sobre el rendimiento y la consistencia del resultado."
+                f"{code_block_section}"
+                f"Ejemplo concreto: En una implementación real de {course_title}, aplicar **{node_title}** permite verificar "
+                f"paso a paso cada criterio técnico y diagnosticar con exactitud cualquier desviación."
             )
         else:
             alt = _strip_bullets(
-                f"Miralo ahora desde otro angulo operativo dentro de {metaphor_hint}. Cuando nos enfrentamos a {node_title} "
-                f"en {course_title}, el error tipico es quedarse en la definicion de memoria en vez de seguir el flujo real "
-                f"del sistema y entender que problema concreto resuelve: {node_summary}.\n\n"
+                f"Míralo ahora desde otro ángulo operativo dentro de {metaphor_hint}. Cuando nos enfrentamos a **{node_title}** "
+                f"en {course_title}, el error típico es quedarse en la definición de memoria en vez de seguir el **flujo real** "
+                f"del sistema y entender qué problema concreto resuelve: {node_summary}.\n\n"
                 f"Imagina que tienes que diagnosticarlo en vivo paso a paso cuando algo falla en {metaphor_hint}: primero "
-                f"confirmas la causa y efecto verificando que {concepts_prose}. Cada una de estas piezas cumple un rol "
-                f"especifico para mantener la estabilidad del diseno.\n\n"
-                f"Al conectar cada mecanismo con su consecuencia practica dentro de {metaphor_hint}, ya no necesitas "
-                f"memorizar definiciones aisladas, porque puedes anticipar que ocurre si una condicion cambia y justificar "
-                f"tu decision tecnica con claridad."
+                f"confirmas la **causa y efecto** verificando que {concepts_prose}. Cada una de estas piezas protege el **invariante** "
+                f"para mantener la estabilidad del diseño."
+                f"{code_block_section}"
+                f"Al conectar cada mecanismo con su **consecuencia práctica** dentro de {metaphor_hint}, ya no necesitas "
+                f"memorizar definiciones aisladas, porque puedes anticipar qué ocurre si una condición cambia y justificar "
+                f"tu decisión técnica con claridad."
             )
         return (alt, "local_fallback")
 
@@ -694,10 +1261,13 @@ def regenerate_questions_with_ai(
     code_lab_regen_rule = ""
     if is_code_lab:
         code_lab_regen_rule = (
-            f"\n4. MODO `code_lab` ACTIVO (lenguaje `{inferred_lang}`): Manten o varia los tipos de reto "
+            f"\n5. MODO `code_lab` ACTIVO (lenguaje `{inferred_lang}`): Manten o varia los tipos de reto "
             "(`\"challenge_type\": \"debug\" | \"implement\" | \"trace\" | \"concept\"`, "
             f"`\"language\": \"{inferred_lang}\"`) respetando estrictamente estas reglas de `starter_code`:\n"
-            "   - `debug` y `trace`: SI incluyen un NUEVO codigo completo y distinto al anterior en `starter_code`.\n"
+            "   - `debug` y `trace`: SI incluyen un NUEVO codigo completo y distinto al anterior en `starter_code`, "
+            "SIEMPRE formateado en multiples lineas con `\\n` e indentacion limpia de 2/4 espacios (NUNCA todo en una sola linea).\n"
+            "   - PROHIBIDO DUPLICAR CODIGO EN `question`: Cuando exista `starter_code` (`debug` o `trace`), "
+            "`question` NUNCA debe repetir ni incluir el codigo (solo debe indicar la tarea: que bug corregir o que trazar).\n"
             "   - `implement` en nodos basicos/intermedios (clases, constructores, arreglos, herencia basica, "
             "excepciones basicas): `starter_code` DEBE ir vacio (`\"\"`) o solo un comentario de 1 linea "
             "(`// Implementa tu solución en Java aquí`) — PROHIBIDO regalar el esqueleto resuelto de la clase/metodos con `// TODO`.\n"
@@ -714,7 +1284,9 @@ def regenerate_questions_with_ai(
             "REGLAS OBLIGATORIAS:\n"
             "1. Conserva los mismos `id` y los mismos `rubric_points` de cada item.\n"
             "2. Cambia por completo la formulacion de cada `question` respetando el estilo solicitado.\n"
-            "3. Responde UNICAMENTE un objeto JSON valido con la clave `eval_prompts`:\n"
+            "3. CONTRATO ESTRICTO DE COBERTURA: PROHIBIDO exigir en las preguntas o en el codigo anotaciones, clases, "
+            "sintaxis o conceptos que NO esten presentes y explicados en `story_script` ni en `node_summary`.\n"
+            "4. Responde UNICAMENTE un objeto JSON valido con la clave `eval_prompts`:\n"
             '{"eval_prompts": [{"id": "q1", "question": "Nueva pregunta...", "rubric_points": ["..."], '
             '"challenge_type": "concept", "language": "text", "starter_code": null}]}'
             f"{code_lab_regen_rule}"
@@ -801,14 +1373,17 @@ def regenerate_questions_with_ai(
                     idx=idx + 1,
                 )
 
+            final_starter = starter if ct in ("debug", "implement", "trace") else None
+            clean_q, clean_starter = sanitize_code_prompt(candidate_q, final_starter, lang)
+
             updated.append(
                 {
                     "id": qid,
-                    "question": candidate_q,
+                    "question": clean_q,
                     "rubric_points": pts,
                     "challenge_type": ct,
                     "language": lang,
-                    "starter_code": starter if ct in ("debug", "implement", "trace") else None,
+                    "starter_code": clean_starter,
                 }
             )
         return (updated, comp.provider)
@@ -860,14 +1435,15 @@ def regenerate_questions_with_ai(
                 if ct in ("debug", "implement", "trace")
                 else None
             )
+            clean_q, clean_starter = sanitize_code_prompt(new_q, starter, lang)
             updated_fallback.append(
                 {
                     "id": qid,
-                    "question": new_q,
+                    "question": clean_q,
                     "rubric_points": pts,
                     "challenge_type": ct,
                     "language": lang,
-                    "starter_code": starter,
+                    "starter_code": clean_starter,
                 }
             )
         return (updated_fallback, "local_fallback")

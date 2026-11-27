@@ -1,6 +1,11 @@
+import { isValidElement, useMemo, useState, type ReactNode } from 'react'
+import CodeMirror from '@uiw/react-codemirror'
+import { oneDark } from '@codemirror/theme-one-dark'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ArrowRight } from 'lucide-react'
+import { ArrowRight, Check, Copy } from 'lucide-react'
+import { useAppStore } from '../../store/useAppStore'
+import { getLanguageExtension } from '../study/CodeChallengeInput'
 
 interface Props {
   content: string
@@ -21,6 +26,94 @@ function preprocessNodeLinks(raw: string): string {
     const title = rawTitle.trim()
     return `[${id} · ${title}](${NODE_HREF_PREFIX}${encodeURIComponent(id)})`
   })
+}
+
+function inferCodeLanguage(rawLang: string | null, code: string): string {
+  if (rawLang) {
+    const low = rawLang.trim().toLowerCase()
+    if (low === 'java' || low === 'sql' || low === 'python' || low === 'py' || low === 'c' || low === 'cpp' || low === 'c++') {
+      return low === 'py' ? 'python' : low
+    }
+    return low
+  }
+  if (/\b(?:public\s+class|System\.out\.|@Override|try\s*\{|catch\s*\()\b/.test(code)) return 'java'
+  if (/\b(?:SELECT\s+.+\s+FROM|CREATE\s+TABLE|GROUP\s+BY)\b/i.test(code)) return 'sql'
+  if (/\b(?:def\s+\w+\(|import\s+\w+|elif\s+)\b/.test(code)) return 'python'
+  return 'text'
+}
+
+function extractText(node: ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(extractText).join('')
+  if (isValidElement<{ children?: ReactNode }>(node)) {
+    return extractText(node.props.children)
+  }
+  return ''
+}
+
+function MarkdownCodeBlock({ code, language }: { code: string; language: string | null }) {
+  const theme = useAppStore((s) => s.theme)
+  const [copied, setCopied] = useState(false)
+  const cleanedCode = code.replace(/\n$/, '')
+  const detectedLang = useMemo(
+    () => inferCodeLanguage(language, cleanedCode),
+    [language, cleanedCode],
+  )
+  const extensions = useMemo(
+    () => (detectedLang === 'text' ? [] : getLanguageExtension(detectedLang)),
+    [detectedLang],
+  )
+  const cmTheme = theme === 'dark' ? oneDark : 'light'
+  const langLabel = detectedLang === 'text' ? 'CÓDIGO' : detectedLang.toUpperCase()
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(cleanedCode)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1600)
+    } catch {
+      // Clipboard no disponible en entorno restringido
+    }
+  }
+
+  return (
+    <div className="my-2 overflow-hidden rounded-md border border-slate-300 bg-white dark:border-slate-700 dark:bg-slate-950">
+      <div className="flex items-center justify-between gap-2 border-b border-slate-200 bg-slate-100 px-2.5 py-1 text-[11px] text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
+        <span className="font-mono font-semibold uppercase tracking-wide">{langLabel}</span>
+        <button
+          type="button"
+          onClick={() => void handleCopy()}
+          className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium hover:bg-slate-200/80 dark:hover:bg-slate-800"
+        >
+          {copied ? (
+            <>
+              <Check size={12} className="text-emerald-600 dark:text-emerald-400" />
+              Copiado
+            </>
+          ) : (
+            <>
+              <Copy size={12} />
+              Copiar
+            </>
+          )}
+        </button>
+      </div>
+      <div className="text-xs">
+        <CodeMirror
+          value={cleanedCode}
+          editable={false}
+          readOnly={true}
+          theme={cmTheme}
+          extensions={extensions}
+          basicSetup={{
+            lineNumbers: true,
+            foldGutter: false,
+            highlightActiveLine: false,
+          }}
+        />
+      </div>
+    </div>
+  )
 }
 
 export default function MarkdownView({ content, onSelectNode, className = '' }: Props) {
@@ -64,13 +157,10 @@ export default function MarkdownView({ content, onSelectNode, className = '' }: 
             </blockquote>
           ),
           code: ({ className: codeClass, children }) => {
-            const isBlock = Boolean(codeClass && codeClass.includes('language-'))
-            if (isBlock) {
-              return (
-                <code className="block overflow-x-auto rounded-md bg-slate-900 p-2.5 font-mono text-xs text-slate-100 dark:bg-slate-950">
-                  {children}
-                </code>
-              )
+            const langMatch = codeClass?.match(/language-([a-zA-Z0-9+#_-]+)/)
+            const rawText = extractText(children)
+            if (langMatch || rawText.includes('\n')) {
+              return <MarkdownCodeBlock code={rawText} language={langMatch?.[1] ?? null} />
             }
             return (
               <code className="rounded bg-slate-200/80 px-1 py-0.5 font-mono text-xs text-slate-900 dark:bg-slate-700/80 dark:text-slate-100">
@@ -78,11 +168,14 @@ export default function MarkdownView({ content, onSelectNode, className = '' }: 
               </code>
             )
           },
-          pre: ({ children }) => (
-            <pre className="my-2 overflow-x-auto rounded-md bg-slate-900 p-2.5 font-mono text-xs text-slate-100 dark:bg-slate-950">
-              {children}
-            </pre>
-          ),
+          pre: ({ children }) => {
+            if (isValidElement<{ className?: string; children?: ReactNode }>(children)) {
+              const langMatch = children.props.className?.match(/language-([a-zA-Z0-9+#_-]+)/)
+              const rawText = extractText(children.props.children)
+              return <MarkdownCodeBlock code={rawText} language={langMatch?.[1] ?? null} />
+            }
+            return <MarkdownCodeBlock code={extractText(children)} language={null} />
+          },
           table: ({ children }) => (
             <div className="my-2 overflow-x-auto">
               <table className="w-full border-collapse border border-slate-300 text-xs dark:border-slate-700">

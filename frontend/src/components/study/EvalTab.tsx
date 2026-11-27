@@ -1,12 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
+import CodeMirror from '@uiw/react-codemirror'
+import { oneDark } from '@codemirror/theme-one-dark'
 import {
   AlertTriangle,
+  ArrowLeft,
   ArrowRight,
+  Bug,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   CircleX,
+  Code2,
+  Compass,
   Cpu,
   EyeOff,
   Info,
+  Layers,
   Loader2,
   MessageCircle,
   MessageSquare,
@@ -14,6 +23,8 @@ import {
   RotateCcw,
   Send,
   Shuffle,
+  Terminal,
+  Wrench,
 } from 'lucide-react'
 import {
   inCooldown,
@@ -25,11 +36,14 @@ import {
   type EvaluateResponse,
   type NodeProgress,
   type PackNode,
+  type PromptReviewItem,
+  type PromptReviewStatus,
 } from '../../api/study'
 import type { QuestionStyle } from '../../api/curriculum'
+import { useAppStore } from '../../store/useAppStore'
 import { useStudyStore } from '../../store/useStudyStore'
 import MarkdownView from '../common/MarkdownView'
-import CodeChallengeInput from './CodeChallengeInput'
+import CodeChallengeInput, { getLanguageExtension, sanitizeCodePrompt } from './CodeChallengeInput'
 import { formatRemaining, useNow } from './studyUtils'
 
 interface Props {
@@ -72,7 +86,8 @@ function buildInitialAnswers(prompts: EvalPrompt[]): Record<string, string> {
   const init: Record<string, string> = {}
   for (const p of prompts) {
     if ((p.challenge_type === 'debug' || p.challenge_type === 'implement') && p.starter_code) {
-      init[p.id] = p.starter_code
+      const { starterCode } = sanitizeCodePrompt(p.question, p.starter_code, p.language)
+      init[p.id] = starterCode
     }
   }
   return init
@@ -82,7 +97,8 @@ function isPromptEditedOrAnswered(q: EvalPrompt, answers: Record<string, string>
   const val = (answers[q.id] ?? '').trim()
   if (val.length === 0) return false
   if ((q.challenge_type === 'debug' || q.challenge_type === 'implement') && q.starter_code) {
-    return val !== q.starter_code.trim()
+    const { starterCode } = sanitizeCodePrompt(q.question, q.starter_code, q.language)
+    return val !== starterCode.trim()
   }
   return true
 }
@@ -299,45 +315,52 @@ export default function EvalTab({
               Revisión manual de rúbrica: verifica con honestidad qué criterios cubriste antes de confirmar la nota.
             </span>
           </div>
-          {order.map((q) => (
-            <fieldset
-              key={q.id}
-              className="min-w-0 rounded-md border border-slate-200 p-3 dark:border-slate-700"
-            >
-              <legend className="break-words px-1 text-sm font-medium">{q.question}</legend>
-              <p className="mb-2 whitespace-pre-wrap break-words rounded bg-slate-100 p-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                {answers[q.id]?.trim() || 'Sin respuesta'}
-              </p>
-              <ul className="flex flex-col gap-1.5">
-                {q.rubric_points.map((pt, i) => {
-                  const k = `${q.id}::${i}`
-                  const on = covered.has(k)
-                  return (
-                    <li key={k}>
-                      <label className="flex cursor-pointer items-start gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={on}
-                          onChange={() => toggle(k)}
-                          className="mt-1"
-                        />
-                        <span
-                          className={`inline-flex items-start gap-1 break-words ${on ? '' : 'text-slate-600 dark:text-slate-400'}`}
-                        >
-                          {on ? (
-                            <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-500" />
-                          ) : (
-                            <CircleX size={14} className="mt-0.5 shrink-0 text-rose-500" />
-                          )}
-                          {pt}
-                        </span>
-                      </label>
-                    </li>
-                  )
-                })}
-              </ul>
-            </fieldset>
-          ))}
+          {order.map((q) => {
+            const { question: cleanQ } = sanitizeCodePrompt(
+              q.question,
+              q.starter_code,
+              q.language,
+            )
+            return (
+              <fieldset
+                key={q.id}
+                className="min-w-0 rounded-md border border-slate-200 p-3 dark:border-slate-700"
+              >
+                <legend className="break-words px-1 text-sm font-medium">{cleanQ}</legend>
+                <p className="mb-2 whitespace-pre-wrap break-words rounded bg-slate-100 p-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                  {answers[q.id]?.trim() || 'Sin respuesta'}
+                </p>
+                <ul className="flex flex-col gap-1.5">
+                  {q.rubric_points.map((pt, i) => {
+                    const k = `${q.id}::${i}`
+                    const on = covered.has(k)
+                    return (
+                      <li key={k}>
+                        <label className="flex cursor-pointer items-start gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            onChange={() => toggle(k)}
+                            className="mt-1"
+                          />
+                          <span
+                            className={`inline-flex items-start gap-1 break-words ${on ? '' : 'text-slate-600 dark:text-slate-400'}`}
+                          >
+                            {on ? (
+                              <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-500" />
+                            ) : (
+                              <CircleX size={14} className="mt-0.5 shrink-0 text-rose-500" />
+                            )}
+                            {pt}
+                          </span>
+                        </label>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </fieldset>
+            )
+          })}
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-sm">
               Nota:{' '}
@@ -375,6 +398,8 @@ export default function EvalTab({
       {phase === 'result' && result && (
         <Result
           nodeTitle={node.title}
+          orderedPrompts={order}
+          answers={answers}
           result={result}
           now={now}
           nextNode={nextNode}
@@ -392,6 +417,8 @@ export default function EvalTab({
 
 function Result({
   nodeTitle,
+  orderedPrompts,
+  answers,
   result,
   now,
   nextNode,
@@ -403,6 +430,8 @@ function Result({
   onAskTutor,
 }: {
   nodeTitle: string
+  orderedPrompts: EvalPrompt[]
+  answers: Record<string, string>
   result: EvaluateResponse
   now: number
   nextNode?: PackNode | null
@@ -413,15 +442,23 @@ function Result({
   onBackToStory: () => void
   onAskTutor: (ctx: { prompt: string; banner: string; autoSend?: boolean }) => void
 }) {
+  const theme = useAppStore((s) => s.theme)
+  const cmTheme = theme === 'dark' ? oneDark : 'light'
   const [quickQuestion, setQuickQuestion] = useState('')
+  const [selectedIdx, setSelectedIdx] = useState(0)
+  const [showAll, setShowAll] = useState(false)
+  const [openSolutions, setOpenSolutions] = useState<Record<string, boolean>>({})
+
   const p = result.progress
   const cooling = inCooldown(p, now)
   const remaining = cooling ? formatRemaining(new Date(p.next_review_at!).getTime() - now) : null
   const feedback = result.feedback
-  const coveredPoints = feedback.filter((f) => f.covered)
   const missed = feedback.filter((f) => !f.covered)
   const imprecisions = result.imprecisions ?? []
   const isFallback = !result.evaluated_by || result.evaluated_by === 'local_fallback'
+  const reviewsById = new Map<string, PromptReviewItem>(
+    (result.prompt_reviews ?? []).map((r) => [r.prompt_id, r]),
+  )
 
   let message: string
   if (result.counted_mastery) {
@@ -444,6 +481,23 @@ function Result({
     message = `No alcanza ${PASS_SCORE.toFixed(1)}. Tu nivel (${p.mastery_level}/3) no baja; repasa lo que faltó y reintenta.`
   }
 
+  const getQuestionStatus = (q: EvalPrompt): PromptReviewStatus => {
+    const rev = reviewsById.get(q.id)
+    if (rev && (rev.status === 'passed' || rev.status === 'partial' || rev.status === 'failed')) {
+      return rev.status
+    }
+    const qFb = feedback.filter((f) => f.prompt_id === q.id)
+    if (qFb.length === 0) return result.passed ? 'passed' : 'failed'
+    const covCount = qFb.filter((f) => f.covered).length
+    if (covCount === qFb.length) return 'passed'
+    if (covCount === 0) return 'failed'
+    return 'partial'
+  }
+
+  const toggleSolution = (promptId: string) => {
+    setOpenSolutions((prev) => ({ ...prev, [promptId]: !prev[promptId] }))
+  }
+
   const buildCorrectionBanner = () => {
     const missedSummary =
       missed.length > 0
@@ -453,6 +507,13 @@ function Result({
       imprecisions.length > 0 ? ` Imprecisiones: ${imprecisions.join('; ')}.` : ''
     return `Corrección en "${nodeTitle}": Nota ${result.score.toFixed(1)}/10. ${missedSummary}${impSummary}`
   }
+
+  const safeSelectedIdx = Math.min(Math.max(0, selectedIdx), Math.max(0, orderedPrompts.length - 1))
+  const visiblePrompts = showAll
+    ? orderedPrompts.map((q, idx) => ({ q, idx }))
+    : orderedPrompts[safeSelectedIdx]
+      ? [{ q: orderedPrompts[safeSelectedIdx], idx: safeSelectedIdx }]
+      : []
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
@@ -476,6 +537,18 @@ function Result({
         </div>
       </div>
 
+      {result.routing_suggestion && (
+        <div className="flex items-start gap-2.5 rounded-md border border-indigo-200 bg-indigo-50/75 px-3 py-2.5 text-xs text-indigo-950 dark:border-indigo-800/80 dark:bg-indigo-950/40 dark:text-indigo-200">
+          <Compass size={15} className="mt-0.5 shrink-0 text-indigo-600 dark:text-indigo-400" />
+          <div className="min-w-0">
+            <span className="font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-300">
+              Siguiente paso sugerido:{' '}
+            </span>
+            <span className="break-words">{result.routing_suggestion}</span>
+          </div>
+        </div>
+      )}
+
       {isFallback && (
         <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
           <Info size={14} className="mt-0.5 shrink-0" />
@@ -486,43 +559,370 @@ function Result({
         </div>
       )}
 
-      {coveredPoints.length > 0 && (
-        <div>
-          <div className="mb-1 text-sm font-medium">
-            Puntos acertados ({coveredPoints.length}/{feedback.length})
-          </div>
-          <ul className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-300">
-            {coveredPoints.map((c, i) => (
-              <li key={i} className="flex items-start gap-1.5 break-words">
-                <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-500" /> {c.point}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {orderedPrompts.length > 0 && (
+        <div className="flex flex-col gap-3 rounded-md border border-slate-200 bg-slate-50/60 p-3 dark:border-slate-700 dark:bg-slate-800/40">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-1.5" role="tablist" aria-label="Revisión por pregunta">
+              {orderedPrompts.map((q, idx) => {
+                const st = getQuestionStatus(q)
+                const isSelected = !showAll && idx === safeSelectedIdx
+                const badgeColors =
+                  st === 'passed'
+                    ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700/80 dark:bg-emerald-950/50 dark:text-emerald-300'
+                    : st === 'partial'
+                      ? 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700/80 dark:bg-amber-950/50 dark:text-amber-200'
+                      : 'border-rose-300 bg-rose-50 text-rose-800 dark:border-rose-700/80 dark:bg-rose-950/50 dark:text-rose-300'
 
-      {missed.length > 0 && (
-        <div>
-          <div className="mb-1 text-sm font-medium">Qué faltó</div>
-          <ul className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-300">
-            {missed.map((m, i) => (
-              <li key={i} className="flex items-start gap-1.5 break-words">
-                <CircleX size={14} className="mt-0.5 shrink-0 text-rose-500" /> {m.point}
-              </li>
-            ))}
-          </ul>
+                return (
+                  <button
+                    key={q.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={isSelected}
+                    onClick={() => {
+                      setShowAll(false)
+                      setSelectedIdx(idx)
+                    }}
+                    className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors ${badgeColors} ${
+                      isSelected
+                        ? 'ring-2 ring-slate-900 dark:ring-slate-100'
+                        : 'opacity-85 hover:opacity-100'
+                    }`}
+                  >
+                    {st === 'passed' ? (
+                      <CheckCircle2 size={13} className="shrink-0 text-emerald-600 dark:text-emerald-400" />
+                    ) : st === 'partial' ? (
+                      <AlertTriangle size={13} className="shrink-0 text-amber-600 dark:text-amber-400" />
+                    ) : (
+                      <CircleX size={13} className="shrink-0 text-rose-600 dark:text-rose-400" />
+                    )}
+                    <span>Pregunta {idx + 1}</span>
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              {!showAll && orderedPrompts.length > 1 && (
+                <>
+                  <button
+                    type="button"
+                    disabled={safeSelectedIdx === 0}
+                    onClick={() => setSelectedIdx((i) => Math.max(0, i - 1))}
+                    className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                  >
+                    <ArrowLeft size={12} />
+                    Anterior
+                  </button>
+                  <button
+                    type="button"
+                    disabled={safeSelectedIdx >= orderedPrompts.length - 1}
+                    onClick={() => setSelectedIdx((i) => Math.min(orderedPrompts.length - 1, i + 1))}
+                    className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                  >
+                    Siguiente
+                    <ArrowRight size={12} />
+                  </button>
+                </>
+              )}
+              {orderedPrompts.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => setShowAll((v) => !v)}
+                  className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                >
+                  <Layers size={12} />
+                  {showAll ? 'Revisar una a una' : 'Ver todas'}
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-4">
+            {visiblePrompts.map(({ q, idx }) => {
+              const rev = reviewsById.get(q.id)
+              const st = getQuestionStatus(q)
+              const { question: cleanQuestion, starterCode: cleanStarter } = sanitizeCodePrompt(
+                q.question,
+                q.starter_code,
+                q.language,
+              )
+              const studentAnswer = (answers[q.id] ?? '').trim()
+              const ct = q.challenge_type ?? 'concept'
+              const isCodeEditorChallenge = ct === 'debug' || ct === 'implement'
+              const isTraceChallenge = ct === 'trace'
+              const langLabel = (q.language && q.language !== 'text' ? q.language : 'java').toUpperCase()
+              const extensions = getLanguageExtension(q.language)
+
+              const qFeedback = feedback.filter((f) => f.prompt_id === q.id)
+              const rubricItems =
+                qFeedback.length > 0
+                  ? qFeedback
+                  : q.rubric_points.map((pt, pIdx) => ({
+                      prompt_id: q.id,
+                      point_index: pIdx,
+                      point: pt,
+                      covered: st === 'passed',
+                    }))
+
+              const coveredInQ = rubricItems.filter((f) => f.covered).length
+              const missedInQ = rubricItems.filter((f) => !f.covered)
+              const diagnosisText =
+                rev?.diagnosis ||
+                (st === 'passed'
+                  ? 'Respuesta correcta: cubriste con precisión todos los criterios evaluados en esta pregunta.'
+                  : missedInQ.length > 0
+                    ? `Faltó incorporar: ${missedInQ.map((m) => m.point).join('; ')}.`
+                    : 'Revisa las observaciones técnicas para completar esta pregunta.')
+
+              const codeFixes = rev?.code_fixes ?? []
+              const correctedSolution = rev?.corrected_solution?.trim() || null
+              const isSolutionOpen = Boolean(openSolutions[q.id])
+
+              const statusBadge =
+                st === 'passed'
+                  ? {
+                      label: 'Correcta',
+                      cls: 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300',
+                    }
+                  : st === 'partial'
+                    ? {
+                        label: 'Parcial',
+                        cls: 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/60 dark:text-amber-200',
+                      }
+                    : {
+                        label: 'Por corregir',
+                        cls: 'border-rose-300 bg-rose-50 text-rose-800 dark:border-rose-700 dark:bg-rose-950/60 dark:text-rose-300',
+                      }
+
+              return (
+                <div
+                  key={q.id}
+                  className="flex min-w-0 flex-col gap-3 rounded-md border border-slate-200 bg-white p-3.5 dark:border-slate-700 dark:bg-slate-900/80"
+                >
+                  {/* 1. Enunciado exacto de la pregunta */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2 dark:border-slate-800">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                        Pregunta {idx + 1} de {orderedPrompts.length}
+                      </span>
+                      {ct !== 'concept' && (
+                        <span className="inline-flex items-center gap-1 rounded border border-slate-300 bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                          {ct === 'debug' ? (
+                            <Bug size={11} />
+                          ) : ct === 'trace' ? (
+                            <Terminal size={11} />
+                          ) : (
+                            <Code2 size={11} />
+                          )}
+                          {ct} · {langLabel}
+                        </span>
+                      )}
+                    </div>
+                    <span
+                      className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[11px] font-semibold ${statusBadge.cls}`}
+                    >
+                      {st === 'passed' ? (
+                        <CheckCircle2 size={12} />
+                      ) : st === 'partial' ? (
+                        <AlertTriangle size={12} />
+                      ) : (
+                        <CircleX size={12} />
+                      )}
+                      {statusBadge.label} ({coveredInQ}/{rubricItems.length} criterios)
+                    </span>
+                  </div>
+
+                  <div className="break-words text-sm font-medium text-slate-900 dark:text-slate-100">
+                    {cleanQuestion}
+                  </div>
+
+                  {isTraceChallenge && cleanStarter && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                        Código trazado
+                      </span>
+                      <div className="overflow-hidden rounded-md border border-slate-300 text-xs dark:border-slate-700">
+                        <CodeMirror
+                          value={cleanStarter}
+                          editable={false}
+                          readOnly={true}
+                          theme={cmTheme}
+                          extensions={extensions}
+                          basicSetup={{
+                            lineNumbers: true,
+                            foldGutter: false,
+                            highlightActiveLine: false,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 2. Tu respuesta */}
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                      Tu respuesta
+                    </span>
+                    {isCodeEditorChallenge ? (
+                      <div className="overflow-hidden rounded-md border border-slate-300 text-xs dark:border-slate-700">
+                        <CodeMirror
+                          value={studentAnswer || cleanStarter || '// Sin respuesta'}
+                          editable={false}
+                          readOnly={true}
+                          theme={cmTheme}
+                          extensions={extensions}
+                          basicSetup={{
+                            lineNumbers: true,
+                            foldGutter: false,
+                            highlightActiveLine: false,
+                          }}
+                        />
+                      </div>
+                    ) : (
+                      <div className="whitespace-pre-wrap break-words rounded-md border border-slate-200 bg-slate-50 p-2.5 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-200">
+                        {studentAnswer || 'Sin respuesta registrada.'}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 3. Puntos de rubrica solo de esa pregunta */}
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                      Rúbrica de esta pregunta ({coveredInQ}/{rubricItems.length})
+                    </span>
+                    <ul className="flex flex-col gap-1 text-xs">
+                      {rubricItems.map((item) => (
+                        <li
+                          key={`${item.prompt_id}::${item.point_index}`}
+                          className={`flex items-start gap-2 rounded px-2 py-1.5 break-words ${
+                            item.covered
+                              ? 'bg-emerald-50/70 text-emerald-950 dark:bg-emerald-950/30 dark:text-emerald-200'
+                              : 'bg-rose-50/70 text-rose-950 dark:bg-rose-950/30 dark:text-rose-200'
+                          }`}
+                        >
+                          {item.covered ? (
+                            <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                          ) : (
+                            <CircleX size={14} className="mt-0.5 shrink-0 text-rose-600 dark:text-rose-400" />
+                          )}
+                          <span>{item.point}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  {/* 4. Diagnostico especifico de esa pregunta */}
+                  <div className="rounded-md border border-slate-200 bg-slate-50/80 p-2.5 text-xs dark:border-slate-700 dark:bg-slate-800/50">
+                    <div className="mb-1 font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-300">
+                      Diagnóstico
+                    </div>
+                    <p className="break-words leading-relaxed text-slate-800 dark:text-slate-200">
+                      {diagnosisText}
+                    </p>
+                  </div>
+
+                  {/* 5. Si existen code_fixes: tarjetas de cambio puntual */}
+                  {codeFixes.length > 0 && (
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-300">
+                        <Wrench size={13} />
+                        Correcciones línea por línea ({codeFixes.length})
+                      </div>
+                      {codeFixes.map((fix, fIdx) => (
+                        <div
+                          key={fIdx}
+                          className="flex flex-col gap-2 rounded-md border border-amber-200 bg-amber-50/40 p-2.5 text-xs dark:border-amber-800/70 dark:bg-amber-950/25"
+                        >
+                          <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                            <div className="flex min-w-0 flex-col gap-1">
+                              <span className="text-[11px] font-semibold text-rose-700 dark:text-rose-300">
+                                Tu código
+                              </span>
+                              <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded border border-rose-200 bg-rose-50/80 p-2 font-mono text-[11px] text-rose-950 dark:border-rose-800/70 dark:bg-rose-950/50 dark:text-rose-200">
+                                {fix.broken_snippet}
+                              </pre>
+                            </div>
+                            <div className="flex min-w-0 flex-col gap-1">
+                              <span className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+                                Cambio necesario
+                              </span>
+                              <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded border border-emerald-200 bg-emerald-50/80 p-2 font-mono text-[11px] text-emerald-950 dark:border-emerald-800/70 dark:bg-emerald-950/50 dark:text-emerald-200">
+                                {fix.fixed_snippet}
+                              </pre>
+                            </div>
+                          </div>
+                          <div className="break-words text-xs text-slate-700 dark:text-slate-200">
+                            <strong className="font-semibold text-slate-900 dark:text-white">
+                              Por qué:{' '}
+                            </strong>
+                            {fix.why}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* 6. Si existe corrected_solution: acordeon colapsado "Ver solucion de referencia" */}
+                  {correctedSolution && (
+                    <div className="flex flex-col gap-2">
+                      <button
+                        type="button"
+                        onClick={() => toggleSolution(q.id)}
+                        className="inline-flex w-fit items-center gap-1.5 rounded border border-slate-300 bg-slate-100 px-2.5 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-200/80 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                      >
+                        {isSolutionOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                        {isSolutionOpen
+                          ? 'Ocultar solución de referencia'
+                          : 'Ver solución de referencia'}
+                      </button>
+                      {isSolutionOpen && (
+                        <div className="rounded-md border border-slate-300 bg-slate-50 p-2.5 dark:border-slate-700 dark:bg-slate-900">
+                          {isCodeEditorChallenge ? (
+                            <div className="overflow-hidden rounded border border-slate-300 text-xs dark:border-slate-700">
+                              <CodeMirror
+                                value={correctedSolution}
+                                editable={false}
+                                readOnly={true}
+                                theme={cmTheme}
+                                extensions={extensions}
+                                basicSetup={{
+                                  lineNumbers: true,
+                                  foldGutter: false,
+                                  highlightActiveLine: false,
+                                }}
+                              />
+                            </div>
+                          ) : (
+                            <MarkdownView
+                              content={correctedSolution}
+                              className="text-slate-800 dark:text-slate-200"
+                            />
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
         </div>
       )}
 
       {imprecisions.length > 0 && (
         <div>
-          <div className="mb-1 text-sm font-medium">Imprecisiones detectadas</div>
+          <div className="mb-1 text-sm font-medium">Observaciones globales del intento</div>
           <ul className="flex flex-col gap-1 text-sm text-amber-800 dark:text-amber-300">
-            {imprecisions.map((imp, i) => (
-              <li key={i} className="flex items-start gap-1.5 break-words">
-                <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-500" /> {imp}
-              </li>
-            ))}
+            {imprecisions.map((imp, i) => {
+              const cleanedImp = imp.replace(/^(?:q\d+|p\d+)(?:::\d+)?\s*[:\-–]\s*/i, '').trim()
+              return (
+                <li key={i} className="flex items-start gap-1.5 break-words">
+                  <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-500" />{' '}
+                  {cleanedImp || imp}
+                </li>
+              )
+            })}
           </ul>
         </div>
       )}
