@@ -1238,3 +1238,221 @@ def test_strip_code_blocks_and_markdown_for_tts_and_code_lab_story_regeneration(
     assert "**" in new_story
     assert "```java" in new_story
     assert "    private final String" in new_story
+
+
+def test_detect_engine_type_identifies_language_studio_english_course() -> None:
+    from app.services.ingest import ExtractedChunk, detect_engine_type
+
+    eng_chunks = [
+        ExtractedChunk(
+            source_file="unit1_grammar.md",
+            section_title="Unit 1: Present Simple & Verb to be",
+            content=(
+                "Grammar and vocabulary review: use Present Simple for daily routines and habits. "
+                "Remember third person -s, do/does in questions, there is / there are and quantifiers "
+                "(some, any, much, many). Includes listening and speaking practice."
+            ),
+        )
+    ]
+
+    assert detect_engine_type("ING9001", "Inglés 1 · Grammar & Vocabulary", eng_chunks) == (
+        "language_studio",
+        "en",
+    )
+    # También detecta por contenido de gramática/vocabulario aunque el código sea libre
+    assert detect_engine_type("LIBRE01", "Preparation Workshop", eng_chunks) == (
+        "language_studio",
+        "en",
+    )
+    # No confunde un ramo técnico normal sin señales de idioma
+    net_chunks = [
+        ExtractedChunk(
+            source_file="redes.md",
+            section_title="Modelo OSI",
+            content="Las tramas Ethernet operan en la capa de enlace mediante direcciones MAC.",
+        )
+    ]
+    assert detect_engine_type("INF2324", "Redes de Computadores", net_chunks) == (
+        "concept_tree",
+        "text",
+    )
+
+
+def test_language_studio_local_ingest_and_bilingual_evaluation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import ai_router
+
+    english_notes = (
+        b"# Unit 1: Present Simple and Daily Routines\n"
+        b"Grammar focus: Verb to be (am/is/are) and Present Simple affirmative, negative (don't/doesn't) "
+        b"and interrogative (do/does). Third person singular adds -s/-es.\n\n"
+        b"# Unit 2: There is / There are and Quantifiers\n"
+        b"Vocabulary: classroom objects and study habits. Use some in affirmative sentences and any in "
+        b"negative sentences and questions with countable and uncountable nouns.\n"
+    )
+
+    ing = client.post(
+        "/api/v1/courses/ingest-local",
+        data={
+            "course_code": "ING9001",
+            "title": "Inglés 1",
+            "engine_type": "language_studio",
+        },
+        files=[("files", ("ing9001_units.md", english_notes, "text/markdown"))],
+    )
+    assert ing.status_code == 200
+    ing_data = ing.json()
+    assert ing_data["engine_type"] == "language_studio"
+    assert ing_data["detected_language"] == "en"
+    cid = ing_data["course_id"]
+
+    tree_res = client.get(f"/api/v1/courses/{cid}/tree")
+    assert tree_res.status_code == 200
+    tree = tree_res.json()
+    assert tree["engine_type"] == "language_studio"
+    assert len(tree["nodes"]) >= 6
+
+    first_node = tree["nodes"][0]
+    assert "**" in first_node["story_script"]
+    assert "```en" in first_node["story_script"]
+    challenge_types = {p["challenge_type"] for p in first_node["eval_prompts"]}
+    assert {"fill_blank", "translate", "speaking_prompt"}.issubset(challenge_types)
+    assert all(p["language"] == "en" for p in first_node["eval_prompts"])
+
+    captured_system_prompts: list[str] = []
+
+    def fake_complete_chat(messages: list[dict[str, str]], **_kwargs: Any) -> AiCompletion:
+        captured_system_prompts.append(messages[0]["content"])
+        prompts = first_node["eval_prompts"]
+        payload = {
+            "score": 7.8,
+            "covered_points": [f"{prompts[0]['id']}::0", f"{prompts[1]['id']}::0", f"{prompts[2]['id']}::0"],
+            "imprecisions": ["En la segunda respuesta faltó agregar -s en tercera persona singular ('studies')."],
+            "re_explanation": "",
+            "routing_suggestion": "Buen dominio comunicativo; repasa la -s de tercera persona antes de avanzar.",
+            "prompt_reviews": [
+                {
+                    "prompt_id": prompts[0]["id"],
+                    "status": "passed",
+                    "diagnosis": "Completaste correctamente el cuantificador y el verbo.",
+                    "code_fixes": [],
+                    "corrected_solution": None,
+                },
+                {
+                    "prompt_id": prompts[1]["id"],
+                    "status": "partial",
+                    "diagnosis": "Estructura clara, pero omitiste la conjugación de tercera persona singular.",
+                    "code_fixes": [
+                        {
+                            "broken_snippet": "She study in the library every morning.",
+                            "fixed_snippet": "She studies in the library every morning.",
+                            "why": "Este cambio corrige la conjugación en Present Simple para tercera persona singular (she).",
+                        }
+                    ],
+                    "corrected_solution": "She studies in the library every morning and reviews her vocabulary notes.",
+                },
+                {
+                    "prompt_id": prompts[2]["id"],
+                    "status": "passed",
+                    "diagnosis": "Respuesta fluida en inglés con vocabulario pertinente a tu rutina.",
+                    "code_fixes": [],
+                    "corrected_solution": None,
+                },
+            ],
+        }
+        return AiCompletion(text=json.dumps(payload), provider="groq", model="llama-3.3-70b-versatile")
+
+    monkeypatch.setattr(ai_router, "complete_chat", fake_complete_chat)
+
+    ev = client.post(
+        f"/api/v1/study/{cid}/{first_node['id']}/evaluate",
+        json={
+            "answers": [
+                {"prompt_id": first_node["eval_prompts"][0]["id"], "text": "Is there any coffee on the table?"},
+                {"prompt_id": first_node["eval_prompts"][1]["id"], "text": "She study in the library every morning."},
+                {
+                    "prompt_id": first_node["eval_prompts"][2]["id"],
+                    "text": "I wake up at seven every day. I attend classes in the morning and study English in the afternoon.",
+                },
+            ],
+            "cooldown_mode": "semester",
+        },
+    )
+    assert ev.status_code == 200
+    ev_body = ev.json()
+    assert ev_body["passed"] is True
+    assert ev_body["score"] == 7.8
+    assert any("language_studio" in sp for sp in captured_system_prompts)
+    assert len(ev_body["prompt_reviews"]) == len(first_node["eval_prompts"])
+    pr_translate = ev_body["prompt_reviews"][1]
+    assert pr_translate["status"] == "partial"
+    assert pr_translate["code_fixes"][0]["fixed_snippet"] == "She studies in the library every morning."
+    assert "Este cambio corrige" in pr_translate["code_fixes"][0]["why"]
+    assert "She studies" in (pr_translate["corrected_solution"] or "")
+
+
+def test_phrase_tts_endpoint_validation_and_english_mp3_cache(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import tts
+
+    # 1. Rechaza texto vacio o solo espacios y texto > 1200 caracteres
+    r_empty = client.post(
+        "/api/v1/study/local-ing9001/tts-phrase",
+        json={"text": "", "lang": "en", "accent": "us"},
+    )
+    assert r_empty.status_code == 422
+
+    r_spaces = client.post(
+        "/api/v1/study/local-ing9001/tts-phrase",
+        json={"text": "    ", "lang": "en", "accent": "us"},
+    )
+    assert r_spaces.status_code == 422
+
+    r_too_long = client.post(
+        "/api/v1/study/local-ing9001/tts-phrase",
+        json={"text": "a" * 1201, "lang": "en", "accent": "us"},
+    )
+    assert r_too_long.status_code == 422
+
+    # 2. Sintetiza con voz neural en ingles y cachea por SHA-256
+    calls: list[tuple[str, str]] = []
+
+    async def fake_run_edge_tts(text: str, voice: str, out_path: Path) -> dict[str, Any]:
+        calls.append((text, voice))
+        out_path.write_bytes(b"ID3-FAKE-ENGLISH-MP3-BYTES")
+        return {"sentences": [], "words": []}
+
+    monkeypatch.setattr(tts, "_run_edge_tts", fake_run_edge_tts)
+
+    phrase = "Complete with there is / there are: ___ ___ any coffee on the table?"
+    ok_us = client.post(
+        "/api/v1/study/local-ing9001/tts-phrase",
+        json={"text": phrase, "lang": "en", "accent": "us"},
+    )
+    assert ok_us.status_code == 200
+    assert ok_us.headers["content-type"].startswith("audio/mpeg")
+    assert ok_us.content == b"ID3-FAKE-ENGLISH-MP3-BYTES"
+    assert len(calls) == 1
+    assert calls[0][1] == "en-US-AriaNeural"
+    assert "blank" in calls[0][0]
+
+    # Segunda llamada identica usa el MP3 cacheado sin invocar edge-tts de nuevo
+    ok_us_cached = client.post(
+        "/api/v1/study/local-ing9001/tts-phrase",
+        json={"text": phrase, "lang": "en", "accent": "us"},
+    )
+    assert ok_us_cached.status_code == 200
+    assert len(calls) == 1
+
+    # Acento britanico selecciona en-GB-SoniaNeural
+    ok_gb = client.post(
+        "/api/v1/study/local-ing9001/tts-phrase",
+        json={"text": "What is your daily routine?", "lang": "en", "accent": "gb"},
+    )
+    assert ok_gb.status_code == 200
+    assert ok_gb.headers["content-type"].startswith("audio/mpeg")
+    assert calls[-1][1] == "en-GB-SoniaNeural"

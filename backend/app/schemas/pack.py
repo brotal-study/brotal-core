@@ -9,11 +9,27 @@ from app.schemas.career import CourseStatus
 
 BranchType = Literal["theory", "practice"]
 EngineType = Literal["concept_tree", "code_lab", "language_studio"]
-ChallengeType = Literal["concept", "trace", "debug", "implement"]
-CodeLanguage = Literal["java", "sql", "python", "c", "text"]
+ChallengeType = Literal[
+    "concept",
+    "trace",
+    "debug",
+    "implement",
+    "fill_blank",
+    "translate",
+    "speaking_prompt",
+]
+CodeLanguage = Literal["java", "sql", "python", "c", "en", "text"]
 
-_VALID_CHALLENGE_TYPES = {"concept", "trace", "debug", "implement"}
-_VALID_CODE_LANGUAGES = {"java", "sql", "python", "c", "text"}
+_VALID_CHALLENGE_TYPES = {
+    "concept",
+    "trace",
+    "debug",
+    "implement",
+    "fill_blank",
+    "translate",
+    "speaking_prompt",
+}
+_VALID_CODE_LANGUAGES = {"java", "sql", "python", "c", "en", "text"}
 
 
 class EvalPrompt(BaseModel):
@@ -38,6 +54,8 @@ class EvalPrompt(BaseModel):
             low = v.strip().lower()
             if low in ("cpp", "c++"):
                 return "c"
+            if low in ("english", "eng", "en-us", "en-gb", "en-au"):
+                return "en"
             if low in _VALID_CODE_LANGUAGES:
                 return low
         return "text"

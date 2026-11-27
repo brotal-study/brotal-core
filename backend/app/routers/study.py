@@ -18,6 +18,7 @@ from app.schemas.study import (
     ExamRouteRequest,
     ExamRouteResponse,
     NodeProgress,
+    PhraseTtsRequest,
     PointFeedback,
     PromptReviewItem,
     RegenerateQuestionsResponse,
@@ -44,6 +45,7 @@ from app.services.tts import (
     clear_node_tts_cache,
     get_node_tts_timings_data,
     synthesize_node_tts,
+    synthesize_phrase_tts,
 )
 
 router = APIRouter(tags=["study"])
@@ -511,6 +513,40 @@ async def post_node_tts(
         path=mp3_path,
         media_type="audio/mpeg",
         filename=f"{real_course_id}_{node_id}.mp3",
+    )
+
+
+@router.post("/study/{course_id}/tts-phrase")
+async def post_phrase_tts(
+    course_id: str,
+    req: PhraseTtsRequest,
+    conn: DbConn,
+) -> FileResponse:
+    cleaned_text = req.text.strip()
+    if not cleaned_text:
+        raise HTTPException(status_code=422, detail="Text cannot be empty")
+    if len(req.text) > 1200:
+        raise HTTPException(status_code=422, detail="Text exceeds 1200 character limit")
+
+    course_row = resolve_course_row(conn, course_id)
+    real_course_id = str(course_row["id"]) if course_row is not None else course_id
+
+    try:
+        mp3_path = await synthesize_phrase_tts(
+            course_id=real_course_id,
+            text=cleaned_text,
+            lang=req.lang,
+            accent=req.accent,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except TtsSynthesisError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return FileResponse(
+        path=mp3_path,
+        media_type="audio/mpeg",
+        filename=mp3_path.name,
     )
 
 

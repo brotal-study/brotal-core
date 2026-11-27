@@ -621,6 +621,16 @@ def build_prompt_reviews_and_routing(
                     "why": f"Este cambio permite cumplir con el criterio técnico evaluado: {target_criterion}.",
                 }
             )
+        elif ct in ("fill_blank", "translate", "speaking_prompt") and status != "passed" and not code_fixes:
+            sample_phrase = student_ans[:180] if student_ans else "(sin respuesta en inglés)"
+            target_criterion = missed_criteria[0] if missed_criteria else f"Aplicar estructura natural de {node_title}"
+            code_fixes.append(
+                {
+                    "broken_snippet": sample_phrase,
+                    "fixed_snippet": f"Apply natural English structure: {target_criterion}",
+                    "why": f"Este cambio corrige la gramática/vocabulario requerido: {target_criterion}.",
+                }
+            )
 
         raw_diag = str(raw_item.get("diagnosis") or "").strip()
         if raw_diag:
@@ -702,6 +712,7 @@ def evaluate_with_ai(
     rubric_spec: list[dict[str, Any]] = []
     all_keys: list[str] = []
     has_code_challenge = engine_type == "code_lab"
+    has_language_challenge = engine_type == "language_studio"
 
     for q in eval_prompts:
         qid = str(q["id"])
@@ -710,6 +721,8 @@ def evaluate_with_ai(
         starter = q.get("starter_code")
         if ct in ("debug", "implement", "trace") or starter:
             has_code_challenge = True
+        if ct in ("fill_blank", "translate", "speaking_prompt") or lang == "en":
+            has_language_challenge = True
         pts = []
         for idx, pt in enumerate(q.get("rubric_points", [])):
             key = f"{qid}::{idx}"
@@ -728,7 +741,24 @@ def evaluate_with_ai(
         rubric_spec.append(item_spec)
 
     senior_dev_rules = ""
-    if has_code_challenge:
+    if has_language_challenge:
+        senior_dev_rules = (
+            "\nMODO PROFESOR DE INGLES (`language_studio`):\n"
+            "- Evalua las respuestas del estudiante como un profesor universitario de ingles exigente y bilingue.\n"
+            "- Revisa gramatica real en ingles (conjugacion `verb to be`, `-s/-es` de 3a persona singular en Present Simple, "
+            "uso correcto de auxiliares `do/does` y `don't/doesn't` sin duplicar `-s` en el verbo base, concordancia "
+            "`there is / there are`, `quantifiers` como `some/any/much/many/a lot of`, orden Sujeto + Verbo + Complemento "
+            "sin omitir pronombres sujeto), uso preciso del vocabulario del nodo y claridad comunicativa.\n"
+            "- En `fill_blank`, `translate` y `speaking_prompt`, exige que la respuesta este escrita en ingles correcto "
+            "(si responde solo en espanol cuando se pedia ingles, califica bajo).\n"
+            "- En `prompt_reviews` y `code_fixes`: cuando la frase del estudiante tenga errores gramaticales, de vocabulario "
+            "o suene poco natural, llena `code_fixes` mostrando cada error puntual (`broken_snippet`: Tu frase exacta con el error, "
+            "`fixed_snippet`: Correccion natural en ingles, `why`: explicacion breve en espanol iniciando con 'Este cambio corrige...') "
+            "y entrega una respuesta modelo natural y completa en ingles en `corrected_solution` cuando haya mejoras o errores.\n"
+            "- Escribe `diagnosis`, `imprecisions`, `routing_suggestion` y `re_explanation` en espanol claro con los ejemplos "
+            "puntuales corregidos en ingles.\n"
+        )
+    elif has_code_challenge:
         senior_dev_rules = (
             "\nMODO SENIOR DEV / PROFESOR EXIGENTE DE CODIGO (`code_lab`):\n"
             "- Evalua el codigo y las trazas del estudiante como un Senior Developer y profesor universitario riguroso.\n"
@@ -981,6 +1011,16 @@ def _fallback_story_code_block(node_title: str, language: str = "java") -> str:
     )
 
 
+def _fallback_language_story_examples(node_title: str) -> str:
+    return (
+        "```en\n"
+        f"[+] Affirmative: She studies {node_title} every morning, and there are some notes on her desk.\n"
+        "[-] Negative:    She doesn't skip practice, and there isn't any confusion about the main rule.\n"
+        "[?] Question:    Does she review vocabulary every day? / Are there any exercises left?\n"
+        "```"
+    )
+
+
 def regenerate_story_with_ai(
     *,
     course_title: str,
@@ -1011,23 +1051,43 @@ def regenerate_story_with_ai(
         for q in eval_prompts
         if str(q.get("question") or "").strip()
     ]
-    is_code_lab = engine_type == "code_lab" or any(
-        str(q.get("challenge_type") or "concept") in ("debug", "implement", "trace") or q.get("starter_code")
+    is_language_studio = engine_type == "language_studio" or any(
+        str(q.get("challenge_type") or "concept") in ("fill_blank", "translate", "speaking_prompt")
+        or str(q.get("language") or "").strip().lower() == "en"
         for q in eval_prompts
     )
-    inferred_lang = next(
-        (
-            str(q.get("language")).strip().lower()
+    is_code_lab = not is_language_studio and (
+        engine_type == "code_lab"
+        or any(
+            str(q.get("challenge_type") or "concept") in ("debug", "implement", "trace") or q.get("starter_code")
             for q in eval_prompts
-            if str(q.get("language") or "").strip().lower() in ("java", "sql", "python", "c")
-        ),
-        "java" if is_code_lab else "text",
+        )
+    )
+    inferred_lang = (
+        "en"
+        if is_language_studio
+        else next(
+            (
+                str(q.get("language")).strip().lower()
+                for q in eval_prompts
+                if str(q.get("language") or "").strip().lower() in ("java", "sql", "python", "c")
+            ),
+            "java" if is_code_lab else "text",
+        )
     )
     metaphor_hint = world_metaphor or f"Taller practico de {course_title}"
     style_rule = explanation_style_instruction(explanation_style, metaphor_hint)
 
     code_lab_story_rule = ""
-    if is_code_lab:
+    if is_language_studio:
+        code_lab_story_rule = (
+            "\n- MODO `language_studio` ACTIVO (Ingles universitario): Escribe la explicacion en espanol claro y "
+            "conversado marcando las **reglas gramaticales y de vocabulario clave en `**negrita**`**, explicando las "
+            "estructuras **afirmativa, negativa e interrogativa**, las **trampas tipicas de hispanohablantes** y "
+            "**ejemplos concretos en ingles** claramente diferenciados (en un bloque ```en ... ``` y/o entre comillas "
+            "con traduccion breve entre parentesis). Cubre explicitamente todo el vocabulario y gramatica evaluados."
+        )
+    elif is_code_lab:
         code_lab_story_rule = (
             f"\n- MODO `code_lab` ACTIVO (lenguaje `{inferred_lang}`): Incluye 1 ejemplo de codigo real corto y limpio "
             f"(de 10 a 22 lineas) en un bloque Markdown cercado (```{inferred_lang} ... ```) — o hasta 2 micro-fragmentos "
@@ -1049,7 +1109,7 @@ def regenerate_story_with_ai(
             "`**negrita**` (ej. `**polimorfismo dinamico**`, `**@Override**`, `**pasa por valor**`)."
             f"{code_lab_story_rule}\n"
             "- PROHIBIDO usar listas con vinetas, numeraciones o encabezados markdown: entrega unicamente los parrafos "
-            "de prosa (y el bloque de codigo cercado si es `code_lab`)."
+            "de prosa (y el bloque cercado si es `code_lab` o `language_studio`)."
         )
         user_prompt = (
             f"Ramo: {course_title}\n"
@@ -1074,6 +1134,18 @@ def regenerate_story_with_ai(
         return (_strip_bullets(comp.text), comp.provider)
     except AiProviderError:
         concepts_prose = ". Asimismo, ".join(rubric_points) if rubric_points else node_summary
+        if is_language_studio:
+            alt_en = _strip_bullets(
+                f"Para dominar **{node_title}** en {course_title}, conviene fijar primero la regla en español antes de "
+                f"producir en inglés: {node_summary}. Recuerda mantener siempre el **orden Sujeto + Verbo + Complemento** "
+                f"en oraciones **afirmativas**, usar el **auxiliar correspondiente** en **negativas e interrogativas** "
+                f"y cubrir cada punto evaluado: {concepts_prose}.\n\n"
+                f"{_fallback_language_story_examples(node_title)}\n\n"
+                f"Evita la **trampa típica de hispanohablantes** de traducir palabra por palabra omitiendo el sujeto "
+                f"(por ejemplo, di `\"It is important to practice every day\"` — es importante practicar cada día — "
+                f"en lugar de empezar directamente con `\"Is important\"`)."
+            )
+            return (alt_en, "local_fallback")
         code_block_section = (
             f"\n\n{_fallback_story_code_block(node_title, inferred_lang)}\n\n"
             if is_code_lab
@@ -1245,21 +1317,40 @@ def regenerate_questions_with_ai(
             "rubric_points": [f"Explica el concepto central de {node_title}"],
         }
     ]
-    is_code_lab = engine_type == "code_lab" or any(
-        str(p.get("challenge_type") or "concept") in ("debug", "implement", "trace") or p.get("starter_code")
+    is_language_studio = engine_type == "language_studio" or any(
+        str(p.get("challenge_type") or "concept") in ("fill_blank", "translate", "speaking_prompt")
+        or str(p.get("language") or "").strip().lower() == "en"
         for p in source_prompts
     )
-    inferred_lang = next(
-        (
-            str(p.get("language"))
+    is_code_lab = not is_language_studio and (
+        engine_type == "code_lab"
+        or any(
+            str(p.get("challenge_type") or "concept") in ("debug", "implement", "trace") or p.get("starter_code")
             for p in source_prompts
-            if str(p.get("language") or "") in ("java", "sql", "python", "c")
-        ),
-        "java" if is_code_lab else "text",
+        )
+    )
+    inferred_lang = (
+        "en"
+        if is_language_studio
+        else next(
+            (
+                str(p.get("language"))
+                for p in source_prompts
+                if str(p.get("language") or "") in ("java", "sql", "python", "c")
+            ),
+            "java" if is_code_lab else "text",
+        )
     )
 
     code_lab_regen_rule = ""
-    if is_code_lab:
+    if is_language_studio:
+        code_lab_regen_rule = (
+            "\n5. MODO `language_studio` ACTIVO (Ingles universitario, `\"language\": \"en\"`, `\"starter_code\": null`): "
+            "Manten o combina los tipos `\"fill_blank\"` (completar huecos gramaticales/vocabulario en ingles con `___`), "
+            "`\"translate\"` (redactar o traducir 1-2 oraciones al ingles aplicando la regla del nodo) y "
+            "`\"speaking_prompt\"` (pregunta abierta en ingles tipo examen oral/escrito corto en 3-4 oraciones).\n"
+        )
+    elif is_code_lab:
         code_lab_regen_rule = (
             f"\n5. MODO `code_lab` ACTIVO (lenguaje `{inferred_lang}`): Manten o varia los tipos de reto "
             "(`\"challenge_type\": \"debug\" | \"implement\" | \"trace\" | \"concept\"`, "
@@ -1343,9 +1434,20 @@ def regenerate_questions_with_ai(
 
             orig_ct = str(orig.get("challenge_type") or "concept").strip().lower()
             raw_ct = str(ai_item.get("challenge_type") or orig_ct).strip().lower()
-            ct = raw_ct if raw_ct in ("concept", "trace", "debug", "implement") else orig_ct
+            valid_cts = (
+                "concept",
+                "trace",
+                "debug",
+                "implement",
+                "fill_blank",
+                "translate",
+                "speaking_prompt",
+            )
+            ct = raw_ct if raw_ct in valid_cts else (orig_ct if orig_ct in valid_cts else "concept")
             lang = str(ai_item.get("language") or orig.get("language") or inferred_lang).strip().lower()
-            if lang not in ("java", "sql", "python", "c", "text"):
+            if lang in ("english", "eng", "en-us", "en-gb", "en-au"):
+                lang = "en"
+            if lang not in ("java", "sql", "python", "c", "en", "text"):
                 lang = inferred_lang
 
             starter: str | None = None
@@ -1408,21 +1510,59 @@ def regenerate_questions_with_ai(
             pts = [str(p) for p in (orig.get("rubric_points") or [])]
             prev_q = str(orig.get("question") or "").strip()
             focus = " y ".join(p.rstrip(".") for p in pts[:2]) if pts else (node_summary or node_title)
-            tpl = templates[idx % len(templates)]
-            new_q = tpl.format(metaphor=metaphor_hint, node=node_title, course=course_title, focus=focus)
-            if new_q == prev_q:
-                new_q = templates[(idx + 1) % len(templates)].format(
-                    metaphor=metaphor_hint,
-                    node=node_title,
-                    course=course_title,
-                    focus=focus,
-                )
             ct = str(orig.get("challenge_type") or "concept").strip().lower()
-            if ct not in ("concept", "trace", "debug", "implement"):
+            if ct not in (
+                "concept",
+                "trace",
+                "debug",
+                "implement",
+                "fill_blank",
+                "translate",
+                "speaking_prompt",
+            ):
                 ct = "concept"
             lang = str(orig.get("language") or inferred_lang).strip().lower()
-            if lang not in ("java", "sql", "python", "c", "text"):
+            if lang not in ("java", "sql", "python", "c", "en", "text"):
                 lang = inferred_lang
+
+            if ct == "fill_blank":
+                alt_fb = (
+                    f"Complete the blanks using the grammar and vocabulary of {node_title}: "
+                    "___ ___ any new assignments on the platform today, or ___ your study group meet on Fridays?"
+                )
+                new_q = alt_fb if alt_fb != prev_q else (
+                    f"Fill in the blanks ({node_title}): ___ she usually ___ her notes in the library, "
+                    "and ___ there some examples in the book?"
+                )
+            elif ct == "translate":
+                alt_tr = (
+                    f"Write in natural English (1-2 sentences) applying {node_title}: "
+                    "'Nosotros estudiamos en la biblioteca cada tarde y hay varios ejercicios prácticos para el examen.'"
+                )
+                new_q = alt_tr if alt_tr != prev_q else (
+                    f"Translate into natural English applying {node_title}: "
+                    "'¿Hay algún diccionario en la sala o ella usa su computador para estudiar vocabulario?'"
+                )
+            elif ct == "speaking_prompt":
+                alt_sp = (
+                    f"Speaking / Short Answer ({node_title}): Describe your weekly university schedule and "
+                    "your favorite place to study in 3-4 complete sentences in English."
+                )
+                new_q = alt_sp if alt_sp != prev_q else (
+                    f"Speaking / Short Answer ({node_title}): What do you usually do on weekends to rest and "
+                    "prepare for your classes? Answer in 3-4 sentences in English."
+                )
+            else:
+                tpl = templates[idx % len(templates)]
+                new_q = tpl.format(metaphor=metaphor_hint, node=node_title, course=course_title, focus=focus)
+                if new_q == prev_q:
+                    new_q = templates[(idx + 1) % len(templates)].format(
+                        metaphor=metaphor_hint,
+                        node=node_title,
+                        course=course_title,
+                        focus=focus,
+                    )
+
             prev_starter = str(orig.get("starter_code") or "").strip() or None
             starter = (
                 _alternate_starter_code(

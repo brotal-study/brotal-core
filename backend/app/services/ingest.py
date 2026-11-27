@@ -25,6 +25,7 @@ from app.schemas.pack import CoursePack, PackMetadata
 from app.services import ai_router
 from app.services.ai_router import (
     AiProviderError,
+    _fallback_language_story_examples,
     _fallback_story_code_block,
     explanation_style_instruction,
     extract_json_object,
@@ -95,14 +96,43 @@ _GENERIC_CODE_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ENGLISH_CODE_RE = re.compile(r"^(?:ING|ENG|ENGL|EFL|ESL)[-_\s]*\d+[A-Z0-9-]*$", re.IGNORECASE)
+_ENGLISH_TITLE_RE = re.compile(
+    r"\b(?:ingl[eé]s|english|efl|esl|toefl|ielts|grammar\s*(?:&|and)\s*vocabulary|idioma\s+ingl[eé]s)\b",
+    re.IGNORECASE,
+)
+_ENGLISH_PATTERNS: list[tuple[re.Pattern[str], int]] = [
+    (re.compile(r"\b(?:grammar|vocabulary)\b", re.IGNORECASE), 4),
+    (
+        re.compile(
+            r"\b(?:present\s+simple|simple\s+present|present\s+continuous|past\s+simple|simple\s+past|present\s+perfect)\b",
+            re.IGNORECASE,
+        ),
+        5,
+    ),
+    (re.compile(r"\b(?:verb\s+to\s+be|there\s+is|there\s+are|do\s*/\s*does|don't|doesn't)\b", re.IGNORECASE), 4),
+    (
+        re.compile(
+            r"\b(?:quantifiers?|countable|uncountable|adverbs?\s+of\s+frequency|prepositions?\s+of\s+(?:time|place)|possessive\s+adjectives?)\b",
+            re.IGNORECASE,
+        ),
+        4,
+    ),
+    (re.compile(r"\b(?:listening|speaking|reading\s+comprehension|writing\s+task|daily\s+routine)\b", re.IGNORECASE), 3),
+    (re.compile(r"\bunit\s+[1-9]\b", re.IGNORECASE), 2),
+    (re.compile(r"\b(?:fill\s+in\s+the\s+blanks?|complete\s+the\s+sentences?)\b", re.IGNORECASE), 3),
+]
+
 
 def detect_engine_type(
     course_code: str,
     title: str,
     chunks: list[ExtractedChunk] | list[Any],
 ) -> tuple[str, str]:
-    """Detecta de forma liviana si el ramo corresponde a ('code_lab', lang) o ('concept_tree', 'text')."""
-    header_text = f"{course_code} {title}".strip()
+    """Detecta de forma liviana ('language_studio', 'en'), ('code_lab', lang) o ('concept_tree', 'text')."""
+    clean_code = course_code.strip()
+    clean_title = title.strip()
+    header_text = f"{clean_code} {clean_title}".strip()
     chunk_parts: list[str] = []
     for ch in chunks[:40]:
         if isinstance(ch, ExtractedChunk):
@@ -114,6 +144,18 @@ def detect_engine_type(
 
     body_text = "\n".join(chunk_parts)
     combined = f"{header_text}\n{body_text}"
+
+    has_english_title = bool(_ENGLISH_TITLE_RE.search(clean_title))
+    has_english_code = bool(_ENGLISH_CODE_RE.match(clean_code)) and (
+        "ingenier" not in clean_title.lower() or has_english_title
+    )
+    english_score = 0
+    for pat, weight in _ENGLISH_PATTERNS:
+        matches = len(pat.findall(combined))
+        if matches:
+            english_score += weight * min(matches, 4)
+        if pat.search(header_text):
+            english_score += weight * 2
 
     scores: dict[str, int] = {"java": 0, "sql": 0, "python": 0, "c": 0}
 
@@ -148,6 +190,9 @@ def detect_engine_type(
     best_lang, best_score = max(scores.items(), key=lambda kv: kv[1])
     has_title_signal = bool(_GENERIC_CODE_TITLE_RE.search(header_text))
     has_body_title_signal = len(_GENERIC_CODE_TITLE_RE.findall(body_text)) >= 2
+
+    if has_english_code or has_english_title or (english_score >= 6 and english_score > best_score and not has_title_signal):
+        return ("language_studio", "en")
 
     if best_score >= 4 or has_title_signal or (best_score >= 3 and has_body_title_signal):
         if best_score == 0:
@@ -417,6 +462,115 @@ def _build_fallback_code_lab_prompts(
     ]
 
 
+def _build_fallback_language_studio_prompts(
+    *,
+    branch: str,
+    title: str,
+    course_title: str,
+    key_phrases: list[str],
+    node_index: int = 1,
+) -> list[dict[str, Any]]:
+    """Construye los eval_prompts deterministas de un nodo language_studio (fill_blank, translate, speaking_prompt)."""
+    p1_criterion = key_phrases[0][:160]
+    p2_criterion = key_phrases[min(1, len(key_phrases) - 1)][:160]
+
+    if branch == "practice":
+        return [
+            {
+                "id": "q1",
+                "question": (
+                    f"[Integrated Exam · {title}] Complete with the correct form (there is / there are / some / any / "
+                    "do / does): ___ ___ ___ study rooms available in the library, and ___ your classmate need help?"
+                ),
+                "rubric_points": [
+                    f"Completa correctamente los huecos gramaticales de {title} en inglés",
+                    p1_criterion,
+                ],
+                "challenge_type": "fill_blank",
+                "language": "en",
+                "starter_code": None,
+            },
+            {
+                "id": "q2",
+                "question": (
+                    f"[Writing / Translation · {title}] Write in natural English (1-2 complete sentences): "
+                    "'Ella estudia inglés todos los días en la universidad, pero no tiene clases los sábados.'"
+                ),
+                "rubric_points": [
+                    "Respeta el orden Sujeto + Verbo + Complemento y la conjugación de tercera persona singular",
+                    p2_criterion,
+                ],
+                "challenge_type": "translate",
+                "language": "en",
+                "starter_code": None,
+            },
+            {
+                "id": "q3",
+                "question": (
+                    f"What is your daily routine at university and what are your main study habits for {course_title}? "
+                    "Answer in 3-4 complete sentences in English."
+                ),
+                "rubric_points": [
+                    "Responde en 3-4 oraciones completas y comprensibles en inglés",
+                    f"Utiliza vocabulario y estructuras de {title} con concordancia gramatical",
+                ],
+                "challenge_type": "speaking_prompt",
+                "language": "en",
+                "starter_code": None,
+            },
+        ]
+
+    fill_variants = [
+        "Complete with there is / there are / some / any: ___ ___ ___ coffee on the table, or do we need to buy more?",
+        "Complete with Present Simple (do / does / verb + -s): What time ___ she usually ___ her classes on Mondays?",
+    ]
+    translate_variants = [
+        "Translate or write in natural English (1-2 sentences): 'Hay algunos libros sobre el escritorio, pero no hay ningún cuaderno.'",
+        "Translate or write in natural English (1-2 sentences): 'Mi compañero estudia en la biblioteca cada mañana y repasa vocabulario.'",
+    ]
+    speaking_variants = [
+        "What is your daily routine on weekdays and what are your study habits? Answer in 3-4 sentences in English.",
+        "Describe your classroom or workspace at home and mention three things you use to study. Answer in 3-4 sentences in English.",
+    ]
+    v_idx = (node_index - 1) % 2
+
+    return [
+        {
+            "id": "q1",
+            "question": f"[{title}] {fill_variants[v_idx]}",
+            "rubric_points": [
+                f"Aplica la estructura gramatical correcta de {title}",
+                p1_criterion,
+            ],
+            "challenge_type": "fill_blank",
+            "language": "en",
+            "starter_code": None,
+        },
+        {
+            "id": "q2",
+            "question": f"[{title}] {translate_variants[v_idx]}",
+            "rubric_points": [
+                "Construye oraciones naturales en inglés sin omitir el sujeto ni confundir auxiliares",
+                p2_criterion,
+            ],
+            "challenge_type": "translate",
+            "language": "en",
+            "starter_code": None,
+        },
+        {
+            "id": "q3",
+            "question": speaking_variants[v_idx],
+            "rubric_points": [
+                "Comunica ideas claras en 3-4 oraciones completas en inglés",
+                f"Integra vocabulario y gramática pertinente de {title}",
+            ],
+            "challenge_type": "speaking_prompt",
+            "language": "en",
+            "starter_code": None,
+        },
+    ]
+
+
 def _normalize_prompt_item(
     raw_prompt: dict[str, Any],
     *,
@@ -432,41 +586,54 @@ def _normalize_prompt_item(
         pts = [f"Explica los conceptos centrales de {node_title}"]
 
     raw_ct = str(raw_prompt.get("challenge_type") or "concept").strip().lower()
-    challenge_type = raw_ct if raw_ct in ("concept", "trace", "debug", "implement") else "concept"
+    valid_cts = (
+        "concept",
+        "trace",
+        "debug",
+        "implement",
+        "fill_blank",
+        "translate",
+        "speaking_prompt",
+    )
+    challenge_type = raw_ct if raw_ct in valid_cts else "concept"
 
     raw_lang = str(raw_prompt.get("language") or "").strip().lower()
     if raw_lang in ("cpp", "c++"):
         raw_lang = "c"
-    if raw_lang in ("java", "sql", "python", "c", "text"):
+    elif raw_lang in ("english", "eng", "en-us", "en-gb", "en-au"):
+        raw_lang = "en"
+    if raw_lang in ("java", "sql", "python", "c", "en", "text"):
         language = raw_lang
+    elif engine_type == "language_studio" or challenge_type in ("fill_blank", "translate", "speaking_prompt"):
+        language = "en"
     else:
         language = default_language if engine_type == "code_lab" else "text"
 
     starter_raw = raw_prompt.get("starter_code")
-    if isinstance(starter_raw, str):
+    if isinstance(starter_raw, str) and challenge_type not in ("fill_blank", "translate", "speaking_prompt"):
         starter_code: str | None = starter_raw.strip()
     else:
         starter_code = None
 
     if challenge_type in ("trace", "debug") and not starter_code:
         starter_code = _fallback_starter_code(
-            language=language if language != "text" else default_language,
+            language=language if language not in ("text", "en") else default_language,
             challenge_type=challenge_type,
             node_title=node_title,
             index=p_idx,
         )
-        if language == "text":
-            language = default_language if default_language != "text" else "java"
+        if language in ("text", "en"):
+            language = default_language if default_language not in ("text", "en") else "java"
     elif challenge_type == "implement":
         if starter_code is None:
             starter_code = _fallback_starter_code(
-                language=language if language != "text" else default_language,
+                language=language if language not in ("text", "en") else default_language,
                 challenge_type="implement",
                 node_title=node_title,
                 index=p_idx,
             )
-        if language == "text":
-            language = default_language if default_language != "text" else "java"
+        if language in ("text", "en"):
+            language = default_language if default_language not in ("text", "en") else "java"
 
     raw_question = str(raw_prompt.get("question") or f"Explica con tus palabras {node_title or nid}.")
     clean_question, clean_starter = sanitize_code_prompt(raw_question, starter_code, language)
@@ -746,6 +913,19 @@ def _build_fallback_story(
     engine_type: str = "concept_tree",
     default_language: str = "text",
 ) -> str:
+    if engine_type == "language_studio":
+        return _strip_bullet_lists(
+            f"En **{title}** dentro de {course_title}, trabajamos estructuras esenciales en inglés a partir de tus "
+            f"apuntes: {text_snippet[:420]}. Para construir oraciones **afirmativas**, respeta siempre el **orden "
+            f"Sujeto + Verbo + Complemento** sin omitir nunca el pronombre sujeto; en **negativas e interrogativas**, "
+            f"apóyate en el **auxiliar correspondiente** (`do/does` o `verb to be`) cuidando que {key_phrases[0]} y "
+            f"además {key_phrases[1]}.\n\n"
+            f"{_fallback_language_story_examples(title)}\n\n"
+            f"Una **trampa típica de hispanohablantes** es traducir literalmente desde el español omitiendo `\"It\"` "
+            f"o agregando `-s` después de `doesn't` (di `\"She doesn't study at night\"` — ella no estudia de noche — "
+            f"y nunca `\"She doesn't studies\"`). Al responder en el examen de {course_title}, verifica primero quién "
+            f"es el sujeto y si el sustantivo es contable o incontable."
+        )
     code_section = (
         f"\n\n{_fallback_story_code_block(title, default_language)}\n\n"
         if engine_type == "code_lab"
@@ -873,7 +1053,15 @@ def _fallback_nodes_from_chunks(
             world_metaphor=world_metaphor,
         )
 
-        if engine_type == "code_lab":
+        if engine_type == "language_studio":
+            eval_prompts = _build_fallback_language_studio_prompts(
+                branch=branch,
+                title=title,
+                course_title=course_title,
+                key_phrases=key_phrases,
+                node_index=i,
+            )
+        elif engine_type == "code_lab":
             eval_prompts = _build_fallback_code_lab_prompts(
                 branch=branch,
                 title=title,
@@ -980,6 +1168,28 @@ def _code_lab_architect_rules(default_language: str) -> str:
     )
 
 
+def _language_studio_architect_rules() -> str:
+    return (
+        "\nMODO ESPECIAL `language_studio` ACTIVO (Ingles universitario — Gramatica, Vocabulario, Comprension y Produccion):\n"
+        "- EXPLICACION BILINGUE (`story_script`): Escribe `story_script` en espanol claro y conversado (2 a 3 parrafos "
+        "fluidos sin listas sueltas) con las **reglas gramaticales y de vocabulario clave en `**negrita**`**, explicando "
+        "las estructuras **afirmativa, negativa e interrogativa**, las **trampas tipicas de hispanohablantes** y "
+        "**ejemplos concretos en ingles** claramente diferenciados (en un bloque ```en ... ``` y/o entre comillas con "
+        "traduccion breve opcional entre parentesis). DEBE cubrir explicitamente todo el vocabulario y gramatica que se "
+        "evaluara en `eval_prompts`.\n"
+        "- PREGUNTAS DE EXAMEN DE INGLES (`eval_prompts`, `\"language\": \"en\"`, `\"starter_code\": null`):\n"
+        "  * En cada nodo `branch: \"theory\"`, mezcla 3 retos practicos reales de examen:\n"
+        "    1. `\"challenge_type\": \"fill_blank\"`: completar huecos de gramatica/vocabulario en ingles "
+        "(ej. `\"Complete with there is / there are / some / any: ___ ___ any coffee on the table?\"`).\n"
+        "    2. `\"challenge_type\": \"translate\"`: redactar o traducir 1-2 oraciones completas al ingles usando el "
+        "vocabulario y tiempo verbal del nodo.\n"
+        "    3. `\"challenge_type\": \"speaking_prompt\"`: pregunta abierta en ingles tipo examen oral/escrito corto "
+        "(ej. `\"What is your daily routine and what are your study habits? Answer in 3-4 sentences in English.\"`).\n"
+        "  * En cada nodo `branch: \"practice\"` (Simulacros / Examenes integrados): combina gramatica (`\"fill_blank\"`), "
+        "redaccion (`\"translate\"`) y respuesta abierta (`\"speaking_prompt\"`).\n"
+    )
+
+
 def _generate_nodes_with_ai(
     *,
     course_code: str,
@@ -997,8 +1207,27 @@ def _generate_nodes_with_ai(
     files_list = sorted({c.source_file for c in chunks})
     exp_rule = explanation_style_instruction(explanation_style, world_metaphor)
     q_rule = question_style_instruction(question_style, world_metaphor)
-    code_lab_extra = _code_lab_architect_rules(default_language) if engine_type == "code_lab" else ""
-    lang_hint = default_language if engine_type == "code_lab" else "text"
+    if engine_type == "language_studio":
+        engine_extra = _language_studio_architect_rules()
+        lang_hint = "en"
+    elif engine_type == "code_lab":
+        engine_extra = _code_lab_architect_rules(default_language)
+        lang_hint = default_language
+    else:
+        engine_extra = ""
+        lang_hint = "text"
+
+    prompt_examples_json = (
+        '        {"id": "q1", "question": "Complete with there is / there are / some / any: ___ ___ any coffee on the table?", "rubric_points": ["...", "..."], "challenge_type": "fill_blank", "language": "en", "starter_code": null},\n'
+        '        {"id": "q2", "question": "Translate into natural English: \'Ella estudia todos los dias en la biblioteca.\'", "rubric_points": ["...", "..."], "challenge_type": "translate", "language": "en", "starter_code": null},\n'
+        '        {"id": "q3", "question": "What is your daily routine and what are your study habits? Answer in 3-4 sentences in English.", "rubric_points": ["...", "..."], "challenge_type": "speaking_prompt", "language": "en", "starter_code": null}\n'
+        if engine_type == "language_studio"
+        else (
+            f'        {{"id": "q1", "question": "...", "rubric_points": ["...", "..."], "challenge_type": "concept", "language": "{lang_hint}", "starter_code": null}},\n'
+            f'        {{"id": "q2", "question": "...", "rubric_points": ["...", "..."], "challenge_type": "debug", "language": "{lang_hint}", "starter_code": "..."}},\n'
+            f'        {{"id": "q3", "question": "...", "rubric_points": ["...", "..."], "challenge_type": "implement", "language": "{lang_hint}", "starter_code": "// Implementa tu solución en Java aquí"}}\n'
+        )
+    )
 
     system_prompt = (
         "Eres el Arquitecto Pedagogico de Brotal. Convierte apuntes universitarios en un Arbol de Habilidades "
@@ -1024,7 +1253,7 @@ def _generate_nodes_with_ai(
         f"6. Cada nodo DEBE incluir `eval_prompts` con 3 a 4 preguntas a ciegas siguiendo este estilo: {q_rule} "
         "Cada pregunta lleva 2 a 3 `rubric_points` concretos y verificables.\n"
         "7. Cubre TODOS los archivos entregados, no solo el primero.\n"
-        f"{code_lab_extra}"
+        f"{engine_extra}"
         "Responde UNICAMENTE JSON valido con la clave `nodes`:\n"
         "{\n"
         '  "world_metaphor": "...",\n'
@@ -1038,9 +1267,7 @@ def _generate_nodes_with_ai(
         '      "summary": "...",\n'
         '      "story_script": "Parrafo 1...\\n\\nParrafo 2...",\n'
         '      "eval_prompts": [\n'
-        f'        {{"id": "q1", "question": "...", "rubric_points": ["...", "..."], "challenge_type": "concept", "language": "{lang_hint}", "starter_code": null}},\n'
-        f'        {{"id": "q2", "question": "...", "rubric_points": ["...", "..."], "challenge_type": "debug", "language": "{lang_hint}", "starter_code": "..."}},\n'
-        f'        {{"id": "q3", "question": "...", "rubric_points": ["...", "..."], "challenge_type": "implement", "language": "{lang_hint}", "starter_code": "// Implementa tu solución en Java aquí"}}\n'
+        f"{prompt_examples_json}"
         "      ]\n"
         "    }\n"
         "  ]\n"
@@ -1108,7 +1335,23 @@ def _generate_nodes_with_ai(
                 if isinstance(p, dict)
             ]
 
-            if engine_type == "code_lab":
+            if engine_type == "language_studio":
+                has_lang_challenge = any(
+                    cp.get("challenge_type") in ("fill_blank", "translate", "speaking_prompt")
+                    for cp in clean_prompts
+                )
+                if not has_lang_challenge:
+                    clean_prompts = _build_fallback_language_studio_prompts(
+                        branch=branch,
+                        title=safe_title,
+                        course_title=course_title,
+                        key_phrases=[
+                            f"Aplica con precisión las reglas gramaticales y vocabulario de {safe_title}",
+                            "Respeta estructuras afirmativa, negativa e interrogativa en inglés",
+                        ],
+                        node_index=idx + 1,
+                    )
+            elif engine_type == "code_lab":
                 has_code_challenge = any(
                     cp.get("challenge_type") in ("trace", "debug", "implement")
                     for cp in clean_prompts
@@ -1262,7 +1505,15 @@ def _fallback_append_nodes_from_chunks(
             world_metaphor=world_metaphor,
         )
 
-        if engine_type == "code_lab":
+        if engine_type == "language_studio":
+            eval_prompts = _build_fallback_language_studio_prompts(
+                branch=branch,
+                title=title,
+                course_title=course_title,
+                key_phrases=key_phrases,
+                node_index=i,
+            )
+        elif engine_type == "code_lab":
             eval_prompts = _build_fallback_code_lab_prompts(
                 branch=branch,
                 title=title,
@@ -1323,7 +1574,12 @@ def _generate_append_nodes_with_ai(
     anchor_id = theory_anchors[-1] if theory_anchors else str(existing_nodes[-1]["id"])
     exp_rule = explanation_style_instruction(explanation_style, world_metaphor)
     q_rule = question_style_instruction(question_style, world_metaphor)
-    code_lab_extra = _code_lab_architect_rules(default_language) if engine_type == "code_lab" else ""
+    if engine_type == "language_studio":
+        engine_extra = _language_studio_architect_rules()
+    elif engine_type == "code_lab":
+        engine_extra = _code_lab_architect_rules(default_language)
+    else:
+        engine_extra = ""
 
     system_prompt = (
         "Eres el Arquitecto Pedagogico de Brotal en MODO INCREMENTAL (`append`).\n"
@@ -1340,7 +1596,7 @@ def _generate_append_nodes_with_ai(
         "conceptos, sintaxis, anotaciones y `rubric_points` evaluados en `eval_prompts` de ese nodo. PROHIBIDO evaluar en "
         "`eval_prompts` sintaxis o conceptos que no aparezcan en `story_script`.\n"
         f"7. Cada nodo nuevo DEBE incluir `eval_prompts` con 2 a 4 preguntas a ciegas ({q_rule}) y 2 a 3 `rubric_points` verificables.\n"
-        f"{code_lab_extra}"
+        f"{engine_extra}"
         "Responde UNICAMENTE JSON valido con la clave `nodes`."
     )
     user_prompt = (
@@ -1421,7 +1677,23 @@ def _generate_append_nodes_with_ai(
                 for p_idx, p in enumerate(raw_prompts[:5], start=1)
                 if isinstance(p, dict)
             ]
-            if not clean_prompts:
+            if engine_type == "language_studio":
+                has_lang_challenge = any(
+                    cp.get("challenge_type") in ("fill_blank", "translate", "speaking_prompt")
+                    for cp in clean_prompts
+                )
+                if not has_lang_challenge:
+                    clean_prompts = _build_fallback_language_studio_prompts(
+                        branch=branch,
+                        title=safe_title,
+                        course_title=course_title,
+                        key_phrases=[
+                            f"Aplica las reglas gramaticales y vocabulario de {safe_title}",
+                            "Respeta el orden Sujeto + Verbo + Complemento en inglés",
+                        ],
+                        node_index=idx + 1,
+                    )
+            elif not clean_prompts:
                 clean_prompts = [
                     {
                         "id": "q1",
@@ -1477,7 +1749,7 @@ def ingest_local_files(
     mode: Literal["append", "replace"] = "replace",
     explanation_style: str = "narrative",
     question_style: str = "direct",
-    engine_type: Literal["auto", "concept_tree", "code_lab"] = "auto",
+    engine_type: Literal["auto", "concept_tree", "code_lab", "language_studio"] = "auto",
 ) -> dict[str, Any]:
     """Procesa 1..N archivos locales, indexa en FTS5 y reemplaza o agrega nodos al ramo ('replace' | 'append')."""
     if not files:
@@ -1514,12 +1786,25 @@ def ingest_local_files(
     course_id = f"local-{slug}"
 
     detected_engine, detected_lang = detect_engine_type(clean_code, clean_title, all_chunks)
-    if engine_type in ("concept_tree", "code_lab"):
-        effective_engine: Literal["concept_tree", "code_lab"] = engine_type
-        effective_lang = (detected_lang if detected_lang != "text" else "java") if engine_type == "code_lab" else "text"
+    if engine_type == "language_studio":
+        effective_engine: Literal["concept_tree", "code_lab", "language_studio"] = "language_studio"
+        effective_lang = "en"
+    elif engine_type == "code_lab":
+        effective_engine = "code_lab"
+        effective_lang = detected_lang if detected_lang in ("java", "sql", "python", "c") else "java"
+    elif engine_type == "concept_tree":
+        effective_engine = "concept_tree"
+        effective_lang = "text"
     else:
-        effective_engine = "code_lab" if detected_engine == "code_lab" else "concept_tree"
-        effective_lang = detected_lang if effective_engine == "code_lab" else "text"
+        if detected_engine == "language_studio":
+            effective_engine = "language_studio"
+            effective_lang = "en"
+        elif detected_engine == "code_lab":
+            effective_engine = "code_lab"
+            effective_lang = detected_lang
+        else:
+            effective_engine = "concept_tree"
+            effective_lang = "text"
 
     existing_row = resolve_course_row(conn, clean_code) or resolve_course_row(conn, course_id)
     existing_node_rows: list[sqlite3.Row] = []
@@ -1531,10 +1816,14 @@ def ingest_local_files(
 
     if mode == "append" and existing_row is not None and len(existing_node_rows) > 0:
         real_course_id = str(existing_row["id"])
-        if engine_type == "auto" and existing_row["engine_type"] == "code_lab":
-            effective_engine = "code_lab"
-            if effective_lang == "text":
-                effective_lang = "java"
+        if engine_type == "auto":
+            if existing_row["engine_type"] == "language_studio":
+                effective_engine = "language_studio"
+                effective_lang = "en"
+            elif existing_row["engine_type"] == "code_lab":
+                effective_engine = "code_lab"
+                if effective_lang not in ("java", "sql", "python", "c"):
+                    effective_lang = "java"
 
         existing_metaphor = ""
         if existing_row["pack_metadata_json"]:

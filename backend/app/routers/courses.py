@@ -203,7 +203,10 @@ async def post_ingest_local(
     career_id: Annotated[str | None, Form()] = None,
     world_metaphor: Annotated[str | None, Form()] = None,
     mode: Annotated[Literal["append", "replace"], Form()] = "replace",
-    engine_type: Annotated[Literal["auto", "concept_tree", "code_lab"], Form()] = "auto",
+    engine_type: Annotated[
+        Literal["auto", "concept_tree", "code_lab", "language_studio"],
+        Form(),
+    ] = "auto",
 ) -> dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="Debes adjuntar al menos un archivo.")

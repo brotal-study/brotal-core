@@ -3,9 +3,18 @@ import { api } from './client'
 
 export type Branch = 'theory' | 'practice'
 export type CooldownMode = 'semester' | 'urgency'
-export type ChallengeType = 'concept' | 'trace' | 'debug' | 'implement'
-export type CodeLanguage = 'java' | 'sql' | 'python' | 'c' | 'text'
+export type ChallengeType =
+  | 'concept'
+  | 'trace'
+  | 'debug'
+  | 'implement'
+  | 'fill_blank'
+  | 'translate'
+  | 'speaking_prompt'
+export type CodeLanguage = 'java' | 'sql' | 'python' | 'c' | 'en' | 'text'
 export type EngineType = 'concept_tree' | 'code_lab' | 'language_studio'
+export type TtsLang = 'en' | 'es'
+export type TtsAccent = 'us' | 'gb' | 'au'
 
 export interface EvalPrompt {
   id: string
@@ -265,6 +274,27 @@ export async function fetchNodeTtsBlob(
   const res = await fetch(
     `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/tts`,
     { method: 'POST', signal },
+  )
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return res.blob()
+}
+
+/** POST /api/v1/study/{course_id}/tts-phrase -> Blob MP3 */
+export async function fetchPhraseTtsBlob(
+  courseId: string,
+  text: string,
+  lang: TtsLang = 'en',
+  accent: TtsAccent = 'us',
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const res = await fetch(
+    `/api/v1/study/${encodeURIComponent(courseId)}/tts-phrase`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, lang, accent }),
+      signal,
+    },
   )
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.blob()
