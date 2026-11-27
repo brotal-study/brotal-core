@@ -6,6 +6,7 @@ export interface StoryWord {
   wordInSentenceIndex: number
   text: string
   inlineCode?: boolean
+  highlighted?: boolean
 }
 
 export interface StorySentence {
@@ -13,6 +14,26 @@ export interface StorySentence {
   paragraphIndex: number
   text: string
   words: StoryWord[]
+}
+
+export type StoryBlock =
+  | {
+      type: 'paragraph'
+      paragraphIndex: number
+      sentences: StorySentence[]
+    }
+  | {
+      type: 'code'
+      language: string
+      code: string
+    }
+
+function cleanSentenceDisplayText(sText: string): string {
+  return sText
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/\*\*/g, '')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/`/g, '')
 }
 
 function tokenizeSentenceWords(
@@ -25,24 +46,33 @@ function tokenizeSentenceWords(
   let globalWordIndex = startGlobalWordIndex
   let wordInSentenceIndex = 0
 
-  // Separar segmentos entre backticks simples (`...`) del texto normal sin mostrar los backticks crudos
-  const segments = sText.split(/(`[^`\n]+`)/g).filter(Boolean)
-  for (const seg of segments) {
-    const isCode = seg.length >= 2 && seg.startsWith('`') && seg.endsWith('`')
-    const cleanSeg = isCode ? seg.slice(1, -1).trim() : seg
-    const tokens = cleanSeg.split(/\s+/).filter(Boolean)
-    for (const wText of tokens) {
-      const wItem: StoryWord = {
-        globalWordIndex,
-        sentenceIndex: sIdx,
-        wordInSentenceIndex,
-        text: wText,
-        inlineCode: isCode,
+  // Separar segmentos con **negrita** y/o `codigo` sin mostrar marcadores crudos
+  const boldSegments = sText.split(/(\*\*[^*\n]+\*\*)/g).filter(Boolean)
+  for (const bSeg of boldSegments) {
+    const isBoldOuter = bSeg.length >= 4 && bSeg.startsWith('**') && bSeg.endsWith('**')
+    const innerBold = isBoldOuter ? bSeg.slice(2, -2) : bSeg.replace(/\*\*/g, '')
+
+    const codeSegments = innerBold.split(/(`[^`\n]+`)/g).filter(Boolean)
+    for (const cSeg of codeSegments) {
+      const isCode = cSeg.length >= 2 && cSeg.startsWith('`') && cSeg.endsWith('`')
+      const rawInner = isCode ? cSeg.slice(1, -1) : cSeg
+      const hasInnerBold = rawInner.includes('**')
+      const cleanSeg = rawInner.replace(/\*\*/g, '').replace(/`/g, '').trim()
+      const tokens = cleanSeg.split(/\s+/).filter(Boolean)
+      for (const wText of tokens) {
+        const wItem: StoryWord = {
+          globalWordIndex,
+          sentenceIndex: sIdx,
+          wordInSentenceIndex,
+          text: wText,
+          inlineCode: isCode,
+          highlighted: isBoldOuter || hasInnerBold,
+        }
+        globalWordIndex += 1
+        wordInSentenceIndex += 1
+        flatWords.push(wItem)
+        words.push(wItem)
       }
-      globalWordIndex += 1
-      wordInSentenceIndex += 1
-      flatWords.push(wItem)
-      words.push(wItem)
     }
   }
 
@@ -50,51 +80,86 @@ function tokenizeSentenceWords(
 }
 
 export function splitStoryParagraphSentences(rawText: string): {
+  blocks: StoryBlock[]
   paragraphs: StorySentence[][]
   flat: StorySentence[]
   flatWords: StoryWord[]
 } {
-  const rawParagraphs = rawText
-    .split(/\n{2,}/)
-    .map((p) => p.trim())
-    .filter(Boolean)
-
+  const blocks: StoryBlock[] = []
   const paragraphs: StorySentence[][] = []
   const flat: StorySentence[] = []
   const flatWords: StoryWord[] = []
   let globalIndex = 0
   let globalWordIndex = 0
+  let paragraphCounter = 0
 
-  rawParagraphs.forEach((p, paragraphIndex) => {
-    const parts =
-      p
-        .split(/(?<=[.!?])\s+/)
-        .map((s) => s.trim())
-        .filter(Boolean) ?? []
-    const sentenceTexts = parts.length > 0 ? parts : [p]
-    const pSentences: StorySentence[] = sentenceTexts.map((sText) => {
-      const sIdx = globalIndex
-      const { words, nextGlobalWordIndex } = tokenizeSentenceWords(
-        sText,
-        sIdx,
-        globalWordIndex,
-        flatWords,
-      )
-      globalWordIndex = nextGlobalWordIndex
-      const item: StorySentence = {
-        globalIndex: sIdx,
+  const addProseChunk = (proseChunk: string) => {
+    const rawParagraphs = proseChunk
+      .split(/\n{2,}/)
+      .map((p) => p.trim())
+      .filter(Boolean)
+
+    for (const p of rawParagraphs) {
+      const paragraphIndex = paragraphCounter++
+      const parts =
+        p
+          .split(/(?<=[.!?])\s+/)
+          .map((s) => s.trim())
+          .filter(Boolean) ?? []
+      const sentenceTexts = parts.length > 0 ? parts : [p]
+      const pSentences: StorySentence[] = sentenceTexts.map((sText) => {
+        const sIdx = globalIndex
+        const { words, nextGlobalWordIndex } = tokenizeSentenceWords(
+          sText,
+          sIdx,
+          globalWordIndex,
+          flatWords,
+        )
+        globalWordIndex = nextGlobalWordIndex
+        const item: StorySentence = {
+          globalIndex: sIdx,
+          paragraphIndex,
+          text: cleanSentenceDisplayText(sText),
+          words,
+        }
+        globalIndex += 1
+        flat.push(item)
+        return item
+      })
+      paragraphs.push(pSentences)
+      blocks.push({
+        type: 'paragraph',
         paragraphIndex,
-        text: sText.replace(/`([^`\n]+)`/g, '$1'),
-        words,
-      }
-      globalIndex += 1
-      flat.push(item)
-      return item
-    })
-    paragraphs.push(pSentences)
-  })
+        sentences: pSentences,
+      })
+    }
+  }
 
-  return { paragraphs, flat, flatWords }
+  const fenceRegex = /```([a-zA-Z0-9_+-]*)[ \t]*\n?([\s\S]*?)```/g
+  let lastIdx = 0
+  let match: RegExpExecArray | null
+  while ((match = fenceRegex.exec(rawText)) !== null) {
+    if (match.index > lastIdx) {
+      addProseChunk(rawText.slice(lastIdx, match.index))
+    }
+    const language = (match[1] || 'java').trim().toLowerCase()
+    const code = (match[2] || '').replace(/^\n+|\n+$/g, '')
+    if (code.trim().length > 0) {
+      blocks.push({
+        type: 'code',
+        language,
+        code,
+      })
+    }
+    lastIdx = match.index + match[0].length
+  }
+
+  if (lastIdx < rawText.length) {
+    const tail = rawText.slice(lastIdx).replace(/```[\s\S]*$/, '')
+    addProseChunk(tail)
+  }
+
+  return { blocks, paragraphs, flat, flatWords }
 }
 
 // Fallback offline con window.speechSynthesis + seguimiento de oracion activa y salto por clic.

@@ -26,8 +26,28 @@ class TtsSynthesisError(RuntimeError):
     """Error al sintetizar audio con edge-tts."""
 
 
+def strip_code_blocks_and_markdown_for_tts(text: str) -> str:
+    """Elimina bloques cercados ```...``` y marcadores ** y ` para que TTS sintetice solo la prosa."""
+    if not text:
+        return ""
+    without_fences = re.sub(r"```[\s\S]*?```", "\n\n", text)
+    without_fences = re.sub(r"```[\s\S]*$", "", without_fences)
+    without_md = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", without_fences)
+    without_md = without_md.replace("**", "")
+    without_md = re.sub(r"`([^`\n]+)`", r"\1", without_md)
+    without_md = without_md.replace("`", "")
+
+    paragraphs: list[str] = []
+    for raw_p in re.split(r"\n{2,}", without_md):
+        clean_p = re.sub(r"[ \t]+", " ", raw_p).strip()
+        if clean_p:
+            paragraphs.append(clean_p)
+    return "\n\n".join(paragraphs)
+
+
 def compute_tts_hash(text: str, voice: str) -> str:
-    payload = f"{voice}::{text.strip()}".encode()
+    narrated = strip_code_blocks_and_markdown_for_tts(text) or text.strip()
+    payload = f"{voice}::{narrated}".encode()
     return hashlib.sha256(payload).hexdigest()[:24]
 
 
@@ -44,8 +64,9 @@ def cached_tts_timings_path(course_id: str, text: str, voice: str = DEFAULT_VOIC
 
 
 def split_story_sentences(text: str) -> list[str]:
-    """Divide story_script en oraciones preservando el orden de los parrafos."""
-    paragraphs = [p.strip() for p in re.split(r"\n{2,}", text.strip()) if p.strip()]
+    """Divide story_script en oraciones (solo prosa sin bloques de codigo) preservando el orden de los parrafos."""
+    prose = strip_code_blocks_and_markdown_for_tts(text)
+    paragraphs = [p.strip() for p in re.split(r"\n{2,}", prose) if p.strip()]
     sentences: list[str] = []
     for p in paragraphs:
         parts = [s.strip() for s in re.split(r"(?<=[.!?])\s+", p) if s.strip()]
@@ -237,7 +258,7 @@ async def synthesize_node_tts(
     voice: str | None = None,
 ) -> Path:
     """Devuelve la ruta al MP3 en cache (y guarda .timings.json con sentences y words), o lo sintetiza con edge-tts."""
-    cleaned = text.strip()
+    cleaned = strip_code_blocks_and_markdown_for_tts(text)
     if not cleaned:
         raise TtsSynthesisError("El nodo no tiene story_script para sintetizar.")
 
@@ -280,7 +301,7 @@ def get_node_tts_timings_data(
     voice: str | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Devuelve {'sentences': [...], 'words': [...]} asegurando que words nunca quede vacio."""
-    cleaned = text.strip()
+    cleaned = strip_code_blocks_and_markdown_for_tts(text)
     if not cleaned:
         return {"sentences": [], "words": []}
     voices_to_try = [voice] if voice else list(DEFAULT_VOICES)
@@ -309,7 +330,7 @@ def clear_node_tts_cache(course_id: str, text: str | None = None) -> None:
     """Elimina archivos .mp3 y .timings.json en cache al regenerar una historia."""
     if not text or not text.strip():
         return
-    cleaned = text.strip()
+    cleaned = strip_code_blocks_and_markdown_for_tts(text) or text.strip()
     for candidate_voice in DEFAULT_VOICES:
         mp3_file = cached_tts_path(course_id, cleaned, candidate_voice)
         timings_file = cached_tts_timings_path(course_id, cleaned, candidate_voice)

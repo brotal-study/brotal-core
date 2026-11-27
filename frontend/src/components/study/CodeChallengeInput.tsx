@@ -16,7 +16,7 @@ interface Props {
   onChange: (nextValue: string) => void
 }
 
-function getLanguageExtension(language?: CodeLanguage | string | null) {
+export function getLanguageExtension(language?: CodeLanguage | string | null) {
   const normalized = (language ?? 'java').toLowerCase()
   if (normalized === 'sql') return [sql()]
   if (normalized === 'python') return [python()]
@@ -25,10 +25,231 @@ function getLanguageExtension(language?: CodeLanguage | string | null) {
   return []
 }
 
+function isPlaceholderComment(code: string): boolean {
+  const s = code.trim()
+  if (!s) return true
+  const lines = s
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+  if (lines.length !== 1) return false
+  const ln = lines[0]
+  return (
+    ln.startsWith('//') ||
+    ln.startsWith('--') ||
+    ln.startsWith('#') ||
+    (ln.startsWith('/*') && ln.endsWith('*/'))
+  )
+}
+
+function expandSingleLineBraceCode(rawCode: string): string {
+  let indent = 0
+  const outLines: string[] = []
+  let buf = ''
+  let parenDepth = 0
+  let inStr: string | null = null
+  let escape = false
+
+  const flushLine = () => {
+    const line = buf.replace(/[ \t]+/g, ' ').trim()
+    buf = ''
+    if (line) {
+      outLines.push('    '.repeat(indent) + line)
+    }
+  }
+
+  for (let i = 0; i < rawCode.length; i++) {
+    const ch = rawCode[i]
+    if (inStr !== null) {
+      buf += ch
+      if (escape) {
+        escape = false
+      } else if (ch === '\\') {
+        escape = true
+      } else if (ch === inStr) {
+        inStr = null
+      }
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      inStr = ch
+      buf += ch
+      continue
+    }
+    if (ch === '/' && rawCode[i + 1] === '*') {
+      const endComment = rawCode.indexOf('*/', i + 2)
+      if (endComment === -1) {
+        buf += rawCode.slice(i)
+        break
+      }
+      if (buf.trim()) flushLine()
+      buf = rawCode.slice(i, endComment + 2)
+      flushLine()
+      i = endComment + 1
+      continue
+    }
+    if (ch === '/' && rawCode[i + 1] === '/') {
+      const endLn = rawCode.indexOf('\n', i + 2)
+      if (buf.trim()) flushLine()
+      if (endLn === -1) {
+        buf = rawCode.slice(i)
+        flushLine()
+        break
+      }
+      buf = rawCode.slice(i, endLn)
+      flushLine()
+      i = endLn
+      continue
+    }
+    if (ch === '(') {
+      parenDepth += 1
+      buf += ch
+    } else if (ch === ')') {
+      parenDepth = Math.max(0, parenDepth - 1)
+      buf += ch
+    } else if (ch === '{' && parenDepth === 0) {
+      const cur = buf.trimEnd()
+      buf = cur ? `${cur} {` : '{'
+      flushLine()
+      indent += 1
+    } else if (ch === '}' && parenDepth === 0) {
+      flushLine()
+      indent = Math.max(0, indent - 1)
+      let j = i + 1
+      while (j < rawCode.length && (rawCode[j] === ' ' || rawCode[j] === '\t')) j++
+      if (j < rawCode.length && rawCode[j] === ';') {
+        outLines.push('    '.repeat(indent) + '};')
+        i = j
+        continue
+      }
+      outLines.push('    '.repeat(indent) + '}')
+    } else if (ch === ';' && parenDepth === 0) {
+      buf += ';'
+      flushLine()
+    } else if (ch === '\n') {
+      flushLine()
+    } else {
+      buf += ch
+    }
+  }
+  flushLine()
+  return outLines.join('\n')
+}
+
+export function formatMultilineStarterCode(
+  starterCode?: string | null,
+  language?: CodeLanguage | string | null,
+): string {
+  const cleaned = (starterCode ?? '').trim()
+  if (!cleaned || isPlaceholderComment(cleaned)) return cleaned
+
+  const lang = (language ?? 'java').toLowerCase()
+  const rawLines = cleaned
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+  const nonCommentLines = rawLines.filter(
+    (l) =>
+      !l.startsWith('//') &&
+      !l.startsWith('--') &&
+      !l.startsWith('#') &&
+      !(l.startsWith('/*') && l.endsWith('*/')),
+  )
+
+  if (lang === 'sql' || (!cleaned.includes('{') && /\bSELECT\b[\s\S]+\bFROM\b/i.test(cleaned))) {
+    if (nonCommentLines.length <= 1) {
+      return cleaned
+        .replace(
+          /\s+\b((?:INNER|LEFT|RIGHT|FULL)\s+JOIN|JOIN|FROM|WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|VALUES|SET)\b/gi,
+          '\n$1',
+        )
+        .trim()
+    }
+    return cleaned
+  }
+
+  let needsBraceExpand =
+    nonCommentLines.length <= 1 &&
+    (cleaned.includes('{') || (cleaned.match(/;/g)?.length ?? 0) >= 2)
+  if (!needsBraceExpand && nonCommentLines.length <= 2) {
+    needsBraceExpand = nonCommentLines.some(
+      (l) => l.includes('{') && l.includes('}') && l.includes(';'),
+    )
+  }
+
+  if (needsBraceExpand) {
+    return expandSingleLineBraceCode(cleaned)
+  }
+  return cleaned
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+export function sanitizeCodePrompt(
+  question: string,
+  starterCode?: string | null,
+  language?: CodeLanguage | string | null,
+): { question: string; starterCode: string } {
+  const qOrig = (question ?? '').trim()
+  const rawStarter = (starterCode ?? '').trim()
+  const formattedStarter = formatMultilineStarterCode(rawStarter, language)
+
+  if (!rawStarter || isPlaceholderComment(rawStarter)) {
+    return { question: qOrig, starterCode: formattedStarter }
+  }
+
+  let qClean = qOrig.replace(/```[\s\S]*?```/g, ' ')
+
+  const strippedComments = rawStarter
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .split('\n')
+    .map((l) => l.replace(/\/\/.*$/, '').trim())
+    .filter((l) => l && !l.startsWith('--') && !l.startsWith('#'))
+    .join('\n')
+
+  const candidates = [rawStarter, formattedStarter, strippedComments].filter(Boolean)
+  for (const cand of candidates) {
+    const tokens = cand.trim().split(/\s+/).filter(Boolean)
+    if (tokens.length >= 3) {
+      const pat = new RegExp(
+        `[:\\s]*\`?${tokens.map(escapeRegExp).join('\\s+')}\`?`,
+        'gi',
+      )
+      qClean = qClean.replace(pat, ' ')
+    }
+  }
+
+  qClean = qClean.replace(
+    /[:\n]\s*`?(?:import\s+[\w.]+;\s*)*(?:(?:public|private|protected|static|final|abstract)\s+)*(?:class|interface|void|int|double|float|long|boolean|String|List|Map|Set)\b[\s\S]*\{[\s\S]*\}[\s;]*`?\s*$/,
+    '.',
+  )
+  qClean = qClean.replace(/[:\n]\s*`?SELECT\s+[\s\S]+\s+FROM\s+[\s\S]+;?\s*`?\s*$/i, '.')
+
+  qClean = qClean
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{2,}/g, '\n')
+    .trim()
+    .replace(/\s*:\s*$/, '.')
+    .replace(/\.{2,}$/, '.')
+    .trim()
+
+  if (qClean.length < 10) {
+    qClean =
+      'Analiza el código del editor, identifica el problema técnico y resuélvelo según los criterios del nodo.'
+  }
+
+  return { question: qClean, starterCode: formattedStarter }
+}
+
 export default function CodeChallengeInput({ prompt, index, value, onChange }: Props) {
   const theme = useAppStore((s) => s.theme)
   const challengeType: ChallengeType = (prompt.challenge_type ?? 'concept') as ChallengeType
-  const starterCode = prompt.starter_code ?? ''
+  const { question: cleanQuestion, starterCode } = useMemo(
+    () => sanitizeCodePrompt(prompt.question, prompt.starter_code, prompt.language),
+    [prompt.question, prompt.starter_code, prompt.language],
+  )
   const langLabel = (prompt.language && prompt.language !== 'text' ? prompt.language : 'java').toUpperCase()
 
   const extensions = useMemo(() => getLanguageExtension(prompt.language), [prompt.language])
@@ -83,7 +304,7 @@ export default function CodeChallengeInput({ prompt, index, value, onChange }: P
         </div>
 
         <span className="break-words text-sm font-medium">
-          {index + 1}. {prompt.question}
+          {index + 1}. {cleanQuestion}
         </span>
 
         <div className="overflow-hidden rounded-md border border-slate-300 text-xs dark:border-slate-700">
@@ -119,7 +340,7 @@ export default function CodeChallengeInput({ prompt, index, value, onChange }: P
         </div>
 
         <span className="break-words text-sm font-medium">
-          {index + 1}. {prompt.question}
+          {index + 1}. {cleanQuestion}
         </span>
 
         {starterCode && (
@@ -158,7 +379,7 @@ export default function CodeChallengeInput({ prompt, index, value, onChange }: P
   return (
     <label className="flex min-w-0 flex-col gap-1.5">
       <span className="break-words text-sm font-medium">
-        {index + 1}. {prompt.question}
+        {index + 1}. {cleanQuestion}
       </span>
       <textarea
         value={value ?? ''}

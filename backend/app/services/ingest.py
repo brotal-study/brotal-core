@@ -25,9 +25,11 @@ from app.schemas.pack import CoursePack, PackMetadata
 from app.services import ai_router
 from app.services.ai_router import (
     AiProviderError,
+    _fallback_story_code_block,
     explanation_style_instruction,
     extract_json_object,
     question_style_instruction,
+    sanitize_code_prompt,
 )
 from app.services.pack_manager import (
     append_nodes_to_course,
@@ -466,13 +468,16 @@ def _normalize_prompt_item(
         if language == "text":
             language = default_language if default_language != "text" else "java"
 
+    raw_question = str(raw_prompt.get("question") or f"Explica con tus palabras {node_title or nid}.")
+    clean_question, clean_starter = sanitize_code_prompt(raw_question, starter_code, language)
+
     return {
         "id": str(raw_prompt.get("id") or f"q{p_idx}"),
-        "question": str(raw_prompt.get("question") or f"Explica con tus palabras {node_title or nid}."),
+        "question": clean_question,
         "rubric_points": pts,
         "challenge_type": challenge_type,
         "language": language,
-        "starter_code": starter_code,
+        "starter_code": clean_starter,
     }
 
 
@@ -706,15 +711,23 @@ def append_chunks_in_fts(conn: sqlite3.Connection, course_id: str, chunks: list[
 
 
 def _strip_bullet_lists(story: str) -> str:
-    """Convierte cualquier linea con viñetas en prosa fluida para respetar la regla de historias continuas."""
+    """Convierte cualquier linea con viñetas en prosa fluida preservando bloques de codigo cercados."""
     lines = story.splitlines()
     cleaned_lines: list[str] = []
+    in_code_block = False
     for ln in lines:
-        s = ln.strip()
-        if not s:
+        stripped = ln.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            cleaned_lines.append(stripped)
+            continue
+        if in_code_block:
+            cleaned_lines.append(ln.rstrip())
+            continue
+        if not stripped:
             cleaned_lines.append("")
             continue
-        s = re.sub(r"^[-*•]\s+", "", s)
+        s = re.sub(r"^[-*•]\s+", "", stripped)
         s = re.sub(r"^\d+[.)]\s+", "", s)
         cleaned_lines.append(s)
     prose = "\n".join(cleaned_lines)
@@ -730,36 +743,46 @@ def _build_fallback_story(
     world_metaphor: str,
     text_snippet: str,
     key_phrases: list[str],
+    engine_type: str = "concept_tree",
+    default_language: str = "text",
 ) -> str:
+    code_section = (
+        f"\n\n{_fallback_story_code_block(title, default_language)}\n\n"
+        if engine_type == "code_lab"
+        else "\n\n"
+    )
     if explanation_style == "direct":
         return _strip_bullet_lists(
-            f"{title} en {course_title} aborda directamente los fundamentos tecnicos extraidos de tus apuntes: "
+            f"**{title}** en {course_title} aborda directamente los **fundamentos técnicos** extraídos de tus apuntes: "
             f"{text_snippet[:480]}.\n\n"
-            f"El mecanismo principal establece que {key_phrases[0]}. Ademas, para garantizar una operacion "
-            f"correcta del sistema se requiere que {key_phrases[1]}.\n\n"
-            f"Al evaluar {title} en {course_title}, verifica que invariante protege este componente y que "
-            f"consecuencia tecnica ocurre si esa condicion deja de cumplirse."
+            f"El **mecanismo principal** establece que {key_phrases[0]}. Además, para garantizar una operación "
+            f"correcta del sistema se requiere que {key_phrases[1]}."
+            f"{code_section}"
+            f"Al evaluar **{title}** en {course_title}, verifica qué **invariante** protege este componente y qué "
+            f"consecuencia técnica ocurre si esa condición deja de cumplirse."
         )
     if explanation_style == "structured":
         return _strip_bullet_lists(
-            f"Concepto central: {title} dentro de {course_title} estructura los principios descritos en tus apuntes: "
+            f"Concepto central: **{title}** dentro de {course_title} estructura los **principios técnicos** descritos en tus apuntes: "
             f"{text_snippet[:480]}.\n\n"
-            f"Causa y efecto: La relacion causal principal determina que {key_phrases[0]}. Como consecuencia directa, "
-            f"{key_phrases[1]} cuando el sistema opera bajo condiciones reales.\n\n"
-            f"Ejemplo concreto: En una aplicacion practica o evaluacion de {course_title}, comprobar las propiedades "
-            f"de {title} permite diagnosticar fallos y justificar la solucion tecnica paso a paso."
+            f"Causa y efecto: La **relación causal** principal determina que {key_phrases[0]}. Como consecuencia directa, "
+            f"{key_phrases[1]} cuando el sistema opera bajo **condiciones reales**."
+            f"{code_section}"
+            f"Ejemplo concreto: En una aplicación práctica o evaluación de {course_title}, comprobar las propiedades "
+            f"de **{title}** permite diagnosticar fallos y justificar la solución técnica paso a paso."
         )
     return _strip_bullet_lists(
-        f"Situemonos en {world_metaphor} para entender por que {title} es una pieza fundamental dentro de "
-        f"{course_title}. Cuando observamos el sistema en operacion real, lo primero que salta a la vista es como "
-        f"se encadenan las decisiones tecnicas a partir de tus apuntes: {text_snippet[:480]}.\n\n"
+        f"Situémonos en {world_metaphor} para entender por qué **{title}** es una pieza fundamental dentro de "
+        f"{course_title}. Cuando observamos el sistema en **operación real**, lo primero que salta a la vista es cómo "
+        f"se encadenan las decisiones técnicas a partir de tus apuntes: {text_snippet[:480]}.\n\n"
         f"Si lo llevas a un escenario concreto dentro de {world_metaphor}, no basta con repetir definiciones "
-        f"de memoria. Lo decisivo es seguir la relacion de causa y efecto paso a paso: {key_phrases[0]}. "
-        f"Ademas, ten siempre presente que {key_phrases[1]}, porque esa conexion explica como interactuan "
-        f"los componentes cuando la carga o la complejidad aumentan.\n\n"
-        f"Por eso, al enfrentarte a un caso practico o examen de {course_title} dentro de {world_metaphor}, "
-        f"preguntate primero que invariante protege {title} y que ocurriria si esa pieza fallara; asi podras "
-        f"diagnosticar y justificar tu solucion con criterio propio."
+        f"de memoria. Lo decisivo es seguir la relación de **causa y efecto** paso a paso: {key_phrases[0]}. "
+        f"Además, ten siempre presente que {key_phrases[1]}, porque esa conexión explica cómo interactúan "
+        f"los componentes cuando la carga o la complejidad aumentan."
+        f"{code_section}"
+        f"Por eso, al enfrentarte a un caso práctico o examen de {course_title} dentro de {world_metaphor}, "
+        f"pregúntate primero qué **invariante** protege **{title}** y qué ocurriría si esa pieza fallara; así podrás "
+        f"diagnosticar y justificar tu solución con criterio propio."
     )
 
 
@@ -840,6 +863,8 @@ def _fallback_nodes_from_chunks(
             world_metaphor=world_metaphor,
             text_snippet=text_snippet,
             key_phrases=key_phrases,
+            engine_type=engine_type,
+            default_language=default_language,
         )
         q_text = _build_fallback_question(
             question_style=question_style,
@@ -931,14 +956,21 @@ def _code_lab_architect_rules(default_language: str) -> str:
     lang = default_language if default_language in ("java", "sql", "python", "c") else "java"
     return (
         f"\nMODO ESPECIAL `code_lab` ACTIVO (Lenguaje dominante: `{lang}`):\n"
+        f"- BLOQUE DE CODIGO EN `story_script`: En cada nodo cuando `engine_type == \"code_lab\"`, incluye en `story_script` "
+        f"1 ejemplo de codigo real corto y limpio (10 a 22 lineas) en un bloque Markdown cercado (```{lang} ... ```) "
+        f"— o hasta 2 micro-fragmentos de 4 a 8 lineas si contrastan un error vs. su correccion — que enseñe explicitamente "
+        f"la sintaxis, anotaciones y mecanismos que se evaluaran en ese nodo.\n"
         f"- En cada nodo `branch: \"theory\"`: genera 3 `eval_prompts` combinando al menos 1 pregunta conceptual "
         f"(`\"challenge_type\": \"concept\"`, `\"starter_code\": null`) + 1 a 2 desafios de codigo reales "
         f"(`\"challenge_type\": \"trace\" | \"debug\" | \"implement\"`, `\"language\": \"{lang}\"`).\n"
         f"- En cada nodo `branch: \"practice\"` (Examenes / Laboratorios): genera desafios practicos de codigo reales "
         f"(`\"challenge_type\": \"debug\"` e `\"implement\"`, `\"language\": \"{lang}\"`) estilo certamen universitario.\n"
-        f"- REGLA ESTRICTA DE `starter_code`:\n"
+        f"- REGLA ESTRICTA DE `starter_code` Y `question`:\n"
         f"  * `debug` y `trace`: SI incluyen el codigo completo necesario en `starter_code` (con el bug concreto a "
-        f"corregir o el fragmento completo a trazar paso a paso).\n"
+        f"corregir o el fragmento completo a trazar paso a paso), SIEMPRE formateado en multiples lineas con `\\n` "
+        f"e indentacion de 2 o 4 espacios (PROHIBIDO entregar el codigo en una sola linea).\n"
+        f"  * PROHIBIDO DUPLICAR CODIGO EN `question`: Cuando exista `starter_code` (`debug` o `trace`), `question` "
+        f"NUNCA debe repetir ni incluir el codigo (solo debe indicar la tarea: que bug corregir o que trazar).\n"
         f"  * `implement` en nodos basicos/intermedios (clases, constructores, arreglos, herencia basica, excepciones basicas): "
         f"`starter_code` DEBE ir vacio (`\"\"`) o solo un comentario de 1 linea (`// Implementa tu solución en Java aquí`) "
         f"— PROHIBIDO regalar el esqueleto resuelto de la clase/metodos con `// TODO`.\n"
@@ -980,12 +1012,18 @@ def _generate_nodes_with_ai(
         "conectados en `parent_ids` a los nodos 'theory' que ponen a prueba.\n"
         "REGLAS OBLIGATORIAS:\n"
         f"1. `story_script` DEBE seguir esta preferencia del estudiante: {exp_rule}\n"
-        "2. Ningun titulo (`title`) puede ser una linea separadora (`---`, `===`, `***`) ni tener menos de 3 caracteres alfanumericos.\n"
-        "3. Los nodos iniciales de los 3 a 4 bloques 'theory' llevan `parent_ids: []`. Los siguientes niveles de cada bloque "
+        "2. DESTACADOS VISUALES EN `story_script`: Marca entre 3 y 6 conceptos, reglas o palabras clave fundamentales "
+        "por historia con `**negrita**` (ej. `**polimorfismo dinamico**`, `**@Override**`, `**pasa por valor**`).\n"
+        "3. CONTRATO ESTRICTO DE COBERTURA EXPLICACION <-> PREGUNTAS: El `story_script` DEBE explicar de forma explicita "
+        "y suficiente TODOS los conceptos, sintaxis, anotaciones y `rubric_points` que se evaluaran en `eval_prompts` "
+        "de ese nodo (ej. si una pregunta exige `@Override` o `super()`, `story_script` debe enseñarlo explicitamente "
+        "con ejemplo). PROHIBIDO exigir en `eval_prompts` sintaxis, anotaciones o conceptos que no aparezcan en `story_script`.\n"
+        "4. Ningun titulo (`title`) puede ser una linea separadora (`---`, `===`, `***`) ni tener menos de 3 caracteres alfanumericos.\n"
+        "5. Los nodos iniciales de los 3 a 4 bloques 'theory' llevan `parent_ids: []`. Los siguientes niveles de cada bloque "
         "conectan `parent_ids` al nodo inferior de su bloque formando 3 a 4 columnas paralelas de 2 a 3 niveles.\n"
-        f"4. Cada nodo DEBE incluir `eval_prompts` con 3 a 4 preguntas a ciegas siguiendo este estilo: {q_rule} "
+        f"6. Cada nodo DEBE incluir `eval_prompts` con 3 a 4 preguntas a ciegas siguiendo este estilo: {q_rule} "
         "Cada pregunta lleva 2 a 3 `rubric_points` concretos y verificables.\n"
-        "5. Cubre TODOS los archivos entregados, no solo el primero.\n"
+        "7. Cubre TODOS los archivos entregados, no solo el primero.\n"
         f"{code_lab_extra}"
         "Responde UNICAMENTE JSON valido con la clave `nodes`:\n"
         "{\n"
@@ -1137,6 +1175,9 @@ def _generate_nodes_with_ai(
         return (fallback, "local_fallback")
 
 
+_generate_tree_with_ai = _generate_nodes_with_ai
+
+
 def _next_unique_node_id(prefix: str, start_idx: int, used_ids: set[str]) -> str:
     idx = start_idx
     while f"{prefix}{idx}" in used_ids:
@@ -1211,6 +1252,8 @@ def _fallback_append_nodes_from_chunks(
             world_metaphor=world_metaphor,
             text_snippet=text_snippet,
             key_phrases=key_phrases,
+            engine_type=engine_type,
+            default_language=default_language,
         )
         q_text = _build_fallback_question(
             question_style=question_style,
@@ -1292,7 +1335,11 @@ def _generate_append_nodes_with_ai(
         "3. `parent_ids` de cada nodo nuevo DEBE conectarse al menos a un nodo existente del arbol (o a otro nodo nuevo recien creado) "
         "para que quede integrado en el DAG.\n"
         f"4. `story_script` DEBE seguir esta preferencia: {exp_rule}\n"
-        f"5. Cada nodo nuevo DEBE incluir `eval_prompts` con 2 a 4 preguntas a ciegas ({q_rule}) y 2 a 3 `rubric_points` verificables.\n"
+        "5. DESTACADOS VISUALES EN `story_script`: Marca entre 3 y 6 conceptos, reglas o palabras clave por historia con `**negrita**`.\n"
+        "6. CONTRATO ESTRICTO DE COBERTURA EXPLICACION <-> PREGUNTAS: El `story_script` DEBE explicar explicitamente todos los "
+        "conceptos, sintaxis, anotaciones y `rubric_points` evaluados en `eval_prompts` de ese nodo. PROHIBIDO evaluar en "
+        "`eval_prompts` sintaxis o conceptos que no aparezcan en `story_script`.\n"
+        f"7. Cada nodo nuevo DEBE incluir `eval_prompts` con 2 a 4 preguntas a ciegas ({q_rule}) y 2 a 3 `rubric_points` verificables.\n"
         f"{code_lab_extra}"
         "Responde UNICAMENTE JSON valido con la clave `nodes`."
     )

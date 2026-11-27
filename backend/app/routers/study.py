@@ -19,12 +19,14 @@ from app.schemas.study import (
     ExamRouteResponse,
     NodeProgress,
     PointFeedback,
+    PromptReviewItem,
     RegenerateQuestionsResponse,
     RegenerateStoryResponse,
     normalize_answers,
 )
 from app.services.ai_router import (
     AiProviderError,
+    build_prompt_reviews_and_routing,
     evaluate_with_ai,
     generate_exam_route_with_ai,
     regenerate_questions_with_ai,
@@ -186,6 +188,8 @@ def post_evaluate_node(
     imprecisions: list[str] = []
     re_explanation: str | None = None
     evaluated_by = "local_fallback"
+    prompt_reviews_raw: list[dict[str, Any]] = []
+    routing_suggestion: str | None = None
 
     # Si no se inyectaron covered_points ni score explicito, intentamos evaluar con ai_router
     if req.covered_points is None and req.score is None:
@@ -203,6 +207,8 @@ def post_evaluate_node(
             imprecisions = list(ai_res.get("imprecisions") or [])
             re_explanation = ai_res.get("re_explanation")
             evaluated_by = str(ai_res.get("provider") or "ai")
+            prompt_reviews_raw = list(ai_res.get("prompt_reviews") or [])
+            routing_suggestion = ai_res.get("routing_suggestion")
         except (AiProviderError, ValueError, KeyError):
             raw_feedback = evaluate_rubric(eval_prompts, answers_by_prompt, None)
             computed_score = score_from_feedback(raw_feedback)
@@ -232,6 +238,23 @@ def post_evaluate_node(
                     + "; ademas, ".join(missed_pts[:3])
                     + "."
                 )
+
+    if not prompt_reviews_raw or not routing_suggestion:
+        fb_covered = [f"{f['prompt_id']}::{f['point_index']}" for f in raw_feedback if f["covered"]]
+        fallback_reviews, fallback_routing = build_prompt_reviews_and_routing(
+            node_title=node_row["title"],
+            eval_prompts=eval_prompts,
+            answers_by_prompt=answers_by_prompt,
+            covered_points=fb_covered,
+            score=computed_score,
+            imprecisions=imprecisions,
+            raw_prompt_reviews=prompt_reviews_raw or None,
+            raw_routing_suggestion=routing_suggestion,
+        )
+        if not prompt_reviews_raw:
+            prompt_reviews_raw = fallback_reviews
+        if not routing_suggestion:
+            routing_suggestion = fallback_routing
 
     conn.execute(
         """
@@ -324,6 +347,8 @@ def post_evaluate_node(
         imprecisions=imprecisions,
         re_explanation=re_explanation,
         evaluated_by=evaluated_by,
+        prompt_reviews=[PromptReviewItem.model_validate(pr) for pr in prompt_reviews_raw],
+        routing_suggestion=routing_suggestion,
     )
 
 
@@ -369,6 +394,7 @@ def post_regenerate_story(
         eval_prompts=eval_prompts,
         preferred_provider=ai_provider,
         explanation_style=explanation_style,
+        engine_type=course_row["engine_type"] or "concept_tree",
     )
 
     clear_node_tts_cache(real_course_id, old_story)

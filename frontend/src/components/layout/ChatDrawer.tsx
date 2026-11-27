@@ -1,5 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowRight, Info, Loader2, MessageSquare, Send, Trash2, X } from 'lucide-react'
+import {
+  ArrowRight,
+  Info,
+  Loader2,
+  Maximize2,
+  MessageSquare,
+  Minimize2,
+  Send,
+  Trash2,
+  X,
+} from 'lucide-react'
 import {
   clearChatHistory,
   getChatHistory,
@@ -56,6 +66,7 @@ export default function ChatDrawer({
   const [suggestedByMsg, setSuggestedByMsg] = useState<Record<number, SuggestedNode[]>>({})
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [expanded, setExpanded] = useState(false)
   const [provider, setProvider] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -147,7 +158,9 @@ export default function ChatDrawer({
         role="dialog"
         aria-label="Chat Tutor del Ramo"
         onClick={(e) => e.stopPropagation()}
-        className="flex h-full w-full max-w-md flex-col border-l border-slate-200 bg-white shadow-xl dark:border-slate-800 dark:bg-slate-900"
+        className={`flex h-full w-full flex-col border-l border-slate-200 bg-white shadow-xl transition-[max-width] duration-200 dark:border-slate-800 dark:bg-slate-900 ${
+          expanded ? 'max-w-3xl' : 'max-w-md'
+        }`}
       >
         <header className="flex items-start justify-between gap-2 border-b border-slate-200 p-4 dark:border-slate-800">
           <div className="min-w-0">
@@ -161,6 +174,15 @@ export default function ChatDrawer({
             </p>
           </div>
           <div className="flex items-center gap-1">
+            <button
+              type="button"
+              title={expanded ? 'Contraer panel del tutor' : 'Expandir panel para leer código'}
+              aria-label={expanded ? 'Contraer panel del tutor' : 'Expandir panel del tutor'}
+              onClick={() => setExpanded((v) => !v)}
+              className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+            >
+              {expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+            </button>
             {messages.length > 0 && (
               <button
                 type="button"

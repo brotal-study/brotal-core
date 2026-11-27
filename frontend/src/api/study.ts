@@ -64,6 +64,22 @@ export interface PointFeedback {
   covered: boolean
 }
 
+export interface CodeFixItem {
+  broken_snippet: string
+  fixed_snippet: string
+  why: string
+}
+
+export type PromptReviewStatus = 'passed' | 'partial' | 'failed'
+
+export interface PromptReviewItem {
+  prompt_id: string
+  status: PromptReviewStatus
+  diagnosis: string
+  code_fixes?: CodeFixItem[]
+  corrected_solution?: string | null
+}
+
 export interface EvaluateResponse {
   score: number // 1.0 .. 10.0
   passed: boolean // score >= 7.0
@@ -73,6 +89,8 @@ export interface EvaluateResponse {
   imprecisions?: string[]
   re_explanation?: string | null
   evaluated_by?: string
+  prompt_reviews?: PromptReviewItem[]
+  routing_suggestion?: string | null
 }
 
 export interface RegenerateStoryResponse {

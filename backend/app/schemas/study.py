@@ -1,7 +1,7 @@
 """Esquemas Pydantic v2 para arbol de estudio y evaluacion 7/10 (v1.0)."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -48,6 +48,20 @@ class PointFeedback(BaseModel):
     covered: bool
 
 
+class CodeFixItem(BaseModel):
+    broken_snippet: str
+    fixed_snippet: str
+    why: str
+
+
+class PromptReviewItem(BaseModel):
+    prompt_id: str
+    status: Literal["passed", "partial", "failed"] = "partial"
+    diagnosis: str
+    code_fixes: list[CodeFixItem] = Field(default_factory=list)
+    corrected_solution: str | None = None
+
+
 class EvaluateResponse(BaseModel):
     score: float
     passed: bool
@@ -57,6 +71,8 @@ class EvaluateResponse(BaseModel):
     imprecisions: list[str] = Field(default_factory=list)
     re_explanation: str | None = None
     evaluated_by: str = "local_fallback"
+    prompt_reviews: list[PromptReviewItem] = Field(default_factory=list)
+    routing_suggestion: str | None = None
 
 
 class RegenerateStoryResponse(BaseModel):
