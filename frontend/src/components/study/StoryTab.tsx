@@ -7,6 +7,7 @@ import {
   Copy,
   FastForward,
   Gauge,
+  Languages,
   Loader2,
   MessageSquare,
   Pause,
@@ -22,6 +23,7 @@ import type { ExplanationStyle } from '../../api/curriculum'
 import {
   fetchNodeTtsBlob,
   fetchNodeTtsTimingsData,
+  fetchPhraseTtsBlob,
   type PackNode,
   type TtsSentenceTiming,
   type TtsWordTiming,
@@ -661,6 +663,7 @@ export default function StoryTab({
             return (
               <StoryCodeBlock
                 key={`code-${bIdx}`}
+                courseId={courseId}
                 language={block.language}
                 code={block.code}
               />
@@ -776,12 +779,88 @@ export default function StoryTab({
   )
 }
 
-function StoryCodeBlock({ language, code }: { language: string; code: string }) {
+function StoryCodeBlock({
+  courseId,
+  language,
+  code,
+}: {
+  courseId: string
+  language: string
+  code: string
+}) {
   const theme = useAppStore((s) => s.theme)
   const [copied, setCopied] = useState(false)
+  const [loadingVoice, setLoadingVoice] = useState(false)
+  const [playingVoice, setPlayingVoice] = useState(false)
+  const voiceAudioRef = useRef<HTMLAudioElement | null>(null)
+  const voiceUrlRef = useRef<string | null>(null)
+  const voiceAbortRef = useRef<AbortController | null>(null)
+
+  const normLang = (language || '').trim().toLowerCase()
+  const isEnglishExamples = normLang === 'en' || normLang === 'english' || normLang === 'en-us'
   const extensions = useMemo(() => getLanguageExtension(language), [language])
   const cmTheme = theme === 'dark' ? oneDark : 'light'
   const langLabel = (language || 'java').toUpperCase()
+
+  const stopVoice = () => {
+    voiceAbortRef.current?.abort()
+    voiceAbortRef.current = null
+    if (voiceAudioRef.current) {
+      voiceAudioRef.current.pause()
+      voiceAudioRef.current = null
+    }
+    if (voiceUrlRef.current) {
+      URL.revokeObjectURL(voiceUrlRef.current)
+      voiceUrlRef.current = null
+    }
+    setLoadingVoice(false)
+    setPlayingVoice(false)
+  }
+
+  useEffect(() => () => stopVoice(), [code])
+
+  const handlePlayEnglish = async () => {
+    if (loadingVoice || playingVoice) {
+      stopVoice()
+      return
+    }
+    // Quitar traducciones entre parentesis y viñetas para pronunciar solo las frases en ingles
+    const englishOnly = code
+      .split('\n')
+      .map((line) =>
+        line
+          .replace(/^[-*•]\s*/, '')
+          .replace(/^(?:Affirmative|Negative|Question|Example\s*\d*|Afirmativa|Negativa|Pregunta)\s*:\s*/i, '')
+          .replace(/\([^)]*\)/g, '')
+          .trim(),
+      )
+      .filter(Boolean)
+      .join('. ')
+      .slice(0, 1150)
+
+    if (!englishOnly) return
+    setLoadingVoice(true)
+    const ctrl = new AbortController()
+    voiceAbortRef.current = ctrl
+    try {
+      const blob = await fetchPhraseTtsBlob(courseId, englishOnly, 'en', 'us', ctrl.signal)
+      if (ctrl.signal.aborted) return
+      const url = URL.createObjectURL(blob)
+      voiceUrlRef.current = url
+      const audio = new Audio(url)
+      voiceAudioRef.current = audio
+      audio.onended = () => setPlayingVoice(false)
+      audio.onerror = () => setPlayingVoice(false)
+      setLoadingVoice(false)
+      setPlayingVoice(true)
+      await audio.play()
+    } catch {
+      if (!ctrl.signal.aborted) {
+        setLoadingVoice(false)
+        setPlayingVoice(false)
+      }
+    }
+  }
 
   const handleCopy = async () => {
     try {
@@ -791,6 +870,54 @@ function StoryCodeBlock({ language, code }: { language: string; code: string }) 
     } catch {
       setCopied(false)
     }
+  }
+
+  if (isEnglishExamples) {
+    const lines = code
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+    return (
+      <div className="my-1 overflow-hidden rounded-md border border-sky-300/80 bg-sky-50/40 text-sm dark:border-sky-800/70 dark:bg-sky-950/25">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sky-200/80 bg-sky-100/60 px-3 py-1.5 dark:border-sky-800/60 dark:bg-sky-950/50">
+          <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-sky-900 dark:text-sky-200">
+            <Languages size={13} className="text-sky-600 dark:text-sky-400" />
+            Ejemplos en inglés
+          </span>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => void handlePlayEnglish()}
+              className="inline-flex items-center gap-1 rounded border border-sky-300 bg-white px-2 py-0.5 text-[11px] font-medium text-sky-900 hover:bg-sky-50 dark:border-sky-700 dark:bg-slate-900 dark:text-sky-200 dark:hover:bg-sky-950"
+            >
+              {loadingVoice ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : playingVoice ? (
+                <Square size={11} />
+              ) : (
+                <Volume2 size={12} />
+              )}
+              {loadingVoice ? 'Cargando...' : playingVoice ? 'Detener' : 'Escuchar en inglés'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleCopy()}
+              className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              {copied ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+              {copied ? 'Copiado' : 'Copiar'}
+            </button>
+          </div>
+        </div>
+        <ul className="flex flex-col gap-1.5 p-3 text-sm leading-relaxed text-slate-900 dark:text-slate-100">
+          {lines.map((ln, idx) => (
+            <li key={idx} className="break-words">
+              {ln.replace(/^[-*•]\s*/, '')}
+            </li>
+          ))}
+        </ul>
+      </div>
+    )
   }
 
   return (

@@ -14,11 +14,15 @@ import {
   Compass,
   Cpu,
   EyeOff,
+  GraduationCap,
   Info,
+  Languages,
   Layers,
   Loader2,
   MessageCircle,
   MessageSquare,
+  Mic,
+  PenLine,
   RefreshCw,
   RotateCcw,
   Send,
@@ -38,15 +42,22 @@ import {
   type PackNode,
   type PromptReviewItem,
   type PromptReviewStatus,
+  type TtsAccent,
 } from '../../api/study'
 import type { QuestionStyle } from '../../api/curriculum'
 import { useAppStore } from '../../store/useAppStore'
 import { useStudyStore } from '../../store/useStudyStore'
 import MarkdownView from '../common/MarkdownView'
-import CodeChallengeInput, { getLanguageExtension, sanitizeCodePrompt } from './CodeChallengeInput'
+import CodeChallengeInput, {
+  getLanguageExtension,
+  sanitizeCodePrompt,
+  type SupportLevel,
+} from './CodeChallengeInput'
 import { formatRemaining, useNow } from './studyUtils'
 
 interface Props {
+  courseId?: string
+  engineType?: string
   node: PackNode
   progress: NodeProgress
   nextNode?: PackNode | null
@@ -61,6 +72,12 @@ interface Props {
   /** true mientras hay respuestas/revision sin cerrar (para pedir confirmacion al salir). */
   onInProgressChange: (v: boolean) => void
 }
+
+const SUPPORT_LEVELS: { id: SupportLevel; label: string; detail: string }[] = [
+  { id: 'guided', label: 'Guiado', detail: 'Audio 0.8x + guía de estructura' },
+  { id: 'transition', label: 'Transición', detail: 'Texto en inglés + audio 0.95x' },
+  { id: 'exam', label: 'Examen Real', detail: 'Audio 1.0x y oído primero en Speaking' },
+]
 
 type Phase = 'answering' | 'self_review' | 'result'
 
@@ -104,6 +121,8 @@ function isPromptEditedOrAnswered(q: EvalPrompt, answers: Record<string, string>
 }
 
 export default function EvalTab({
+  courseId,
+  engineType,
   node,
   progress,
   nextNode = null,
@@ -114,6 +133,12 @@ export default function EvalTab({
   onAskTutor,
   onInProgressChange,
 }: Props) {
+  const storeCourseId = useStudyStore((s) => s.tree?.course_id)
+  const storeEngineType = useStudyStore((s) => s.tree?.engine_type)
+  const effectiveCourseId = courseId ?? storeCourseId ?? 'default'
+  const effectiveEngineType = engineType ?? storeEngineType ?? 'concept_tree'
+  const isLanguageStudio = effectiveEngineType === 'language_studio'
+
   const questionStyle = useStudyStore((s) => s.questionStyle)
   const setQuestionStyle = useStudyStore((s) => s.setQuestionStyle)
   const [order, setOrder] = useState(() => shuffled(node.id, node.eval_prompts))
@@ -125,6 +150,10 @@ export default function EvalTab({
   const [result, setResult] = useState<EvaluateResponse | null>(null)
   const [busy, setBusy] = useState(false)
   const [regeneratingQuestions, setRegeneratingQuestions] = useState(false)
+  const [supportLevel, setSupportLevel] = useState<SupportLevel>(() =>
+    progress.mastery_level === 0 ? 'guided' : progress.mastery_level === 1 ? 'transition' : 'exam',
+  )
+  const [accent, setAccent] = useState<TtsAccent>('us')
 
   useEffect(() => {
     setOrder(shuffled(node.id, node.eval_prompts))
@@ -263,6 +292,41 @@ export default function EvalTab({
 
       {phase === 'answering' && (
         <>
+          {isLanguageStudio && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-teal-200 bg-teal-50/60 px-3 py-2 text-xs text-teal-950 dark:border-teal-800/70 dark:bg-teal-950/35 dark:text-teal-200">
+              <div className="inline-flex items-center gap-1.5 font-semibold">
+                <GraduationCap size={14} className="shrink-0 text-teal-600 dark:text-teal-400" />
+                <span>Nivel de apoyo:</span>
+              </div>
+              <div
+                className="inline-flex flex-wrap rounded-md border border-teal-300 bg-white p-0.5 dark:border-teal-700 dark:bg-slate-900"
+                role="radiogroup"
+                aria-label="Nivel de apoyo Language Studio"
+              >
+                {SUPPORT_LEVELS.map((lvl) => (
+                  <button
+                    key={lvl.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={supportLevel === lvl.id}
+                    title={lvl.detail}
+                    onClick={() => setSupportLevel(lvl.id)}
+                    className={`rounded px-2.5 py-1 text-xs font-medium transition ${
+                      supportLevel === lvl.id
+                        ? 'bg-teal-700 text-white dark:bg-teal-500 dark:text-slate-950'
+                        : 'text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    {lvl.label}
+                  </button>
+                ))}
+              </div>
+              <span className="text-[11px] text-teal-800 dark:text-teal-300">
+                {SUPPORT_LEVELS.find((s) => s.id === supportLevel)?.detail}
+              </span>
+            </div>
+          )}
+
           {order.map((q, i) => (
             <CodeChallengeInput
               key={q.id}
@@ -270,6 +334,11 @@ export default function EvalTab({
               index={i}
               value={answers[q.id] ?? ''}
               onChange={(nextValue) => setAnswers((a) => ({ ...a, [q.id]: nextValue }))}
+              courseId={effectiveCourseId}
+              engineType={effectiveEngineType}
+              supportLevel={supportLevel}
+              accent={accent}
+              onAccentChange={setAccent}
             />
           ))}
 
@@ -651,6 +720,11 @@ function Result({
               const ct = q.challenge_type ?? 'concept'
               const isCodeEditorChallenge = ct === 'debug' || ct === 'implement'
               const isTraceChallenge = ct === 'trace'
+              const isLanguageChallenge =
+                ct === 'fill_blank' ||
+                ct === 'translate' ||
+                ct === 'speaking_prompt' ||
+                q.language === 'en'
               const langLabel = (q.language && q.language !== 'text' ? q.language : 'java').toUpperCase()
               const extensions = getLanguageExtension(q.language)
 
@@ -712,10 +786,23 @@ function Result({
                             <Bug size={11} />
                           ) : ct === 'trace' ? (
                             <Terminal size={11} />
+                          ) : ct === 'fill_blank' ? (
+                            <PenLine size={11} />
+                          ) : ct === 'translate' ? (
+                            <Languages size={11} />
+                          ) : ct === 'speaking_prompt' ? (
+                            <Mic size={11} />
                           ) : (
                             <Code2 size={11} />
                           )}
-                          {ct} · {langLabel}
+                          {ct === 'fill_blank'
+                            ? 'Completar'
+                            : ct === 'translate'
+                              ? 'Redactar en inglés'
+                              : ct === 'speaking_prompt'
+                                ? 'Speaking'
+                                : ct}{' '}
+                          · {langLabel}
                         </span>
                       )}
                     </div>
@@ -827,7 +914,9 @@ function Result({
                     <div className="flex flex-col gap-2">
                       <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-300">
                         <Wrench size={13} />
-                        Correcciones línea por línea ({codeFixes.length})
+                        {isLanguageChallenge
+                          ? `Correcciones puntuales (${codeFixes.length})`
+                          : `Correcciones línea por línea (${codeFixes.length})`}
                       </div>
                       {codeFixes.map((fix, fIdx) => (
                         <div
@@ -837,7 +926,7 @@ function Result({
                           <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
                             <div className="flex min-w-0 flex-col gap-1">
                               <span className="text-[11px] font-semibold text-rose-700 dark:text-rose-300">
-                                Tu código
+                                {isLanguageChallenge ? 'Tu frase' : 'Tu código'}
                               </span>
                               <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded border border-rose-200 bg-rose-50/80 p-2 font-mono text-[11px] text-rose-950 dark:border-rose-800/70 dark:bg-rose-950/50 dark:text-rose-200">
                                 {fix.broken_snippet}
@@ -845,7 +934,7 @@ function Result({
                             </div>
                             <div className="flex min-w-0 flex-col gap-1">
                               <span className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
-                                Cambio necesario
+                                {isLanguageChallenge ? 'Corrección natural' : 'Cambio necesario'}
                               </span>
                               <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded border border-emerald-200 bg-emerald-50/80 p-2 font-mono text-[11px] text-emerald-950 dark:border-emerald-800/70 dark:bg-emerald-950/50 dark:text-emerald-200">
                                 {fix.fixed_snippet}
@@ -873,8 +962,12 @@ function Result({
                       >
                         {isSolutionOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                         {isSolutionOpen
-                          ? 'Ocultar solución de referencia'
-                          : 'Ver solución de referencia'}
+                          ? isLanguageChallenge
+                            ? 'Ocultar respuesta modelo'
+                            : 'Ocultar solución de referencia'
+                          : isLanguageChallenge
+                            ? 'Ver respuesta modelo en inglés'
+                            : 'Ver solución de referencia'}
                       </button>
                       {isSolutionOpen && (
                         <div className="rounded-md border border-slate-300 bg-slate-50 p-2.5 dark:border-slate-700 dark:bg-slate-900">

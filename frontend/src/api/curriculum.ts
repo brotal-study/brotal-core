@@ -205,7 +205,7 @@ export async function putProvidersSettings(
 }
 
 export type IngestMode = 'append' | 'replace'
-export type IngestEngineType = 'auto' | 'concept_tree' | 'code_lab'
+export type IngestEngineType = 'auto' | 'concept_tree' | 'code_lab' | 'language_studio'
 
 export interface ProcessedFileSummary {
   filename: string
@@ -217,7 +217,7 @@ export interface IngestLocalResponse {
   course_id: string
   course_code: string
   title: string
-  engine_type?: 'concept_tree' | 'code_lab' | string
+  engine_type?: 'concept_tree' | 'code_lab' | 'language_studio' | string
   detected_language?: string
   status: CourseStatus
   mode?: IngestMode

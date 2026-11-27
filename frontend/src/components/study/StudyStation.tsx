@@ -8,6 +8,7 @@ import { formatRemaining, LEVEL_STYLE } from './studyUtils'
 
 interface Props {
   courseId: string
+  engineType?: string
   node: PackNode
   progress: NodeProgress
   nextNode?: PackNode | null
@@ -29,6 +30,7 @@ type Tab = 'story' | 'eval'
 /** Se monta con `key={node.id}`: al cambiar de nodo el estado local se reinicia. */
 export default function StudyStation({
   courseId,
+  engineType,
   node,
   progress,
   nextNode = null,
@@ -131,6 +133,8 @@ export default function StudyStation({
           />
         ) : (
           <EvalTab
+            courseId={courseId}
+            engineType={engineType}
             node={node}
             progress={progress}
             nextNode={nextNode}

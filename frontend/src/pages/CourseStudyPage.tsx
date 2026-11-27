@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { CalendarClock, Code2, FolderOpen, Home, MessageSquare, RotateCcw } from 'lucide-react'
+import { CalendarClock, Code2, FolderOpen, Home, Languages, MessageSquare, RotateCcw } from 'lucide-react'
 import {
   getExamRoute,
   inCooldown,
@@ -233,6 +233,12 @@ export default function CourseStudyPage() {
                   Code Lab
                 </span>
               )}
+              {tree.engine_type === 'language_studio' && (
+                <span className="inline-flex shrink-0 items-center gap-1 rounded border border-teal-300 bg-teal-50 px-1.5 py-0.5 text-[10px] font-semibold text-teal-900 dark:border-teal-700/80 dark:bg-teal-950/60 dark:text-teal-200">
+                  <Languages size={11} />
+                  Language Studio
+                </span>
+              )}
             </div>
             <div className="font-mono text-[11px] text-slate-500">{tree.course_code}</div>
           </div>
@@ -370,6 +376,7 @@ export default function CourseStudyPage() {
             <StudyStation
               key={node.id}
               courseId={tree.course_id}
+              engineType={tree.engine_type}
               node={node}
               progress={tree.progress[node.id]}
               nextNode={nextRecommendedNode}

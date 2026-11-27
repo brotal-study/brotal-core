@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from app.config import tts_cache_dir
 
@@ -20,6 +20,20 @@ DEFAULT_VOICES = (
     "es-MX-JorgeNeural",
     "es-ES-AlvaroNeural",
 )
+
+ENGLISH_VOICES = (
+    "en-US-AriaNeural",
+    "en-GB-SoniaNeural",
+    "en-US-GuyNeural",
+)
+
+ENGLISH_ACCENT_VOICES: dict[str, tuple[str, ...]] = {
+    "us": ("en-US-AriaNeural", "en-US-GuyNeural", "en-GB-SoniaNeural"),
+    "gb": ("en-GB-SoniaNeural", "en-US-AriaNeural", "en-US-GuyNeural"),
+    "au": ("en-AU-NatashaNeural", "en-GB-SoniaNeural", "en-US-AriaNeural"),
+}
+
+MAX_PHRASE_TTS_CHARS = 1200
 
 
 class TtsSynthesisError(RuntimeError):
@@ -336,3 +350,60 @@ def clear_node_tts_cache(course_id: str, text: str | None = None) -> None:
         timings_file = cached_tts_timings_path(course_id, cleaned, candidate_voice)
         mp3_file.unlink(missing_ok=True)
         timings_file.unlink(missing_ok=True)
+
+
+def _prepare_phrase_for_tts(text: str, lang: str) -> str:
+    base = strip_code_blocks_and_markdown_for_tts(text).strip() or text.strip()
+    blank_word = " blank " if lang == "en" else " espacio "
+    normalized = re.sub(r"_{2,}", blank_word, base)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+async def synthesize_phrase_tts(
+    *,
+    course_id: str,
+    text: str,
+    lang: Literal["en", "es"] = "en",
+    accent: Literal["us", "gb", "au"] = "us",
+) -> Path:
+    """Sintetiza y cachea por SHA-256 una frase corta en ingles o espanol en ~/.brotal/tts_cache/{course_id}/."""
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("El texto para TTS no puede estar vacio.")
+    if len(text) > MAX_PHRASE_TTS_CHARS:
+        raise ValueError(f"El texto excede el limite de {MAX_PHRASE_TTS_CHARS} caracteres.")
+
+    spoken = _prepare_phrase_for_tts(raw, lang)
+    if not spoken:
+        raise ValueError("El texto no contiene contenido sintetizable.")
+
+    if lang == "es":
+        voices_to_try = list(DEFAULT_VOICES)
+    else:
+        voices_to_try = list(ENGLISH_ACCENT_VOICES.get(accent, ENGLISH_VOICES))
+
+    primary_voice = voices_to_try[0]
+    safe_course = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in course_id) or "default"
+    course_dir = tts_cache_dir() / safe_course
+    course_dir.mkdir(parents=True, exist_ok=True)
+
+    digest = hashlib.sha256(f"phrase::{lang}::{accent}::{primary_voice}::{spoken}".encode()).hexdigest()[:32]
+    target_path = course_dir / f"{digest}.mp3"
+    if target_path.is_file() and target_path.stat().st_size > 0:
+        return target_path
+
+    last_err: Exception | None = None
+    tmp_path = target_path.with_suffix(".tmp.mp3")
+    for candidate_voice in voices_to_try:
+        try:
+            await _run_edge_tts(spoken, candidate_voice, tmp_path)
+            if tmp_path.is_file() and tmp_path.stat().st_size > 0:
+                tmp_path.replace(target_path)
+                return target_path
+            raise TtsSynthesisError("edge-tts genero un archivo vacio")
+        except (OSError, RuntimeError, ValueError, TtsSynthesisError) as exc:
+            last_err = exc
+            tmp_path.unlink(missing_ok=True)
+            continue
+
+    raise TtsSynthesisError(f"No se pudo sintetizar frase edge-tts: {last_err}") from last_err

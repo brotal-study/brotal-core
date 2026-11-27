@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.pack import EvalPrompt, PackNode
 from app.schemas.profile import CooldownMode
@@ -87,6 +87,14 @@ class RegenerateQuestionsResponse(BaseModel):
     node_id: str
     eval_prompts: list[EvalPrompt]
     provider: str
+
+
+class PhraseTtsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(..., min_length=1, max_length=1200)
+    lang: Literal["en", "es"] = "en"
+    accent: Literal["us", "gb", "au"] = "us"
 
 
 class ExamRouteRequest(BaseModel):

@@ -9,6 +9,7 @@ import {
   FilePlus2,
   FileText,
   GitBranch,
+  Languages,
   Layers,
   Loader2,
   RefreshCw,
@@ -252,7 +253,7 @@ export default function IngestModal({
                 Motor de estudio
               </span>
               <div
-                className="grid grid-cols-1 gap-1.5 sm:grid-cols-3"
+                className="grid grid-cols-1 gap-1.5 sm:grid-cols-2"
                 role="radiogroup"
                 aria-label="Motor de estudio"
               >
@@ -299,6 +300,21 @@ export default function IngestModal({
                 >
                   <Code2 size={13} className="shrink-0 text-sky-600 dark:text-sky-400" />
                   <span>Code Lab (código/SQL)</span>
+                </button>
+
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={engineType === 'language_studio'}
+                  onClick={() => setEngineType('language_studio')}
+                  className={`inline-flex items-center justify-center gap-1.5 rounded-md border px-2.5 py-2 text-xs font-medium transition ${
+                    engineType === 'language_studio'
+                      ? 'border-indigo-600 bg-indigo-50/80 text-indigo-950 dark:border-indigo-500 dark:bg-indigo-950/50 dark:text-indigo-100'
+                      : 'border-slate-300 text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800/50'
+                  }`}
+                >
+                  <Languages size={13} className="shrink-0 text-teal-600 dark:text-teal-400" />
+                  <span>Language Studio (idiomas)</span>
                 </button>
               </div>
             </div>
@@ -470,7 +486,9 @@ export default function IngestModal({
                   <strong>
                     {result.engine_type === 'code_lab'
                       ? `Code Lab${result.detected_language && result.detected_language !== 'text' ? ` (${result.detected_language.toUpperCase()})` : ''}`
-                      : 'Árbol Conceptual'}
+                      : result.engine_type === 'language_studio'
+                        ? 'Language Studio (EN)'
+                        : 'Árbol Conceptual'}
                   </strong>{' '}
                   · IA: <code className="font-mono">{result.provider}</code> · Modo:{' '}
                   <strong>{result.mode === 'append' ? 'Incremental (progreso conservado)' : 'Árbol completo'}</strong>
