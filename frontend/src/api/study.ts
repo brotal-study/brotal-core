@@ -19,6 +19,9 @@ export type CodeLanguage = 'java' | 'sql' | 'python' | 'c' | 'en' | 'text'
 export type EngineType = 'concept_tree' | 'code_lab' | 'language_studio'
 export type TtsLang = 'en' | 'es'
 export type TtsAccent = 'us' | 'gb' | 'au'
+export type TtsVoiceRole = 'default' | 'teacher' | 'partner'
+export type LanguageChatMode = 'missions' | 'exam_3parts'
+export type LanguageSpeakerRole = 'teacher' | 'partner'
 
 export interface EvalPrompt {
   id: string
@@ -154,6 +157,7 @@ export interface LanguageChatRequest {
   turn_index?: number
   start?: boolean
   finish?: boolean
+  mode?: LanguageChatMode
 }
 
 export interface LanguageChatSummaryItem {
@@ -165,6 +169,8 @@ export interface LanguageChatSummaryItem {
 export interface LanguageChatSessionSummary {
   headline?: string
   score_hint?: string
+  score_10?: number | null
+  passed?: boolean | null
   items: LanguageChatSummaryItem[]
 }
 
@@ -178,7 +184,26 @@ export interface LanguageChatResponse {
   lexical_chips: string[]
   sentence_starter?: string | null
   session_summary?: LanguageChatSessionSummary | null
+  mode?: LanguageChatMode | string
+  speaker_role?: LanguageSpeakerRole
+  part_index?: number | null
+  part_label?: string
   provider: string
+}
+
+export interface StudySttResponse {
+  text: string
+  provider: string
+}
+
+export class SttApiError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'SttApiError'
+    this.status = status
+  }
 }
 
 export interface ExamRouteRequest {
@@ -427,18 +452,60 @@ export async function fetchPhraseTtsBlob(
   lang: TtsLang = 'en',
   accent: TtsAccent = 'us',
   signal?: AbortSignal,
+  voiceRole: TtsVoiceRole = 'default',
 ): Promise<Blob> {
   const res = await fetch(
     `/api/v1/study/${encodeURIComponent(courseId)}/tts-phrase`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, lang, accent }),
+      body: JSON.stringify({ text, lang, accent, voice_role: voiceRole }),
       signal,
     },
   )
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.blob()
+}
+
+/** POST /api/v1/study/stt -> transcripción de audio con Groq Whisper (503 si falta GROQ_API_KEY). */
+export async function transcribeStudyAudio(
+  blob: Blob,
+  opts?: {
+    language?: string
+    promptHint?: string
+    filename?: string
+    signal?: AbortSignal
+  },
+): Promise<StudySttResponse> {
+  const inferredName = blob.type.includes('ogg')
+    ? 'speech.ogg'
+    : blob.type.includes('mp4')
+      ? 'speech.mp4'
+      : 'speech.webm'
+  const filename = opts?.filename || inferredName
+  const form = new FormData()
+  form.append('file', blob, filename)
+  form.append('language', opts?.language ?? 'en')
+  form.append('prompt_hint', opts?.promptHint ?? '')
+
+  const res = await fetch('/api/v1/study/stt', {
+    method: 'POST',
+    body: form,
+    signal: opts?.signal,
+  })
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`
+    try {
+      const data = (await res.json()) as { detail?: string }
+      if (typeof data?.detail === 'string' && data.detail.trim()) {
+        detail = data.detail.trim()
+      }
+    } catch {
+      // Ignorar si no es JSON
+    }
+    throw new SttApiError(detail, res.status)
+  }
+  return (await res.json()) as StudySttResponse
 }
 
 /** GET /api/v1/study/{course_id}/{node_id}/tts-timings */

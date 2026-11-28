@@ -1,8 +1,8 @@
-"""Pool multi-IA gratuito (Groq, Gemini Free, Ollama local) con rotacion y fallback (v1.0).
+"""Pool multi-IA gratuito (Groq, Gemini Free, Ollama local) con rotacion y fallback (v1.3).
 
 Soporta:
-- Groq: llama-3.3-70b-versatile / fallback openai/gpt-oss-120b
-- Gemini Free: gemini-2.5-flash (Google Generative Language REST API)
+- Groq: llama-3.3-70b-versatile / fallback llama-3.1-8b-instant y openai/gpt-oss-120b + Whisper STT
+- Gemini Free: gemini-3.1-flash-lite con cadena de respaldo (Google Generative Language REST API via x-goog-api-key)
 - Ollama local: http://127.0.0.1:11434 (o OLLAMA_URL configurado)
 - Modo 'auto': prueba en orden los proveedores configurados y disponibles.
 """
@@ -14,12 +14,12 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 from app.config import (
-    DEFAULT_GEMINI_MODEL,
     DEFAULT_GROQ_MODEL,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_URL,
@@ -31,7 +31,17 @@ from app.services.evaluator import evaluate_rubric
 from app.services.tts import split_story_sentences
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_TRANSCRIPTIONS_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+DEFAULT_GROQ_STT_MODEL = "whisper-large-v3-turbo"
+GROQ_FAST_FALLBACK_MODEL = "llama-3.1-8b-instant"
+
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
+GEMINI_FALLBACK_MODELS: tuple[str, ...] = (
+    "gemini-3.1-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-flash-latest",
+)
 
 LANGUAGE_INTERACTIVE_CHALLENGE_TYPES = (
     "word_order",
@@ -483,6 +493,89 @@ def extract_json_object(raw: str) -> dict[str, Any]:
     return parsed
 
 
+def _sanitize_error_text(text: str, *secrets: str) -> str:
+    """Enmascara API keys, tokens Bearer y query params key=/api_key= para evitar fugas en errores."""
+    sanitized = str(text or "")
+    for secret in secrets:
+        s = (secret or "").strip()
+        if s:
+            sanitized = sanitized.replace(s, "[REDACTED]")
+    sanitized = re.sub(
+        r"([?&](?:key|api_key|apikey|token)=)([^&\s'\"<>]+)",
+        r"\1[REDACTED]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"(Bearer\s+)([A-Za-z0-9._\-]+)",
+        r"\1[REDACTED]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"((?:x-goog-api-key|api[_-]?key|key)\s*[:=]\s*['\"]?)([^\s,'\"&<>]+)",
+        r"\1[REDACTED]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    return sanitized
+
+
+def _audio_content_type_for_filename(filename: str) -> str:
+    ext = Path(filename or "speech.webm").suffix.lower()
+    mapping = {
+        ".webm": "audio/webm",
+        ".ogg": "audio/ogg",
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
+    }
+    return mapping.get(ext, "application/octet-stream")
+
+
+def transcribe_audio_with_groq(
+    audio_bytes: bytes,
+    *,
+    filename: str = "speech.webm",
+    language: str = "en",
+    prompt_hint: str = "",
+) -> str:
+    """Transcribe audio real usando Groq Whisper (whisper-large-v3-turbo)."""
+    api_key = get_secret("GROQ_API_KEY")
+    if not api_key:
+        raise AiProviderError("GROQ_API_KEY no configurada para transcripción de voz.")
+    if not audio_bytes:
+        raise AiProviderError("El audio recibido está vacío.")
+
+    safe_name = Path(filename or "speech.webm").name or "speech.webm"
+    content_type = _audio_content_type_for_filename(safe_name)
+    form_data: dict[str, str] = {
+        "model": DEFAULT_GROQ_STT_MODEL,
+        "language": (language or "en").strip() or "en",
+    }
+    clean_hint = (prompt_hint or "").strip()
+    if clean_hint:
+        form_data["prompt"] = clean_hint[:400]
+
+    try:
+        resp = httpx.post(
+            GROQ_TRANSCRIPTIONS_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            files={"file": (safe_name, audio_bytes, content_type)},
+            data=form_data,
+            timeout=25.0,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            raise AiProviderError("Groq Whisper devolvió una transcripción vacía.")
+        return text
+    except (httpx.HTTPError, ValueError, TypeError, KeyError, AiProviderError) as exc:
+        clean_err = _sanitize_error_text(str(exc), api_key)
+        raise AiProviderError(f"Groq Whisper STT fallo: {clean_err}") from None
+
+
 def call_groq(
     messages: list[dict[str, str]],
     *,
@@ -496,44 +589,65 @@ def call_groq(
     if not api_key:
         raise AiProviderError("GROQ_API_KEY no configurada")
 
-    primary = model or get_secret("GROQ_MODEL", DEFAULT_GROQ_MODEL)
-    models_to_try = [primary]
-    if FALLBACK_GROQ_MODEL not in models_to_try:
-        models_to_try.append(FALLBACK_GROQ_MODEL)
+    primary = (model or get_secret("GROQ_MODEL", DEFAULT_GROQ_MODEL)).strip() or DEFAULT_GROQ_MODEL
+    safe_cap = min(max_tokens, 4096) if max_tokens is not None else 4096
 
-    last_err: Exception | None = None
-    for candidate_model in models_to_try:
+    def _post_groq(candidate_model: str, token_limit: int | None) -> AiCompletion:
         payload: dict[str, Any] = {
             "model": candidate_model,
             "messages": messages,
             "temperature": temperature,
         }
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
+        if token_limit is not None:
+            payload["max_tokens"] = token_limit
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
+        resp = httpx.post(
+            GROQ_API_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = str(data["choices"][0]["message"]["content"]).strip()
+        if not content:
+            raise AiProviderError("Groq devolvio respuesta vacia")
+        return AiCompletion(text=content, provider="groq", model=candidate_model)
+
+    last_err: str = "error desconocido"
+    # 1. Intento principal
+    try:
+        return _post_groq(primary, max_tokens)
+    except (httpx.HTTPError, KeyError, IndexError, ValueError, TypeError, AiProviderError) as exc:
+        last_err = _sanitize_error_text(str(exc), api_key)
+        status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+        is_empty = isinstance(exc, AiProviderError) and "vacia" in str(exc).lower()
+        # Si fallo por 413/429 o respuesta vacia con techo alto, reintentar 1 vez con max_tokens seguro
+        if (status_code in (413, 429) or is_empty) and (max_tokens is None or max_tokens > 4096):
+            try:
+                return _post_groq(primary, safe_cap)
+            except (httpx.HTTPError, KeyError, IndexError, ValueError, TypeError, AiProviderError) as retry_exc:
+                last_err = _sanitize_error_text(str(retry_exc), api_key)
+
+    # 2. Cadena de respaldo (llama-3.1-8b-instant primero por rapidez/cuota, luego FALLBACK_GROQ_MODEL)
+    fallback_models: list[str] = []
+    for cand in (GROQ_FAST_FALLBACK_MODEL, FALLBACK_GROQ_MODEL):
+        if cand and cand != primary and cand not in fallback_models:
+            fallback_models.append(cand)
+
+    for candidate_model in fallback_models:
         try:
-            resp = httpx.post(
-                GROQ_API_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=timeout,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            content = str(data["choices"][0]["message"]["content"]).strip()
-            if not content:
-                raise AiProviderError("Groq devolvio respuesta vacia")
-            return AiCompletion(text=content, provider="groq", model=candidate_model)
+            return _post_groq(candidate_model, safe_cap if max_tokens is not None else None)
         except (httpx.HTTPError, KeyError, IndexError, ValueError, TypeError, AiProviderError) as exc:
-            last_err = exc
+            last_err = _sanitize_error_text(str(exc), api_key)
             continue
 
-    raise AiProviderError(f"Groq fallo: {last_err}") from last_err
+    raise AiProviderError(f"Groq fallo: {last_err}") from None
 
 
 def call_gemini(
@@ -549,7 +663,13 @@ def call_gemini(
     if not api_key:
         raise AiProviderError("GEMINI_API_KEY no configurada")
 
-    chosen_model = model or get_secret("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+    env_model = get_secret("GEMINI_MODEL", "").strip()
+    primary = (model or env_model or DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
+    models_to_try: list[str] = [primary]
+    for fb_model in GEMINI_FALLBACK_MODELS:
+        if fb_model not in models_to_try:
+            models_to_try.append(fb_model)
+
     system_parts: list[str] = []
     contents: list[dict[str, Any]] = []
 
@@ -579,25 +699,43 @@ def call_gemini(
     if system_parts:
         payload["systemInstruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
 
-    url = f"{GEMINI_API_BASE}/{chosen_model}:generateContent"
-    try:
-        resp = httpx.post(
-            url,
-            params={"key": api_key},
-            headers={"Content-Type": "application/json"},
-            json=payload,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        candidates = data.get("candidates") or []
-        parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
-        text = "".join(str(p.get("text", "")) for p in parts).strip()
-        if not text:
-            raise AiProviderError("Gemini devolvio respuesta vacia")
-        return AiCompletion(text=text, provider="gemini", model=chosen_model)
-    except Exception as exc:
-        raise AiProviderError(f"Gemini fallo: {exc}") from exc
+    last_err: str = "error desconocido"
+    for candidate_model in models_to_try:
+        url = f"{GEMINI_API_BASE}/{candidate_model}:generateContent"
+        try:
+            resp = httpx.post(
+                url,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": api_key,
+                },
+                json=payload,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            candidates = data.get("candidates") or []
+            parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+            text = "".join(str(p.get("text", "")) for p in parts).strip()
+            if not text:
+                last_err = f"{candidate_model}: Gemini devolvio respuesta vacia"
+                continue
+            return AiCompletion(text=text, provider="gemini", model=candidate_model)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            last_err = _sanitize_error_text(str(exc), api_key)
+            if status in (404, 429):
+                continue
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_err = _sanitize_error_text(str(exc), api_key)
+            break
+
+    raise AiProviderError(f"Gemini fallo: {last_err}") from None
+
+
+_call_groq = call_groq
+_call_gemini = call_gemini
 
 
 def call_ollama(
@@ -695,7 +833,7 @@ def complete_chat(
                 ollama_kw = {"timeout": timeout} if timeout is not None else {}
                 return call_ollama(messages, json_mode=json_mode, temperature=temperature, **ollama_kw)
         except (AiProviderError, httpx.HTTPError, ValueError, TypeError) as exc:
-            errors.append(f"{provider}: {exc}")
+            errors.append(f"{provider}: {_sanitize_error_text(str(exc))}")
             continue
 
     raise AiProviderError("Todos los proveedores IA fallaron: " + " | ".join(errors))
@@ -2030,14 +2168,16 @@ def regenerate_story_with_ai(
     preferred_provider: str = "auto",
     explanation_style: str = "narrative",
     engine_type: str = "concept_tree",
+    branch: str = "theory",
 ) -> tuple[str, str]:
     """Genera una explicacion alternativa respetando explanation_style ('narrative' | 'direct' | 'structured').
 
-    Siempre 2 a 3 parrafos continuos (~180-240 palabras de prosa), sin listas con vinetas.
-    Marca de 3 a 6 conceptos clave en **negrita** y, si engine_type == 'code_lab', incluye 1 bloque de codigo cercado.
-    Garantiza cobertura explicita de todos los rubric_points de eval_prompts.
+    - En branch='theory': 2 a 3 parrafos continuos (~180-240 palabras de prosa), sin listas con vinetas.
+    - En branch='practice': briefing corto y accionable de 2 a 4 lineas (objetivo del taller, escenario y
+      habilidades integradas), nunca una clase teorica larga.
     Devuelve (new_story_script, provider_used).
     """
+    is_practice = str(branch or "theory").strip().lower() == "practice"
     rubric_points = [
         str(pt).strip()
         for q in eval_prompts
@@ -2074,6 +2214,47 @@ def regenerate_story_with_ai(
         )
     )
     metaphor_hint = world_metaphor or f"Taller practico de {course_title}"
+
+    if is_practice:
+        try:
+            practice_sys = (
+                "Eres el disenador de talleres practicos de Brotal. Tu tarea es escribir un BRIEFING CORTO Y ACCIONABLE "
+                "en espanol de EXACTAMENTE 2 a 4 lineas (50 a 90 palabras maximo) para un nodo `practice` (Taller / Simulacro).\n"
+                "REGLAS ESTRICTAS:\n"
+                "- PROHIBIDO escribir una clase teorica larga ni bloques de codigo extensos.\n"
+                "- Indica en prosa directa: (1) el **objetivo practico** del taller/simulacro, (2) el **escenario aplicado** "
+                "que enfrentara el estudiante, y (3) que **conceptos o habilidades previas** integra a ciegas.\n"
+                "- Usa entre 2 y 4 conceptos clave en `**negrita**`. Sin listas con vinetas ni encabezados markdown."
+            )
+            practice_user = (
+                f"Ramo: {course_title}\n"
+                f"Motor: {engine_type} (lenguaje: {inferred_lang})\n"
+                f"Nodo practice: {node_title} ({node_summary})\n"
+                f"Habilidades/rubric_points evaluados: {', '.join(rubric_points[:8])}\n"
+                f"Briefing anterior (redacta un nuevo escenario breve y accionable de 2 a 4 lineas):\n"
+                f"{current_story[:600]}\n"
+            )
+            comp = complete_chat(
+                [
+                    {"role": "system", "content": practice_sys},
+                    {"role": "user", "content": practice_user},
+                ],
+                preferred_provider=preferred_provider,
+                json_mode=False,
+                temperature=0.55,
+                max_tokens=300,
+            )
+            return (_strip_bullets(comp.text), comp.provider)
+        except AiProviderError:
+            focus_pts = "; ".join(rubric_points[:2]) if rubric_points else (node_summary or node_title)
+            briefing = _strip_bullets(
+                f"Objetivo del taller **{node_title}**: poner a prueba a ciegas tus habilidades en {course_title} "
+                f"resolviendo una bateria integrada de retos practicos.\n"
+                f"Escenario aplicado: enfrentaras casos reales y variados que combinan {focus_pts} sin consultar el apunte.\n"
+                f"Meta de aprobacion: demostrar **dominio operativo** consistente en los ejercicios para validar tu preparacion."
+            )
+            return (briefing, "local_fallback")
+
     style_rule = explanation_style_instruction(explanation_style, metaphor_hint)
 
     code_lab_story_rule = ""
@@ -2304,8 +2485,10 @@ def regenerate_questions_with_ai(
     preferred_provider: str = "auto",
     question_style: str = "direct",
     engine_type: str = "concept_tree",
+    branch: str = "theory",
 ) -> tuple[list[dict[str, Any]], str]:
-    """Redacta preguntas nuevas y distintas evaluando exactamente los mismos rubric_points segun question_style."""
+    """Redacta preguntas nuevas y distintas evaluando los rubric_points segun question_style y branch."""
+    is_practice = str(branch or "theory").strip().lower() == "practice"
     metaphor_hint = world_metaphor or f"Taller practico de {course_title}"
     q_rule = question_style_instruction(question_style, metaphor_hint)
     source_prompts = eval_prompts or [
@@ -2370,25 +2553,42 @@ def regenerate_questions_with_ai(
             "o clase que debe construir.\n"
         )
 
+    practice_regen_rule = (
+        "\n6. MODO TALLER / SIMULACRO (`branch: \"practice\"`): Genera ENTRE 6 Y 8 EJERCICIOS VARIADOS E INTEGRADORES "
+        "(ids `q1`..`q8`) mezclando distintos tipos de reto y combinando los conceptos evaluados, en lugar de solo 2 o 3 preguntas.\n"
+        if is_practice
+        else ""
+    )
+
     try:
         system_prompt = (
             "Eres el Evaluador Socratico de Brotal. Tu tarea es redactar PREGUNTAS NUEVAS Y DISTINTAS "
-            "que evaluen EXACTAMENTE los mismos `rubric_points` de cada pregunta original.\n"
-            f"{q_rule}\n"
+            + (
+                "formando una bateria integradora de 6 a 8 ejercicios practicos variados.\n"
+                if is_practice
+                else "que evaluen EXACTAMENTE los mismos `rubric_points` de cada pregunta original.\n"
+            )
+            + f"{q_rule}\n"
             "REGLAS OBLIGATORIAS:\n"
-            "1. Conserva los mismos `id` y los mismos `rubric_points` de cada item.\n"
-            "2. Cambia por completo la formulacion de cada `question` respetando el estilo solicitado.\n"
+            + (
+                "1. Genera entre 6 y 8 items con `id` correlativo (`q1`..`q8`), cada uno con 2 a 3 `rubric_points` verificables.\n"
+                if is_practice
+                else "1. Conserva los mismos `id` y los mismos `rubric_points` de cada item.\n"
+            )
+            + "2. Cambia por completo la formulacion de cada `question` respetando el estilo solicitado.\n"
             "3. CONTRATO ESTRICTO DE COBERTURA: PROHIBIDO exigir en las preguntas o en el codigo anotaciones, clases, "
             "sintaxis o conceptos que NO esten presentes y explicados en `story_script` ni en `node_summary`.\n"
             "4. Responde UNICAMENTE un objeto JSON valido con la clave `eval_prompts`:\n"
             '{"eval_prompts": [{"id": "q1", "question": "Nueva pregunta...", "rubric_points": ["..."], '
             '"challenge_type": "concept", "language": "text", "starter_code": null}]}'
             f"{code_lab_regen_rule}"
+            f"{practice_regen_rule}"
         )
         user_prompt = json.dumps(
             {
                 "course_title": course_title,
                 "engine_type": engine_type,
+                "branch": "practice" if is_practice else "theory",
                 "question_style": question_style,
                 "world_metaphor": metaphor_hint,
                 "node_title": node_title,
@@ -2406,6 +2606,7 @@ def regenerate_questions_with_ai(
             preferred_provider=preferred_provider,
             json_mode=True,
             temperature=0.65,
+            max_tokens=4096 if is_practice else None,
         )
         parsed = extract_json_object(comp.text)
         raw_list = parsed.get("eval_prompts")
@@ -2416,13 +2617,35 @@ def regenerate_questions_with_ai(
             str(item.get("id")): item for item in raw_list if isinstance(item, dict)
         }
         updated: list[dict[str, Any]] = []
-        for idx, orig in enumerate(source_prompts):
-            qid = str(orig.get("id") or f"q{idx+1}")
-            pts = [str(p) for p in (orig.get("rubric_points") or [])]
-            ai_item = items_by_id.get(qid)
-            if ai_item is None and idx < len(raw_list) and isinstance(raw_list[idx], dict):
-                ai_item = raw_list[idx]
-            ai_item = ai_item or {}
+        if is_practice:
+            target_items: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            for idx, raw_item in enumerate(raw_list[:10]):
+                if not isinstance(raw_item, dict):
+                    continue
+                orig_match = source_prompts[idx] if idx < len(source_prompts) else {}
+                target_items.append((orig_match, raw_item))
+        else:
+            target_items = []
+            for idx, orig in enumerate(source_prompts):
+                qid_lookup = str(orig.get("id") or f"q{idx+1}")
+                ai_item = items_by_id.get(qid_lookup)
+                if ai_item is None and idx < len(raw_list) and isinstance(raw_list[idx], dict):
+                    ai_item = raw_list[idx]
+                target_items.append((orig, ai_item or {}))
+
+        for idx, (orig, ai_item) in enumerate(target_items):
+            qid = str(orig.get("id") or ai_item.get("id") or f"q{idx+1}")
+            if is_practice and orig.get("id"):
+                qid = str(orig["id"])
+            elif is_practice:
+                qid = f"q{idx+1}"
+
+            if is_practice and ai_item.get("rubric_points"):
+                pts = [str(p).strip() for p in (ai_item.get("rubric_points") or []) if str(p).strip()]
+            else:
+                pts = [str(p) for p in (orig.get("rubric_points") or [])]
+            if not pts:
+                pts = [f"Aplica con precisión los criterios de {node_title}"]
 
             candidate_q = str(ai_item.get("question") or "").strip()
             if not candidate_q or candidate_q == str(orig.get("question") or "").strip():
@@ -2512,8 +2735,35 @@ def regenerate_questions_with_ai(
                 "¿Cual es la relacion tecnica exacta en {node} ({course}) cuando se evalua que {focus}?",
                 "Justifica brevemente en 2 lineas por que en {node} resulta clave que {focus}.",
             ]
+
+        fallback_sources = list(source_prompts)
+        if is_practice and len(fallback_sources) < 6:
+            extra_cycle = (
+                ["word_order", "categorize", "find_error", "dictation", "translate", "speaking_prompt"]
+                if is_language_studio
+                else (["debug", "implement", "trace", "debug", "implement", "trace"] if is_code_lab else ["concept"] * 6)
+            )
+            base_pts = [
+                str(p)
+                for sp in source_prompts
+                for p in (sp.get("rubric_points") or [])
+                if str(p).strip()
+            ] or [f"Integra los conceptos clave de {node_title}"]
+            while len(fallback_sources) < 6:
+                n_idx = len(fallback_sources)
+                fallback_sources.append(
+                    {
+                        "id": f"q{n_idx + 1}",
+                        "question": "",
+                        "rubric_points": [base_pts[n_idx % len(base_pts)], f"Aplica {node_title} en un caso integrador #{n_idx + 1}"],
+                        "challenge_type": extra_cycle[n_idx % len(extra_cycle)],
+                        "language": "en" if is_language_studio else inferred_lang,
+                        "starter_code": None,
+                    }
+                )
+
         updated_fallback: list[dict[str, Any]] = []
-        for idx, orig in enumerate(source_prompts):
+        for idx, orig in enumerate(fallback_sources[:10] if is_practice else fallback_sources):
             qid = str(orig.get("id") or f"q{idx+1}")
             pts = [str(p) for p in (orig.get("rubric_points") or [])]
             prev_q = str(orig.get("question") or "").strip()
@@ -5506,11 +5756,70 @@ def _compute_fallback_missions_completed(
     return sorted(completed)
 
 
+def _exam_3parts_stage(turn_index: int, start: bool) -> tuple[int, str, str]:
+    """Devuelve (part_index, part_label, speaker_role) para el modo Simulacro Oral de 3 Partes."""
+    if start or turn_index <= 2:
+        return (1, "Parte 1/3 · Warm-up Personal", "teacher")
+    if turn_index <= 5:
+        return (2, "Parte 2/3 · Preguntas y Descripción", "partner")
+    return (3, "Parte 3/3 · Diálogo Libre", "teacher")
+
+
+def _compute_exam_3parts_score(
+    history: list[dict[str, str]],
+    message: str,
+) -> tuple[float, bool, str]:
+    """Calcula nota determinista 1.0..10.0 y estado passed (>= 7.0) a partir de los turnos reales del estudiante."""
+    user_msgs = [
+        str(h.get("content") or "").strip()
+        for h in history
+        if str(h.get("role") or "").lower() == "user" and str(h.get("content") or "").strip()
+    ]
+    if message.strip() and (not user_msgs or user_msgs[-1] != message.strip()):
+        user_msgs.append(message.strip())
+
+    if not user_msgs:
+        return (5.0, False, "Completa al menos 3 turnos en inglés para obtener una evaluación oral aprobatoria.")
+
+    substantive = [m for m in user_msgs if len(_norm_en_tokens(m)) >= 4]
+    recast_errors = sum(1 for m in user_msgs if _detect_l1_es_recast(m)[0] is not None)
+    has_question = any(
+        "?" in m or re.match(r"^\s*(do|does|is|are|what|where|when|how)\b", m, re.IGNORECASE)
+        for m in user_msgs
+    )
+    avg_words = sum(len(_norm_en_tokens(m)) for m in user_msgs) / max(1, len(user_msgs))
+
+    raw_score = 5.5
+    raw_score += min(2.5, len(substantive) * 0.7)
+    if avg_words >= 6:
+        raw_score += 0.8
+    elif avg_words >= 4:
+        raw_score += 0.4
+    if has_question:
+        raw_score += 0.7
+    raw_score -= min(2.4, recast_errors * 0.6)
+
+    score_10 = round(max(1.0, min(10.0, raw_score)), 1)
+    passed = score_10 >= 7.0
+    if passed:
+        hint = (
+            f"Simulacro aprobado ({score_10}/10): comunicación clara en las 3 partes"
+            + (" con buen uso de preguntas." if has_question else ".")
+        )
+    else:
+        hint = (
+            f"Simulacro en progreso ({score_10}/10): desarrolla respuestas más completas (4+ palabras) "
+            "y cuida auxiliares en negativa/interrogativa."
+        )
+    return (score_10, passed, hint)
+
+
 def _build_language_session_summary(
     *,
     node_title: str,
     history: list[dict[str, str]],
     message: str,
+    mode: str = "missions",
 ) -> dict[str, Any]:
     user_msgs = [
         str(h.get("content") or "").strip()
@@ -5567,8 +5876,21 @@ def _build_language_session_summary(
             break
         items.append(fp)
 
+    if mode == "exam_3parts":
+        score_10, passed, score_hint = _compute_exam_3parts_score(history, message)
+        return {
+            "headline": f"Resultado del Simulacro Oral (3 Partes) · {node_title}",
+            "score_hint": score_hint,
+            "score_10": score_10,
+            "passed": passed,
+            "items": items[:3],
+        }
+
     return {
         "headline": f"Resumen de tu práctica guiada en {node_title}",
+        "score_hint": "",
+        "score_10": None,
+        "passed": None,
         "items": items[:3],
     }
 
@@ -5579,7 +5901,14 @@ def _sanitize_session_summary(
     node_title: str,
     history: list[dict[str, str]],
     message: str,
+    mode: str = "missions",
 ) -> dict[str, Any]:
+    fallback = _build_language_session_summary(
+        node_title=node_title,
+        history=history,
+        message=message,
+        mode=mode,
+    )
     if isinstance(raw_summary, dict):
         headline = str(raw_summary.get("headline") or "").strip()
         raw_items = raw_summary.get("items")
@@ -5592,16 +5921,35 @@ def _sanitize_session_summary(
                     why = str(it.get("why") or "").strip()
                     if said and better and why:
                         clean_items.append({"said": said, "better": better, "why": why})
+        items_final = clean_items if len(clean_items) >= 2 else fallback["items"]
+        if mode == "exam_3parts":
+            raw_score = raw_summary.get("score_10")
+            score_10: float
+            try:
+                if raw_score is not None:
+                    score_10 = round(max(1.0, min(10.0, float(raw_score))), 1)
+                else:
+                    score_10 = float(fallback["score_10"])
+            except (TypeError, ValueError):
+                score_10 = float(fallback["score_10"])
+            passed = score_10 >= 7.0
+            score_hint = str(raw_summary.get("score_hint") or "").strip() or str(fallback.get("score_hint") or "")
+            return {
+                "headline": headline or fallback["headline"],
+                "score_hint": score_hint,
+                "score_10": score_10,
+                "passed": passed,
+                "items": items_final,
+            }
         if len(clean_items) >= 2:
             return {
                 "headline": headline or f"Resumen de tu práctica en {node_title}",
+                "score_hint": str(raw_summary.get("score_hint") or "").strip(),
+                "score_10": None,
+                "passed": None,
                 "items": clean_items,
             }
-    return _build_language_session_summary(
-        node_title=node_title,
-        history=history,
-        message=message,
-    )
+    return fallback
 
 
 def _fallback_language_practice_chat(
@@ -5614,7 +5962,161 @@ def _fallback_language_practice_chat(
     turn_index: int,
     start: bool,
     finish: bool,
+    mode: str = "missions",
 ) -> dict[str, Any]:
+    norm_mode = "exam_3parts" if mode == "exam_3parts" else "missions"
+    chips = _default_lexical_chips(node_title, node_summary)
+
+    if norm_mode == "exam_3parts":
+        part_index, part_label, speaker_role = _exam_3parts_stage(turn_index, start)
+        exam_missions = [
+            "Parte 1: Responder 3 preguntas personales breves con fluidez A1-A2.",
+            "Parte 2: Describir y hacer preguntas a tu compañero usando estructuras objetivo.",
+            "Parte 3: Sostener un diálogo libre integrando vocabulario y gramática.",
+        ]
+        completed_parts: list[int] = []
+        if not start:
+            if turn_index >= 3:
+                completed_parts.append(0)
+            if turn_index >= 6:
+                completed_parts.append(1)
+            if finish or turn_index >= 8:
+                completed_parts = [0, 1, 2]
+
+        if start:
+            return {
+                "reply_en": _cap_en_words(
+                    "Welcome to Part 1! I am your examiner. What is your name and what do you usually study at university?",
+                    25,
+                ),
+                "translation_es": "¡Bienvenido a la Parte 1! Soy tu examinador. ¿Cuál es tu nombre y qué estudias normalmente en la universidad?",
+                "inline_correction_es": None,
+                "example_en": "My name is Alex and I usually study engineering in the morning.",
+                "missions": exam_missions,
+                "missions_completed": [],
+                "lexical_chips": chips[:6],
+                "sentence_starter": "My name is ... and I usually ...",
+                "mode": "exam_3parts",
+                "speaker_role": speaker_role,
+                "part_index": part_index,
+                "part_label": part_label,
+                "session_summary": None,
+                "provider": "local_fallback",
+            }
+
+        recast, why_es, recast_example = _detect_l1_es_recast(message)
+        should_finish = finish or turn_index >= 8
+
+        if should_finish:
+            summary = _build_language_session_summary(
+                node_title=node_title,
+                history=history,
+                message=message,
+                mode="exam_3parts",
+            )
+            return {
+                "reply_en": _cap_en_words(
+                    "Thank you! That completes all three parts of the oral exam. Check your score and feedback below.",
+                    25,
+                ),
+                "translation_es": "¡Gracias! Con esto completas las tres partes del examen oral. Revisa tu nota y retroalimentación abajo.",
+                "inline_correction_es": None,
+                "example_en": summary["items"][0]["better"] if summary["items"] else "She studies English every day.",
+                "missions": exam_missions,
+                "missions_completed": [0, 1, 2],
+                "lexical_chips": chips[:5],
+                "sentence_starter": None,
+                "mode": "exam_3parts",
+                "speaker_role": "teacher",
+                "part_index": 3,
+                "part_label": "Parte 3/3 · Diálogo Libre",
+                "session_summary": summary,
+                "provider": "local_fallback",
+            }
+
+        if part_index == 1:
+            p1_questions = [
+                (
+                    "Nice! What is your daily routine on weekdays before class?",
+                    "¡Genial! ¿Cuál es tu rutina diaria entre semana antes de clases?",
+                    "I usually wake up at ...",
+                ),
+                (
+                    "Great! What do you like to do in your free time on weekends?",
+                    "¡Muy bien! ¿Qué te gusta hacer en tu tiempo libre los fines de semana?",
+                    "On weekends, I like to ...",
+                ),
+            ]
+            q_en, q_es, starter = p1_questions[(max(0, turn_index - 1)) % len(p1_questions)]
+            if recast and why_es:
+                reply_en = _cap_en_words(f"Good! Try saying **{recast}**. {q_en}", 25)
+                translation_es = f"¡Bien! Intenta decir «{recast}». {q_es}"
+            else:
+                reply_en = _cap_en_words(q_en, 25)
+                translation_es = q_es
+        elif part_index == 2:
+            p2_questions = [
+                (
+                    "Hey! I am your study partner. Is there a quiet library near your faculty, and what is on your desk?",
+                    "¡Hola! Soy tu compañero de estudio. ¿Hay una biblioteca tranquila cerca de tu facultad y qué hay en tu escritorio?",
+                    "Yes, there is ... and on my desk there are ...",
+                ),
+                (
+                    "Cool! Now ask me one question using Is there, Are there, or Do you about my study routine.",
+                    "¡Genial! Ahora hazme una pregunta usando Is there, Are there o Do you sobre mi rutina de estudio.",
+                    "Do you usually ... / Are there any ...?",
+                ),
+                (
+                    "I usually study with coffee and flashcards! How many classes do you have on Mondays?",
+                    "¡Yo suelo estudiar con café y tarjetas! ¿Cuántas clases tienes los lunes?",
+                    "I have ... classes and there is ...",
+                ),
+            ]
+            q_en, q_es, starter = p2_questions[(max(0, turn_index - 3)) % len(p2_questions)]
+            if recast and why_es:
+                reply_en = _cap_en_words(f"Got it! You mean **{recast}**. {q_en}", 25)
+                translation_es = f"¡Entendido! Quieres decir «{recast}». {q_es}"
+            else:
+                reply_en = _cap_en_words(q_en, 25)
+                translation_es = q_es
+        else:
+            p3_questions = [
+                (
+                    "Welcome to Part 3! Imagine we are planning a study afternoon together. Where should we meet and why?",
+                    "¡Bienvenido a la Parte 3! Imagina que planeamos una tarde de estudio juntos. ¿Dónde deberíamos juntarnos y por qué?",
+                    "Let's meet at ... because there are ...",
+                ),
+                (
+                    "Sounds good! What snacks or materials do we need, and what time does your last class finish?",
+                    "¡Suena bien! ¿Qué snacks o materiales necesitamos y a qué hora termina tu última clase?",
+                    "We need some ... and my class finishes at ...",
+                ),
+            ]
+            q_en, q_es, starter = p3_questions[(max(0, turn_index - 6)) % len(p3_questions)]
+            if recast and why_es:
+                reply_en = _cap_en_words(f"Nice point! Say **{recast}**. {q_en}", 25)
+                translation_es = f"¡Buen punto! Di «{recast}». {q_es}"
+            else:
+                reply_en = _cap_en_words(q_en, 25)
+                translation_es = q_es
+
+        return {
+            "reply_en": reply_en,
+            "translation_es": translation_es,
+            "inline_correction_es": why_es if (recast and why_es) else None,
+            "example_en": recast_example or "There are many books in the library, and I usually study there.",
+            "missions": exam_missions,
+            "missions_completed": completed_parts,
+            "lexical_chips": chips[:6],
+            "sentence_starter": starter,
+            "mode": "exam_3parts",
+            "speaker_role": speaker_role,
+            "part_index": part_index,
+            "part_label": part_label,
+            "session_summary": None,
+            "provider": "local_fallback",
+        }
+
     active_missions = [str(m).strip() for m in missions if str(m).strip()][:3]
     if len(active_missions) < 3:
         defaults = _default_language_missions(node_title, node_summary)
@@ -5623,8 +6125,6 @@ def _fallback_language_practice_chat(
                 break
             if d not in active_missions:
                 active_missions.append(d)
-
-    chips = _default_lexical_chips(node_title, node_summary)
 
     if start:
         ctx = f"{node_title} {node_summary}".lower()
@@ -5647,6 +6147,10 @@ def _fallback_language_practice_chat(
             "missions_completed": [],
             "lexical_chips": chips[:6],
             "sentence_starter": starter,
+            "mode": "missions",
+            "speaker_role": "teacher",
+            "part_index": None,
+            "part_label": "",
             "session_summary": None,
             "provider": "local_fallback",
         }
@@ -5658,6 +6162,7 @@ def _fallback_language_practice_chat(
             node_title=node_title,
             history=history,
             message=message,
+            mode="missions",
         )
         return {
             "reply_en": _cap_en_words(
@@ -5671,6 +6176,10 @@ def _fallback_language_practice_chat(
             "missions_completed": completed,
             "lexical_chips": chips[:5],
             "sentence_starter": None,
+            "mode": "missions",
+            "speaker_role": "teacher",
+            "part_index": None,
+            "part_label": "",
             "session_summary": summary,
             "provider": "local_fallback",
         }
@@ -5718,7 +6227,7 @@ def _fallback_language_practice_chat(
 
     should_summarize = len(completed) >= 3 or turn_index >= 5
     summary = (
-        _build_language_session_summary(node_title=node_title, history=history, message=message)
+        _build_language_session_summary(node_title=node_title, history=history, message=message, mode="missions")
         if should_summarize
         else None
     )
@@ -5732,6 +6241,10 @@ def _fallback_language_practice_chat(
         "missions_completed": completed,
         "lexical_chips": chips[:6],
         "sentence_starter": starter,
+        "mode": "missions",
+        "speaker_role": "teacher",
+        "part_index": None,
+        "part_label": "",
         "session_summary": summary,
         "provider": "local_fallback",
     }
@@ -5750,8 +6263,10 @@ def run_language_practice_chat_with_ai(
     start: bool = False,
     finish: bool = False,
     preferred_provider: str = "auto",
+    mode: str = "missions",
 ) -> dict[str, Any]:
-    """Ejecuta un turno de practica conversacional guiada de ingles (A1-A2) con Salient Recasts y 3 misiones."""
+    """Ejecuta un turno de practica conversacional guiada de ingles (A1-A2) en modo 'missions' o 'exam_3parts'."""
+    norm_mode = "exam_3parts" if mode == "exam_3parts" else "missions"
     hist = list(history or [])
     existing_missions = [str(m).strip() for m in (missions or []) if str(m).strip()]
 
@@ -5764,34 +6279,75 @@ def run_language_practice_chat_with_ai(
         turn_index=turn_index,
         start=start,
         finish=finish,
+        mode=norm_mode,
     )
 
     mode_str = "start" if start else ("finish" if finish else "turn")
-    system_prompt = (
-        "Eres un tutor conversacional de ingles A1-A2 de Brotal (`language_studio`) para estudiantes universitarios "
-        "hispanohablantes.\n"
-        "REGLAS ESTRICTAS:\n"
-        "1. `reply_en`: SIEMPRE en ingles claro nivel A1-A2 y BREVE (MAXIMO 25 PALABRAS). "
-        "En turnos intermedios aplica **Salient Recasts**: incorpora la forma corregida o natural en **negrita** (`**...**`) "
-        "dentro de la respuesta conversacional.\n"
-        "2. `translation_es`: traduccion natural al espanol de `reply_en`.\n"
-        "3. `missions`: SIEMPRE exactamente 3 misiones comunicativas concretas derivadas del nodo.\n"
-        "4. `missions_completed`: lista ordenada de indices enteros en [0, 1, 2] ya logrados considerando todo `history` + `message` "
-        "(nunca retroceder misiones ya logradas; en `start=true` devolver `[]`).\n"
-        "5. `inline_correction_es`: explicacion breve en espanol (1 linea) SOLO si el estudiante cometio un error real "
-        "(ej. interferencia espanol->ingles); `null` si la frase estuvo bien o si `start=true`/`finish=true`.\n"
-        "6. `lexical_chips`: entre 4 y 6 palabras o frases cortas utiles en ingles para ayudar en el siguiente turno.\n"
-        "7. `sentence_starter`: inicio de oracion en ingles (ej. `'I usually ...'`) o `null` si `finish=true`.\n"
-        "8. `session_summary`: OBLIGATORIO cuando `finish=true` (y recomendado si se completaron las 3 misiones o `turn_index >= 5`): "
-        "`{\"headline\": \"...\", \"items\": [{\"said\": \"...\", \"better\": \"...\", \"why\": \"...\"}]}` con 2 a 3 pares reales "
-        "basados en los mensajes del usuario en `history` (o ejemplos clave del nodo si hubo pocos turnos). `null` en `start=true`.\n"
-        "9. PROHIBIDO usar emojis.\n"
-        "Responde UNICAMENTE JSON valido con claves: `reply_en`, `translation_es`, `inline_correction_es`, `example_en`, "
-        "`missions`, `missions_completed`, `lexical_chips`, `sentence_starter`, `session_summary`."
-    )
+    if norm_mode == "exam_3parts":
+        part_index, part_label, speaker_role = _exam_3parts_stage(turn_index, start)
+        if finish or turn_index >= 8:
+            part_index, part_label, speaker_role = (3, "Parte 3/3 · Diálogo Libre", "teacher")
+        role_desc = (
+            "Examinador/Profesor (teacher): haz preguntas claras y amables A1-A2."
+            if speaker_role == "teacher"
+            else "Compañero de clase (partner): dialoga naturalmente e invita a describir y hacer preguntas con Is there / Are there / Do you."
+        )
+        system_prompt = (
+            "Eres el simulador de Examen Oral de 3 Partes de Brotal (`language_studio`, nivel A1-A2) para estudiantes "
+            "universitarios hispanohablantes.\n"
+            f"FASE ACTUAL: {part_label} (parte {part_index}/3) | ROL: {role_desc}\n"
+            "ESTRUCTURA DEL EXAMEN:\n"
+            "- Parte 1 (turnos 0-2, teacher): 3 preguntas personales cortas A1-A2 sobre el tema/unidad.\n"
+            "- Parte 2 (turnos 3-5, partner): compañero invita a responder y preguntar con estructuras objetivo (Is there/Are there/Do you...).\n"
+            "- Parte 3 (turnos 6-8, teacher): diálogo libre situacional integrador; al llegar a turno >= 8 o finish=true cierra con nota.\n"
+            "REGLAS ESTRICTAS:\n"
+            "1. `reply_en`: SIEMPRE en ingles claro nivel A1-A2 y BREVE (MAXIMO 25 PALABRAS). "
+            "Aplica **Salient Recasts** en **negrita** (`**...**`) si hubo error L1-ES.\n"
+            "2. `translation_es`: traduccion natural al espanol de `reply_en`.\n"
+            "3. `inline_correction_es`: 1 linea en espanol SOLO si hubo error real; `null` si estuvo bien o en start/finish.\n"
+            "4. `lexical_chips`: 4 a 6 frases cortas utiles en ingles.\n"
+            "5. `sentence_starter`: inicio de oracion en ingles o `null` al terminar.\n"
+            "6. `session_summary`: OBLIGATORIO cuando `finish=true` o `turn_index >= 8` (si no, `null`): "
+            "`{\"headline\": \"...\", \"score_hint\": \"...\", \"score_10\": 8.2, \"passed\": true, "
+            "\"items\": [{\"said\": \"...\", \"better\": \"...\", \"why\": \"...\"}]}` con `score_10` en 1.0..10.0, "
+            "`passed = (score_10 >= 7.0)` y 2 a 3 pares reales.\n"
+            "7. PROHIBIDO usar emojis.\n"
+            "Responde UNICAMENTE JSON valido con claves: `reply_en`, `translation_es`, `inline_correction_es`, `example_en`, "
+            "`missions`, `missions_completed`, `lexical_chips`, `sentence_starter`, `session_summary`."
+        )
+    else:
+        part_index = None
+        part_label = ""
+        speaker_role = "teacher"
+        system_prompt = (
+            "Eres un tutor conversacional de ingles A1-A2 de Brotal (`language_studio`) para estudiantes universitarios "
+            "hispanohablantes.\n"
+            "REGLAS ESTRICTAS:\n"
+            "1. `reply_en`: SIEMPRE en ingles claro nivel A1-A2 y BREVE (MAXIMO 25 PALABRAS). "
+            "En turnos intermedios aplica **Salient Recasts**: incorpora la forma corregida o natural en **negrita** (`**...**`) "
+            "dentro de la respuesta conversacional.\n"
+            "2. `translation_es`: traduccion natural al espanol de `reply_en`.\n"
+            "3. `missions`: SIEMPRE exactamente 3 misiones comunicativas concretas derivadas del nodo.\n"
+            "4. `missions_completed`: lista ordenada de indices enteros en [0, 1, 2] ya logrados considerando todo `history` + `message` "
+            "(nunca retroceder misiones ya logradas; en `start=true` devolver `[]`).\n"
+            "5. `inline_correction_es`: explicacion breve en espanol (1 linea) SOLO si el estudiante cometio un error real "
+            "(ej. interferencia espanol->ingles); `null` si la frase estuvo bien o si `start=true`/`finish=true`.\n"
+            "6. `lexical_chips`: entre 4 y 6 palabras o frases cortas utiles en ingles para ayudar en el siguiente turno.\n"
+            "7. `sentence_starter`: inicio de oracion en ingles (ej. `'I usually ...'`) o `null` si `finish=true`.\n"
+            "8. `session_summary`: OBLIGATORIO cuando `finish=true` (y recomendado si se completaron las 3 misiones o `turn_index >= 5`): "
+            "`{\"headline\": \"...\", \"items\": [{\"said\": \"...\", \"better\": \"...\", \"why\": \"...\"}]}` con 2 a 3 pares reales "
+            "basados en los mensajes del usuario en `history` (o ejemplos clave del nodo si hubo pocos turnos). `null` en `start=true`.\n"
+            "9. PROHIBIDO usar emojis.\n"
+            "Responde UNICAMENTE JSON valido con claves: `reply_en`, `translation_es`, `inline_correction_es`, `example_en`, "
+            "`missions`, `missions_completed`, `lexical_chips`, `sentence_starter`, `session_summary`."
+        )
 
     user_payload = {
+        "chat_mode": norm_mode,
         "mode": mode_str,
+        "part_index": part_index,
+        "part_label": part_label,
+        "speaker_role": speaker_role,
         "course_title": course_title,
         "node_title": node_title,
         "node_summary": node_summary,
@@ -5870,21 +6426,34 @@ def run_language_practice_chat_with_ai(
                 if fc not in lexical_chips:
                     lexical_chips.append(fc)
 
+        is_done_exam = norm_mode == "exam_3parts" and (finish or turn_index >= 8)
         raw_starter = parsed.get("sentence_starter")
         sentence_starter = (
             None
-            if finish
+            if (finish or is_done_exam)
             else (str(raw_starter).strip() or fallback_res["sentence_starter"])
         )
 
         if start:
             session_summary: dict[str, Any] | None = None
+        elif norm_mode == "exam_3parts":
+            if is_done_exam:
+                session_summary = _sanitize_session_summary(
+                    parsed.get("session_summary"),
+                    node_title=node_title,
+                    history=hist,
+                    message=message,
+                    mode="exam_3parts",
+                )
+            else:
+                session_summary = None
         elif finish or len(missions_completed) >= 3 or turn_index >= 5 or parsed.get("session_summary"):
             session_summary = _sanitize_session_summary(
                 parsed.get("session_summary"),
                 node_title=node_title,
                 history=hist,
                 message=message,
+                mode="missions",
             )
         else:
             session_summary = None
@@ -5898,6 +6467,10 @@ def run_language_practice_chat_with_ai(
             "missions_completed": missions_completed,
             "lexical_chips": lexical_chips,
             "sentence_starter": sentence_starter,
+            "mode": norm_mode,
+            "speaker_role": speaker_role,
+            "part_index": part_index,
+            "part_label": part_label,
             "session_summary": session_summary,
             "provider": comp.provider,
         }

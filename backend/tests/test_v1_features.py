@@ -2941,3 +2941,433 @@ def test_cinema_reel_fallback_never_truncates_words_and_legacy_db_row_is_retroco
         assert act["previous_echo"] == ""
         assert act["nodes"][0]["trigger_word"] == ""
         assert act["nodes"][0]["reveal_at"] is None
+
+
+# ---------------- v1.3.0: Gemini/Groq fixes, Theory vs Practice, STT, Exam 3 Parts, Voice Role ----------------
+
+
+def test_call_gemini_uses_header_fallback_on_404_and_never_leaks_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from app.services import ai_router
+
+    secret_key = "AIzaSy_SUPER_SECRET_TEST_KEY_999"
+    monkeypatch.setenv("GEMINI_API_KEY", secret_key)
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+
+    seen_calls: list[dict[str, Any]] = []
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        seen_calls.append({"url": url, "headers": kwargs.get("headers") or {}, "params": kwargs.get("params")})
+        req = httpx.Request("POST", url)
+        # Primer modelo devuelve 404, segundo devuelve 200 OK
+        if "gemini-3.1-flash-lite" in url:
+            return httpx.Response(404, request=req, json={"error": {"message": "Model not found"}})
+        return httpx.Response(
+            200,
+            request=req,
+            json={"candidates": [{"content": {"parts": [{"text": "Respuesta Gemini OK"}]}}]},
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    comp = ai_router.call_gemini([{"role": "user", "content": "Hola"}])
+    assert comp.provider == "gemini"
+    assert comp.model == "gemini-3-flash-preview"
+    assert comp.text == "Respuesta Gemini OK"
+    assert len(seen_calls) == 2
+    for c in seen_calls:
+        assert "?key=" not in c["url"]
+        assert c["params"] is None
+        assert c["headers"].get("x-goog-api-key") == secret_key
+
+    # Si todos fallan con un error que menciona la key, la excepcion JAMAS debe filtrarla
+    def fake_post_leak(url: str, **_kwargs: Any) -> httpx.Response:
+        req = httpx.Request("POST", f"{url}?key={secret_key}")
+        return httpx.Response(404, request=req, text=f"Not found for key={secret_key}")
+
+    monkeypatch.setattr(httpx, "post", fake_post_leak)
+    with pytest.raises(ai_router.AiProviderError) as exc_info:
+        ai_router.call_gemini([{"role": "user", "content": "Hola"}])
+    err_msg = str(exc_info.value)
+    assert secret_key not in err_msg
+    assert "[REDACTED]" in err_msg
+
+
+def test_call_groq_retries_on_413_with_safe_max_tokens_and_falls_back_to_8b(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from app.services import ai_router
+
+    secret_key = "gsk_SUPER_SECRET_GROQ_999"
+    monkeypatch.setenv("GROQ_API_KEY", secret_key)
+    monkeypatch.delenv("GROQ_MODEL", raising=False)
+
+    attempts: list[tuple[str, int | None]] = []
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        payload = kwargs.get("json") or {}
+        model_used = str(payload.get("model"))
+        mt = payload.get("max_tokens")
+        attempts.append((model_used, mt))
+        req = httpx.Request("POST", url)
+        if model_used == "llama-3.3-70b-versatile":
+            return httpx.Response(413, request=req, json={"error": {"message": "Payload too large"}})
+        return httpx.Response(
+            200,
+            request=req,
+            json={"choices": [{"message": {"content": "Groq 8B fallback OK"}}]},
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    comp = ai_router.call_groq([{"role": "user", "content": "Hi"}], max_tokens=6144)
+    assert comp.provider == "groq"
+    assert comp.model == "llama-3.1-8b-instant"
+    assert comp.text == "Groq 8B fallback OK"
+    assert attempts[0] == ("llama-3.3-70b-versatile", 6144)
+    assert attempts[1] == ("llama-3.3-70b-versatile", 4096)
+    assert attempts[2] == ("llama-3.1-8b-instant", 4096)
+
+
+def test_ingest_theory_vs_practice_caps_and_fallback_avoids_duplicate_generic_titles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import ai_router
+    from app.services.ingest import (
+        ExtractedChunk,
+        _fallback_nodes_from_chunks,
+        _generate_nodes_with_ai,
+    )
+
+    # 1. Fallback offline con subtitulos genericos repetidos ("Core Structures", "Common Spanish-Speaker Traps", "Essential Uses")
+    chunks = [
+        ExtractedChunk("u1.md", "Unit 1: Present Simple and Routines", "Use Present Simple for daily habits and schedules."),
+        ExtractedChunk("u1.md", "Core Structures", "Affirmative adds -s in third person singular; negative uses don't/doesn't."),
+        ExtractedChunk("u1.md", "Common Spanish-Speaker Traps", "Never say she don't study or she doesn't studies in English."),
+        ExtractedChunk("u2.md", "Unit 2: Quantifiers and Food", "Countable nouns take many and few; uncountable nouns take much and little."),
+        ExtractedChunk("u2.md", "Core Structures", "Use some in affirmative sentences and any in questions and negatives."),
+        ExtractedChunk("u2.md", "Essential Uses", "Order food politely at a restaurant using would like and quantifiers."),
+    ]
+    fb_nodes = _fallback_nodes_from_chunks(
+        course_title="Inglés 1",
+        world_metaphor="Campus Bilingüe",
+        chunks=chunks,
+        engine_type="language_studio",
+        default_language="en",
+    )
+    titles_lower = [n["title"].lower() for n in fb_nodes]
+    assert not any("core structures" in t for t in titles_lower)
+    assert not any("common spanish-speaker traps" in t for t in titles_lower)
+    assert not any("essential uses" in t for t in titles_lower)
+    assert len(set(titles_lower)) == len(titles_lower)
+
+    practice_fb = [n for n in fb_nodes if n["branch"] == "practice"]
+    assert len(practice_fb) >= 2
+    for pn in practice_fb:
+        assert len(pn["eval_prompts"]) == 6
+        assert len(pn["story_script"].splitlines()) <= 4
+        assert "```" not in pn["story_script"]
+    assert any("speaking" in pn["title"].lower() or "oral" in pn["title"].lower() for pn in practice_fb)
+
+    # 2. Generacion con IA: practice admite 6..8 (hasta 10) prompts y max_tokens == 6144
+    captured: dict[str, Any] = {}
+
+    def fake_complete_chat(messages: list[dict[str, str]], **kwargs: Any) -> AiCompletion:
+        captured.update(kwargs)
+        nodes_payload = []
+        for idx in range(1, 6):
+            nodes_payload.append(
+                {
+                    "id": f"T{idx}",
+                    "parent_ids": [] if idx <= 3 else [f"T{idx - 3}"],
+                    "branch": "theory",
+                    "block": f"Bloque {idx}",
+                    "title": f"U{idx} · Unidad Situacional {idx}",
+                    "summary": f"Resumen unidad {idx}",
+                    "story_script": f"Explicación completa en **negrita** para la unidad {idx}.\n\nSegundo párrafo con ejemplos.",
+                    "eval_prompts": [
+                        {
+                            "id": f"q{q}",
+                            "question": f"Pregunta teoría {q} sobre unidad {idx}",
+                            "rubric_points": [f"Punto {q}"],
+                            "challenge_type": "translate",
+                            "language": "en",
+                        }
+                        for q in range(1, 8)
+                    ],
+                }
+            )
+        nodes_payload.append(
+            {
+                "id": "P1",
+                "parent_ids": ["T1", "T2"],
+                "branch": "practice",
+                "block": "Talleres Integrados",
+                "title": "Taller Oral · Simulador Speaking e Integración",
+                "summary": "Taller práctico integrador",
+                "story_script": "Objetivo del taller: integrar U1 y U2.\nEscenario: entrevista rápida en campus.",
+                "eval_prompts": [
+                    {
+                        "id": f"q{q}",
+                        "question": f"Reto integrador {q} mezclando U1 y U2",
+                        "rubric_points": [f"Criterio {q}"],
+                        "challenge_type": "translate" if q % 2 == 0 else "fill_blank",
+                        "language": "en",
+                    }
+                    for q in range(1, 9)
+                ],
+            }
+        )
+        return AiCompletion(
+            text=json.dumps({"world_metaphor": "Campus Global", "nodes": nodes_payload}),
+            provider="gemini",
+            model="gemini-3.1-flash-lite",
+        )
+
+    monkeypatch.setattr(ai_router, "complete_chat", fake_complete_chat)
+    ai_nodes, prov = _generate_nodes_with_ai(
+        course_code="ING101",
+        course_title="Inglés 1",
+        world_metaphor="Campus Global",
+        chunks=chunks,
+        engine_type="language_studio",
+        default_language="en",
+    )
+    assert prov == "gemini"
+    assert captured.get("max_tokens") == 6144
+    t_node = next(n for n in ai_nodes if n["branch"] == "theory")
+    p_node = next(n for n in ai_nodes if n["branch"] == "practice")
+    assert len(t_node["eval_prompts"]) == 5  # theory cap <= 5
+    assert len(p_node["eval_prompts"]) == 8  # practice allows 6..8 (up to 10)
+    assert len(p_node["story_script"].splitlines()) <= 4
+
+    # 3. regenerate_story_with_ai y regenerate_questions_with_ai respetan branch="practice" offline
+    monkeypatch.setattr(
+        ai_router,
+        "complete_chat",
+        lambda *_a, **_kw: (_ for _ in ()).throw(ai_router.AiProviderError("offline")),
+    )
+    brief, _ = ai_router.regenerate_story_with_ai(
+        course_title="Inglés 1",
+        world_metaphor="Campus Global",
+        node_title=p_node["title"],
+        node_summary=p_node["summary"],
+        current_story=p_node["story_script"],
+        eval_prompts=p_node["eval_prompts"][:2],
+        engine_type="language_studio",
+        branch="practice",
+    )
+    assert 2 <= len([ln for ln in brief.splitlines() if ln.strip()]) <= 4
+    regen_qs, _ = ai_router.regenerate_questions_with_ai(
+        course_title="Inglés 1",
+        world_metaphor="Campus Global",
+        node_title=p_node["title"],
+        node_summary=p_node["summary"],
+        story_script=brief,
+        eval_prompts=p_node["eval_prompts"][:2],
+        engine_type="language_studio",
+        branch="practice",
+    )
+    assert len(regen_qs) >= 6
+
+
+def test_study_stt_endpoint_success_validation_and_503_without_key(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routers import study as study_router
+
+    # 1. Validacion: extension invalida y archivo demasiado corto -> 400
+    bad_ext = client.post(
+        "/api/v1/study/stt",
+        data={"language": "en"},
+        files={"file": ("clip.txt", b"x" * 600, "text/plain")},
+    )
+    assert bad_ext.status_code == 400
+
+    too_short = client.post(
+        "/api/v1/study/stt",
+        data={"language": "en"},
+        files={"file": ("clip.webm", b"x" * 200, "audio/webm")},
+    )
+    assert too_short.status_code == 400
+
+    # 2. Sin GROQ_API_KEY -> 503 limpio para fallback a Web Speech API
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    no_key = client.post(
+        "/api/v1/study/stt",
+        data={"language": "en", "prompt_hint": "Present Simple"},
+        files={"file": ("speech.webm", b"0" * 1024, "audio/webm")},
+    )
+    assert no_key.status_code == 503
+    assert "GROQ_API_KEY" in no_key.json()["detail"]
+
+    # 3. Mockeando transcribe_audio_with_groq -> 200 con text y provider="groq-whisper"
+    captured_args: dict[str, Any] = {}
+
+    def fake_transcribe(
+        audio_bytes: bytes,
+        *,
+        filename: str = "speech.webm",
+        language: str = "en",
+        prompt_hint: str = "",
+    ) -> str:
+        captured_args.update(
+            {
+                "size": len(audio_bytes),
+                "filename": filename,
+                "language": language,
+                "prompt_hint": prompt_hint,
+            }
+        )
+        return "She usually studies English at the library."
+
+    monkeypatch.setattr(study_router, "transcribe_audio_with_groq", fake_transcribe)
+    ok = client.post(
+        "/api/v1/study/stt",
+        data={"language": "en", "prompt_hint": "Daily routines"},
+        files={"file": ("recording.webm", b"A" * 2048, "audio/webm")},
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json() == {
+        "text": "She usually studies English at the library.",
+        "provider": "groq-whisper",
+    }
+    assert captured_args == {
+        "size": 2048,
+        "filename": "recording.webm",
+        "language": "en",
+        "prompt_hint": "Daily routines",
+    }
+
+
+def test_language_chat_exam_3parts_flow_roles_parts_and_scoring(client: TestClient) -> None:
+    english_notes = (
+        b"# Unit 1: Present Simple and Routines\n"
+        b"Daily habits, affirmative, negative (don't/doesn't) and questions (do/does).\n\n"
+        b"# Unit 2: There is / There are and Quantifiers\n"
+        b"Classroom objects, some, any, countable and uncountable nouns.\n"
+    )
+    ing = client.post(
+        "/api/v1/courses/ingest-local",
+        data={"course_code": "ING9030", "title": "Inglés 1 · Oral Exam", "engine_type": "language_studio"},
+        files=[("files", ("ing9030.md", english_notes, "text/markdown"))],
+    )
+    assert ing.status_code == 200
+    cid = ing.json()["course_id"]
+    node_id = client.get(f"/api/v1/courses/{cid}/tree").json()["nodes"][0]["id"]
+
+    # 1. Start (Parte 1/3 · Warm-up Personal, speaker_role="teacher")
+    r1 = client.post(
+        f"/api/v1/study/{cid}/{node_id}/language-chat",
+        json={"start": True, "mode": "exam_3parts"},
+    )
+    assert r1.status_code == 200, r1.text
+    d1 = r1.json()
+    assert d1["mode"] == "exam_3parts"
+    assert d1["speaker_role"] == "teacher"
+    assert d1["part_index"] == 1
+    assert "Parte 1/3" in d1["part_label"]
+    assert d1["session_summary"] is None
+
+    # 2. Turno en Parte 2/3 (turn_index=4 -> speaker_role="partner", part_index=2)
+    history = [
+        {"role": "assistant", "content": d1["reply_en"]},
+        {"role": "user", "content": "My name is Sofia and I study computer science at university."},
+        {"role": "assistant", "content": "Nice! What is your daily routine?"},
+        {"role": "user", "content": "I usually wake up at seven and review my notes before class."},
+    ]
+    r2 = client.post(
+        f"/api/v1/study/{cid}/{node_id}/language-chat",
+        json={
+            "message": "Yes, there is a quiet library and are there any study rooms on your campus?",
+            "history": history,
+            "turn_index": 4,
+            "mode": "exam_3parts",
+        },
+    )
+    assert r2.status_code == 200, r2.text
+    d2 = r2.json()
+    assert d2["mode"] == "exam_3parts"
+    assert d2["speaker_role"] == "partner"
+    assert d2["part_index"] == 2
+    assert "Parte 2/3" in d2["part_label"]
+    assert d2["session_summary"] is None
+
+    # 3. Turno en Parte 3/3 + finish=True -> speaker_role="teacher", part_index=3, session_summary con score_10 y passed
+    history.extend(
+        [
+            {"role": "user", "content": "Yes, there is a quiet library and are there any study rooms on your campus?"},
+            {"role": "assistant", "content": d2["reply_en"]},
+            {"role": "user", "content": "Let's meet at the library at four because there are many quiet tables."},
+        ]
+    )
+    r_fin = client.post(
+        f"/api/v1/study/{cid}/{node_id}/language-chat",
+        json={
+            "message": "We need some notebooks and my last class finishes at three thirty.",
+            "history": history,
+            "turn_index": 7,
+            "finish": True,
+            "mode": "exam_3parts",
+        },
+    )
+    assert r_fin.status_code == 200, r_fin.text
+    dfin = r_fin.json()
+    assert dfin["mode"] == "exam_3parts"
+    assert dfin["speaker_role"] == "teacher"
+    assert dfin["part_index"] == 3
+    assert "Parte 3/3" in dfin["part_label"]
+    summary = dfin["session_summary"]
+    assert isinstance(summary, dict)
+    assert 1.0 <= float(summary["score_10"]) <= 10.0
+    assert summary["passed"] is (float(summary["score_10"]) >= 7.0)
+    assert summary["passed"] is True
+    assert summary["headline"].strip()
+    assert len(summary["items"]) >= 2
+
+
+def test_phrase_tts_supports_voice_role_teacher_and_partner(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import tts
+
+    calls: list[tuple[str, str]] = []
+
+    async def fake_run_edge_tts(text: str, voice: str, out_path: Path) -> dict[str, Any]:
+        calls.append((text, voice))
+        out_path.write_bytes(f"MP3::{voice}::{text}".encode())
+        return {"sentences": [], "words": []}
+
+    monkeypatch.setattr(tts, "_run_edge_tts", fake_run_edge_tts)
+
+    phrase = "Welcome to your oral exam practice!"
+    r_teacher = client.post(
+        "/api/v1/study/local-ing9030/tts-phrase",
+        json={"text": phrase, "lang": "en", "accent": "us", "voice_role": "teacher"},
+    )
+    assert r_teacher.status_code == 200
+    assert calls[-1][1] == "en-US-JennyNeural"
+    assert b"en-US-JennyNeural" in r_teacher.content
+
+    r_partner = client.post(
+        "/api/v1/study/local-ing9030/tts-phrase",
+        json={"text": phrase, "lang": "en", "accent": "us", "voice_role": "partner"},
+    )
+    assert r_partner.status_code == 200
+    assert calls[-1][1] == "en-US-AndrewNeural"
+    assert b"en-US-AndrewNeural" in r_partner.content
+    assert len(calls) == 2
+
+    # Cache hit para partner con misma frase y rol
+    r_partner_cached = client.post(
+        "/api/v1/study/local-ing9030/tts-phrase",
+        json={"text": phrase, "lang": "en", "accent": "us", "voice_role": "partner"},
+    )
+    assert r_partner_cached.status_code == 200
+    assert len(calls) == 2

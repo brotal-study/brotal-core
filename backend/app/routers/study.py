@@ -9,7 +9,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.db.database import _connect, get_conn
@@ -44,6 +44,7 @@ from app.services.ai_router import (
     regenerate_questions_with_ai,
     regenerate_story_with_ai,
     run_language_practice_chat_with_ai,
+    transcribe_audio_with_groq,
 )
 from app.services.evaluator import (
     PASS_SCORE,
@@ -429,6 +430,7 @@ def post_regenerate_story(
         preferred_provider=ai_provider,
         explanation_style=explanation_style,
         engine_type=course_row["engine_type"] or "concept_tree",
+        branch=node_row["branch"] or "theory",
     )
 
     clear_node_tts_cache(real_course_id, old_story)
@@ -488,6 +490,7 @@ def post_regenerate_questions(
         preferred_provider=ai_provider,
         question_style=question_style,
         engine_type=course_row["engine_type"] or "concept_tree",
+        branch=node_row["branch"] or "theory",
     )
     validated_prompts = [EvalPrompt.model_validate(p) for p in new_prompts_raw]
 
@@ -1080,6 +1083,51 @@ async def post_node_tts(
     )
 
 
+_ALLOWED_STT_EXTENSIONS = {".webm", ".ogg", ".mp3", ".wav", ".m4a"}
+_MIN_STT_BYTES = 400
+_MAX_STT_BYTES = 10 * 1024 * 1024
+
+
+@router.post("/study/stt")
+async def post_study_stt(
+    file: Annotated[UploadFile, File(...)],
+    language: Annotated[str, Form()] = "en",
+    prompt_hint: Annotated[str, Form()] = "",
+) -> dict[str, str]:
+    filename = Path(file.filename or "speech.webm").name or "speech.webm"
+    ext = Path(filename).suffix.lower()
+    if ext not in _ALLOWED_STT_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Formato de audio no soportado '{ext}'. Usa .webm, .ogg, .mp3, .wav o .m4a.",
+        )
+
+    audio_bytes = await file.read()
+    if len(audio_bytes) <= _MIN_STT_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail="El audio grabado es demasiado corto o está vacío (mínimo 401 bytes).",
+        )
+    if len(audio_bytes) > _MAX_STT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="El audio supera el límite máximo permitido de 10 MB.",
+        )
+
+    try:
+        transcript = await asyncio.to_thread(
+            transcribe_audio_with_groq,
+            audio_bytes,
+            filename=filename,
+            language=language,
+            prompt_hint=prompt_hint,
+        )
+    except AiProviderError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {"text": transcript, "provider": "groq-whisper"}
+
+
 @router.post("/study/{course_id}/tts-phrase")
 async def post_phrase_tts(
     course_id: str,
@@ -1101,6 +1149,7 @@ async def post_phrase_tts(
             text=cleaned_text,
             lang=req.lang,
             accent=req.accent,
+            voice_role=req.voice_role,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1345,5 +1394,6 @@ def post_language_practice_chat(
         start=req.start,
         finish=req.finish,
         preferred_provider=_profile_ai_provider(conn),
+        mode=req.mode,
     )
     return LanguageChatResponse.model_validate(result)

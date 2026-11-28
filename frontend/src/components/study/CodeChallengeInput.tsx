@@ -27,6 +27,8 @@ import {
 } from 'lucide-react'
 import {
   fetchPhraseTtsBlob,
+  SttApiError,
+  transcribeStudyAudio,
   type ChallengeType,
   type CodeLanguage,
   type EvalPrompt,
@@ -90,6 +92,30 @@ function getSpeechRecognitionCtor(): SpeechRecognitionConstructor | null {
     webkitSpeechRecognition?: SpeechRecognitionConstructor
   }
   return win.SpeechRecognition ?? win.webkitSpeechRecognition ?? null
+}
+
+function isMediaRecorderAvailable(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof MediaRecorder !== 'undefined' &&
+    typeof navigator !== 'undefined' &&
+    Boolean(navigator.mediaDevices?.getUserMedia)
+  )
+}
+
+function pickSupportedAudioMimeType(): { mimeType: string; filename: string } {
+  const candidates = [
+    { mimeType: 'audio/webm;codecs=opus', filename: 'speech.webm' },
+    { mimeType: 'audio/webm', filename: 'speech.webm' },
+    { mimeType: 'audio/ogg;codecs=opus', filename: 'speech.ogg' },
+    { mimeType: 'audio/ogg', filename: 'speech.ogg' },
+  ]
+  if (typeof MediaRecorder !== 'undefined' && typeof MediaRecorder.isTypeSupported === 'function') {
+    for (const c of candidates) {
+      if (MediaRecorder.isTypeSupported(c.mimeType)) return c
+    }
+  }
+  return { mimeType: '', filename: 'speech.webm' }
 }
 
 interface Props {
@@ -384,18 +410,44 @@ export default function CodeChallengeInput({
   const [playingTts, setPlayingTts] = useState(false)
   const [textRevealed, setTextRevealed] = useState(false)
   const [dictating, setDictating] = useState(false)
+  const [transcribing, setTranscribing] = useState(false)
+  const [recordingSeconds, setRecordingSeconds] = useState(0)
+  const [micNotice, setMicNotice] = useState<string | null>(null)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const blobUrlRef = useRef<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const mediaStreamRef = useRef<MediaStream | null>(null)
+  const mediaChunksRef = useRef<Blob[]>([])
+  const recordingTimerRef = useRef<number | null>(null)
+  const sttAbortRef = useRef<AbortController | null>(null)
+  const discardRecordingRef = useRef(false)
+  const forceWebSpeechRef = useRef(false)
   const latestValueRef = useRef(value)
   latestValueRef.current = value
 
+  const mediaRecorderSupported = useMemo(() => isMediaRecorderAvailable(), [])
   const speechRecognitionSupported = useMemo(() => getSpeechRecognitionCtor() !== null, [])
+  const micSupported = mediaRecorderSupported || speechRecognitionSupported
 
   const playbackRate =
     supportLevel === 'guided' ? 0.8 : supportLevel === 'transition' ? 0.95 : 1.0
+
+  const clearRecordingTimer = () => {
+    if (recordingTimerRef.current !== null) {
+      window.clearInterval(recordingTimerRef.current)
+      recordingTimerRef.current = null
+    }
+  }
+
+  const releaseMediaStream = () => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((t) => t.stop())
+      mediaStreamRef.current = null
+    }
+  }
 
   const stopPhraseAudio = () => {
     if (abortRef.current) {
@@ -418,7 +470,30 @@ export default function CodeChallengeInput({
     setPlayingTts(false)
   }
 
-  const stopDictation = () => {
+  const stopDictation = (discardAudio = false) => {
+    clearRecordingTimer()
+    if (discardAudio) {
+      discardRecordingRef.current = true
+      if (sttAbortRef.current) {
+        sttAbortRef.current.abort()
+        sttAbortRef.current = null
+      }
+      setTranscribing(false)
+    }
+    if (mediaRecorderRef.current) {
+      const rec = mediaRecorderRef.current
+      mediaRecorderRef.current = null
+      try {
+        if (rec.state !== 'inactive') rec.stop()
+      } catch {
+        // Ignorar si ya estaba detenido
+      }
+      if (discardAudio) {
+        releaseMediaStream()
+      }
+    } else if (discardAudio) {
+      releaseMediaStream()
+    }
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop()
@@ -428,6 +503,7 @@ export default function CodeChallengeInput({
       recognitionRef.current = null
     }
     setDictating(false)
+    setRecordingSeconds(0)
   }
 
   useEffect(() => {
@@ -437,8 +513,9 @@ export default function CodeChallengeInput({
   useEffect(() => {
     return () => {
       stopPhraseAudio()
-      stopDictation()
+      stopDictation(true)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prompt.id])
 
   const playEnglishPhrase = async () => {
@@ -494,15 +571,21 @@ export default function CodeChallengeInput({
     }
   }
 
-  const toggleDictation = () => {
-    if (dictating) {
-      stopDictation()
+  const appendTranscript = (transcript: string) => {
+    const clean = transcript.trim()
+    if (!clean) return
+    const prev = (latestValueRef.current ?? '').trimEnd()
+    const next = prev ? `${prev} ${clean}` : clean
+    latestValueRef.current = next
+    onChange(next)
+  }
+
+  const startWebSpeechDictation = () => {
+    const Ctor = getSpeechRecognitionCtor()
+    if (!Ctor) {
+      setMicNotice('Tu navegador no soporta dictado por voz; escribe tu respuesta en el cuadro de texto.')
       return
     }
-    const Ctor = getSpeechRecognitionCtor()
-    if (!Ctor) return
-    stopPhraseAudio()
-
     try {
       const recognition = new Ctor()
       recognition.lang = activeAccent === 'gb' ? 'en-GB' : 'en-US'
@@ -518,26 +601,158 @@ export default function CodeChallengeInput({
         }
         const transcript = chunks.filter(Boolean).join(' ').trim()
         if (transcript) {
-          const prev = (latestValueRef.current ?? '').trimEnd()
-          const next = prev ? `${prev} ${transcript}` : transcript
-          latestValueRef.current = next
-          onChange(next)
+          appendTranscript(transcript)
         }
       }
       recognition.onerror = () => {
+        clearRecordingTimer()
         setDictating(false)
+        setRecordingSeconds(0)
         recognitionRef.current = null
+        setMicNotice('No se pudo capturar audio con el navegador. Revisa permisos o escribe tu respuesta.')
       }
       recognition.onend = () => {
+        clearRecordingTimer()
         setDictating(false)
+        setRecordingSeconds(0)
         recognitionRef.current = null
       }
       recognitionRef.current = recognition
+      setRecordingSeconds(0)
       setDictating(true)
+      clearRecordingTimer()
+      recordingTimerRef.current = window.setInterval(() => {
+        setRecordingSeconds((s) => s + 1)
+      }, 1000)
       recognition.start()
     } catch {
+      clearRecordingTimer()
       setDictating(false)
+      setRecordingSeconds(0)
       recognitionRef.current = null
+      setMicNotice('No se pudo iniciar el dictado por voz en este navegador.')
+    }
+  }
+
+  const toggleDictation = async () => {
+    if (transcribing) return
+    if (dictating) {
+      stopDictation(false)
+      return
+    }
+    setMicNotice(null)
+    stopPhraseAudio()
+
+    if (!mediaRecorderSupported || forceWebSpeechRef.current) {
+      startWebSpeechDictation()
+      return
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      mediaStreamRef.current = stream
+      const { mimeType, filename } = pickSupportedAudioMimeType()
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream)
+      mediaChunksRef.current = []
+      discardRecordingRef.current = false
+
+      recorder.ondataavailable = (ev: BlobEvent) => {
+        if (ev.data && ev.data.size > 0) {
+          mediaChunksRef.current.push(ev.data)
+        }
+      }
+
+      recorder.onerror = () => {
+        clearRecordingTimer()
+        releaseMediaStream()
+        mediaRecorderRef.current = null
+        setDictating(false)
+        setRecordingSeconds(0)
+        setMicNotice('Ocurrió un error al grabar audio. Intenta nuevamente.')
+      }
+
+      recorder.onstop = () => {
+        clearRecordingTimer()
+        releaseMediaStream()
+        mediaRecorderRef.current = null
+        setDictating(false)
+        setRecordingSeconds(0)
+
+        if (discardRecordingRef.current) {
+          mediaChunksRef.current = []
+          return
+        }
+
+        const chunks = mediaChunksRef.current
+        mediaChunksRef.current = []
+        const blobType = recorder.mimeType || mimeType || 'audio/webm'
+        const audioBlob = new Blob(chunks, { type: blobType })
+        if (audioBlob.size === 0) {
+          setMicNotice('No se capturó audio suficiente. Intenta hablar nuevamente.')
+          return
+        }
+
+        const ctrl = new AbortController()
+        sttAbortRef.current = ctrl
+        setTranscribing(true)
+
+        const promptHint = cleanQuestion.replace(/^\[[^\]]+\]\s*/, '').trim().slice(0, 200)
+        void transcribeStudyAudio(audioBlob, {
+          language: 'en',
+          promptHint,
+          filename,
+          signal: ctrl.signal,
+        })
+          .then((res) => {
+            if (ctrl.signal.aborted) return
+            const text = (res.text ?? '').trim()
+            if (text) {
+              appendTranscript(text)
+            } else {
+              setMicNotice('No se detectó voz clara en la grabación. Intenta de nuevo.')
+            }
+          })
+          .catch((err: unknown) => {
+            if (ctrl.signal.aborted) return
+            if (err instanceof SttApiError && err.status === 503) {
+              forceWebSpeechRef.current = true
+              if (speechRecognitionSupported) {
+                setMicNotice(
+                  'STT en servidor no disponible (configura GROQ_API_KEY). Se activó el respaldo del navegador: pulsa "Dictar respuesta" de nuevo.',
+                )
+              } else {
+                setMicNotice(
+                  'STT en servidor no disponible (falta GROQ_API_KEY) y este navegador no soporta dictado local.',
+                )
+              }
+            } else {
+              setMicNotice('No se pudo transcribir el audio. Intenta de nuevo o escribe tu respuesta.')
+            }
+          })
+          .finally(() => {
+            if (sttAbortRef.current === ctrl) {
+              sttAbortRef.current = null
+              setTranscribing(false)
+            }
+          })
+      }
+
+      mediaRecorderRef.current = recorder
+      setRecordingSeconds(0)
+      setDictating(true)
+      clearRecordingTimer()
+      recordingTimerRef.current = window.setInterval(() => {
+        setRecordingSeconds((s) => s + 1)
+      }, 1000)
+      recorder.start()
+    } catch {
+      releaseMediaStream()
+      clearRecordingTimer()
+      setDictating(false)
+      setRecordingSeconds(0)
+      setMicNotice('Permiso de micrófono denegado o dispositivo no disponible. Revisa permisos o escribe tu respuesta.')
     }
   }
 
@@ -729,22 +944,41 @@ export default function CodeChallengeInput({
               </button>
             )}
 
-            {isSpeaking && speechRecognitionSupported && (
+            {isSpeaking && micSupported && (
               <button
                 type="button"
-                onClick={toggleDictation}
-                className={`inline-flex items-center gap-1 rounded border px-2.5 py-1 text-[11px] font-semibold transition ${
+                disabled={transcribing}
+                onClick={() => void toggleDictation()}
+                className={`inline-flex items-center gap-1.5 rounded border px-2.5 py-1 text-[11px] font-semibold transition disabled:opacity-60 ${
                   dictating
                     ? 'border-rose-400 bg-rose-50 text-rose-800 hover:bg-rose-100 dark:border-rose-700 dark:bg-rose-950/60 dark:text-rose-200'
-                    : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800'
+                    : transcribing
+                      ? 'border-indigo-300 bg-indigo-50 text-indigo-800 dark:border-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-200'
+                      : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800'
                 }`}
               >
-                {dictating ? <MicOff size={12} /> : <Mic size={12} />}
-                {dictating ? 'Detener dictado' : 'Dictar por micrófono'}
+                {transcribing ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : dictating ? (
+                  <MicOff size={12} />
+                ) : (
+                  <Mic size={12} />
+                )}
+                {transcribing
+                  ? 'Transcribiendo...'
+                  : dictating
+                    ? `Detener (${recordingSeconds}s)`
+                    : 'Dictar respuesta'}
               </button>
             )}
           </div>
         </div>
+
+        {micNotice && (
+          <p className="rounded border border-amber-200 bg-amber-50/70 px-2.5 py-1 text-[11px] text-amber-900 dark:border-amber-800/70 dark:bg-amber-950/35 dark:text-amber-200">
+            {micNotice}
+          </p>
+        )}
 
         {hideQuestionInitially ? (
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-dashed border-violet-300 bg-violet-50/50 px-3 py-2.5 text-xs text-violet-950 dark:border-violet-800 dark:bg-violet-950/30 dark:text-violet-200">

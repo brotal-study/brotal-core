@@ -35,6 +35,11 @@ ENGLISH_ACCENT_VOICES: dict[str, tuple[str, ...]] = {
     "au": ("en-AU-NatashaNeural", "en-GB-SoniaNeural", "en-US-AriaNeural"),
 }
 
+ENGLISH_ROLE_VOICES: dict[str, tuple[str, ...]] = {
+    "teacher": ("en-US-JennyNeural", "en-US-AriaNeural"),
+    "partner": ("en-US-AndrewNeural", "en-US-GuyNeural"),
+}
+
 MAX_PHRASE_TTS_CHARS = 1200
 
 
@@ -367,6 +372,7 @@ async def synthesize_phrase_tts(
     text: str,
     lang: Literal["en", "es"] = "en",
     accent: Literal["us", "gb", "au"] = "us",
+    voice_role: str = "default",
 ) -> Path:
     """Sintetiza y cachea por SHA-256 una frase corta en ingles o espanol en ~/.brotal/tts_cache/{course_id}/."""
     raw = (text or "").strip()
@@ -379,17 +385,25 @@ async def synthesize_phrase_tts(
     if not spoken:
         raise ValueError("El texto no contiene contenido sintetizable.")
 
+    norm_role = voice_role if voice_role in ("default", "teacher", "partner") else "default"
+
     if lang == "es":
         voices_to_try = list(DEFAULT_VOICES)
     else:
-        voices_to_try = list(ENGLISH_ACCENT_VOICES.get(accent, ENGLISH_VOICES))
+        accent_voices = list(ENGLISH_ACCENT_VOICES.get(accent, ENGLISH_VOICES))
+        if norm_role in ENGLISH_ROLE_VOICES:
+            voices_to_try = list(dict.fromkeys([*ENGLISH_ROLE_VOICES[norm_role], *accent_voices]))
+        else:
+            voices_to_try = accent_voices
 
     primary_voice = voices_to_try[0]
     safe_course = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in course_id) or "default"
     course_dir = tts_cache_dir() / safe_course
     course_dir.mkdir(parents=True, exist_ok=True)
 
-    digest = hashlib.sha256(f"phrase::{lang}::{accent}::{primary_voice}::{spoken}".encode()).hexdigest()[:32]
+    digest = hashlib.sha256(
+        f"phrase::{lang}::{accent}::{norm_role}::{primary_voice}::{spoken}".encode()
+    ).hexdigest()[:32]
     target_path = course_dir / f"{digest}.mp3"
     if target_path.is_file() and target_path.stat().st_size > 0:
         return target_path

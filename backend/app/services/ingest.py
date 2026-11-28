@@ -368,6 +368,7 @@ def _build_fallback_code_lab_prompts(
     )
 
     if branch == "practice":
+        p2_key = key_phrases[min(1, len(key_phrases) - 1)][:160]
         return [
             {
                 "id": "q1",
@@ -397,7 +398,7 @@ def _build_fallback_code_lab_prompts(
                 ),
                 "rubric_points": [
                     f"Implementa la lógica completa requerida para {title}",
-                    key_phrases[1][:160],
+                    p2_key,
                 ],
                 "challenge_type": "implement",
                 "language": lang,
@@ -406,6 +407,82 @@ def _build_fallback_code_lab_prompts(
                     challenge_type="implement",
                     node_title=title,
                     index=node_index,
+                ),
+            },
+            {
+                "id": "q3",
+                "question": (
+                    f"[Traza {lang_upper}] Analiza el siguiente bloque sobre {title}, indica su salida exacta "
+                    "y explica paso a paso el flujo de ejecución en memoria."
+                ),
+                "rubric_points": [
+                    f"Determina con exactitud la salida y el estado en memoria de {title}",
+                    key_phrases[0][:160],
+                ],
+                "challenge_type": "trace",
+                "language": lang,
+                "starter_code": _fallback_starter_code(
+                    language=lang,
+                    challenge_type="trace",
+                    node_title=title,
+                    index=node_index + 1,
+                ),
+            },
+            {
+                "id": "q4",
+                "question": (
+                    f"[Debugging Integrador {lang_upper}] Diagnostica el error de borde en este módulo de {title} "
+                    "y corrige el código preservando los invariantes del sistema."
+                ),
+                "rubric_points": [
+                    f"Identifica la falla de borde y aplica la corrección segura en {title}",
+                    p2_key,
+                ],
+                "challenge_type": "debug",
+                "language": lang,
+                "starter_code": _fallback_starter_code(
+                    language=lang,
+                    challenge_type="debug",
+                    node_title=f"{title} CasosBorde",
+                    index=node_index + 2,
+                ),
+            },
+            {
+                "id": "q5",
+                "question": (
+                    f"[Implementación Integradora {lang_upper}] Diseña una solución completa desde cero para "
+                    f"combinar {title} con manejo seguro de datos nulos o vacíos en {course_title}."
+                ),
+                "rubric_points": [
+                    f"Construye una implementación limpia y sin errores de sintaxis en {lang_upper}",
+                    key_phrases[0][:160],
+                ],
+                "challenge_type": "implement",
+                "language": lang,
+                "starter_code": _fallback_starter_code(
+                    language=lang,
+                    challenge_type="implement",
+                    node_title=f"{title} Integrado",
+                    index=node_index + 3,
+                ),
+            },
+            {
+                "id": "q6",
+                "question": (
+                    f"[Traza de Certamen {lang_upper}] Sigue paso a paso la ejecución del fragmento de {title} "
+                    "y justifica qué método o consulta se resuelve en cada paso."
+                ),
+                "rubric_points": [
+                    f"Justifica el orden de ejecución y resultado final aplicando {title}",
+                    p2_key,
+                ],
+                "challenge_type": "trace",
+                "language": lang,
+                "starter_code": _fallback_starter_code(
+                    language=lang,
+                    challenge_type="trace",
+                    node_title=f"{title} Certamen",
+                    index=node_index + 4,
                 ),
             },
         ]
@@ -549,10 +626,12 @@ def _build_fallback_language_studio_prompts(
 
     if branch == "practice":
         practice_mix = [
-            find_error_prompt if idx0 % 2 == 0 else dictation_prompt,
-            word_order_prompt if idx0 % 2 == 0 else categorize_prompt,
+            find_error_prompt,
+            word_order_prompt,
+            categorize_prompt,
+            dictation_prompt,
             {
-                "id": "q3",
+                "id": "q5",
                 "question": (
                     f"[Writing / Translation · {title}] Write in natural English (1-2 complete sentences): "
                     "'Ella estudia inglés todos los días en la universidad, pero no tiene clases los sábados.'"
@@ -567,7 +646,7 @@ def _build_fallback_language_studio_prompts(
                 "interaction_data": None,
             },
             {
-                "id": "q4",
+                "id": "q6",
                 "question": (
                     f"What is your daily routine at university and what are your main study habits for {course_title}? "
                     "Answer in 3-4 complete sentences in English."
@@ -1071,6 +1150,130 @@ def _strip_bullet_lists(story: str) -> str:
     return prose
 
 
+_GENERIC_SUBHEADING_RE = re.compile(
+    r"^(?:"
+    r"core\s+structures?"
+    r"|common\s+spanish[\s-]*speaker\s+traps?"
+    r"|essential\s+uses?"
+    r"|key\s+vocabulary"
+    r"|grammar\s+(?:notes?|focus|rules?)"
+    r"|common\s+(?:mistakes?|errors?|traps?)"
+    r"|examples?"
+    r"|summary"
+    r"|practice"
+    r"|exercises?"
+    r"|ejemplos?"
+    r"|resumen"
+    r"|pr[aá]ctica"
+    r"|ejercicios?"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _is_generic_subheading(title: str) -> bool:
+    cleaned = re.sub(r"^(?:Seccion|Pagina|Slide)\s+\d+[:\s]*", "", (title or "").strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*\(parte\s+\d+\)\s*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^[\d.)\-\s]+", "", cleaned).strip()
+    return bool(cleaned and _GENERIC_SUBHEADING_RE.match(cleaned))
+
+
+def _group_chunks_avoiding_generic_titles(chunks: list[ExtractedChunk]) -> list[tuple[str, str]]:
+    """Agrupa encabezados genericos (ej. Core Structures / Essential Uses) bajo su encabezado padre para evitar duplicados."""
+    grouped: list[tuple[str, str]] = []
+    title_index: dict[str, int] = {}
+
+    for ch in chunks:
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", ch.content) if len(s.strip()) > 25]
+        if not sentences:
+            sentences = [ch.content[:300]]
+        snippet = " ".join(sentences[:6]).strip()
+
+        raw_sec = re.sub(r"^(?:Seccion|Pagina|Slide)\s+\d+[:\s]*", "", ch.section_title).strip()
+        if _is_generic_subheading(raw_sec):
+            if grouped:
+                prev_title, prev_text = grouped[-1]
+                merged_text = f"{prev_text} {snippet}".strip()[:1600]
+                grouped[-1] = (prev_title, merged_text)
+                continue
+            stem = _sanitize_title(Path(ch.source_file).stem.replace("_", " ").replace("-", " "), "Unidad")
+            qualified = f"{stem} · {raw_sec}"
+            norm_key = qualified.lower()
+            if norm_key in title_index:
+                idx = title_index[norm_key]
+                pt, px = grouped[idx]
+                grouped[idx] = (pt, f"{px} {snippet}".strip()[:1600])
+            else:
+                title_index[norm_key] = len(grouped)
+                grouped.append((qualified, snippet))
+            continue
+
+        norm_key = raw_sec.lower()
+        if norm_key and norm_key in title_index:
+            idx = title_index[norm_key]
+            pt, px = grouped[idx]
+            grouped[idx] = (pt, f"{px} {snippet}".strip()[:1600])
+        else:
+            if norm_key:
+                title_index[norm_key] = len(grouped)
+            grouped.append((ch.section_title, snippet))
+
+    return grouped
+
+
+def _build_fallback_concept_practice_prompts(
+    *,
+    title: str,
+    course_title: str,
+    world_metaphor: str,
+    question_style: str,
+    key_phrases: list[str],
+) -> list[dict[str, Any]]:
+    """Genera 6 ejercicios integradores para nodos practice en concept_tree (offline)."""
+    p1 = key_phrases[0][:160]
+    p2 = key_phrases[min(1, len(key_phrases) - 1)][:160]
+    q_base = _build_fallback_question(
+        question_style=question_style,
+        title=title,
+        course_title=course_title,
+        world_metaphor=world_metaphor,
+    )
+    specs = [
+        (q_base, [p1, p2]),
+        (
+            f"[Caso Integrador 2 · {title}] Ante un fallo en {world_metaphor}, ¿qué condición técnica verificarías primero y por qué?",
+            [f"Identifica la causa raíz vinculada a {title}", p1],
+        ),
+        (
+            f"[Contraste · {title}] Compara dos decisiones posibles en {course_title} y justifica cuál preserva mejor los invariantes del sistema.",
+            [f"Compara ventajas y riesgos técnicos en {title}", p2],
+        ),
+        (
+            f"[Diagnóstico · {title}] Si una regla clave de {title} deja de cumplirse en operación real, ¿qué consecuencia directa observarías?",
+            [f"Relaciona causa y efecto ante una falla en {title}", p1],
+        ),
+        (
+            f"[Aplicación · {title}] Diseña un ejemplo concreto en {course_title} donde aplicar {title} evite un error frecuente.",
+            [f"Propone un caso aplicado coherente sobre {title}", p2],
+        ),
+        (
+            f"[Síntesis de Examen · {title}] Resume en 3 pasos cómo validarías una solución completa de {title} sin consultar apuntes.",
+            [f"Estructura criterios verificables de validación para {title}", p1],
+        ),
+    ]
+    return [
+        {
+            "id": f"q{idx}",
+            "question": question,
+            "rubric_points": pts,
+            "challenge_type": "concept",
+            "language": "text",
+            "starter_code": None,
+        }
+        for idx, (question, pts) in enumerate(specs, start=1)
+    ]
+
+
 def _build_fallback_story(
     *,
     explanation_style: str,
@@ -1081,7 +1284,16 @@ def _build_fallback_story(
     key_phrases: list[str],
     engine_type: str = "concept_tree",
     default_language: str = "text",
+    branch: str = "theory",
 ) -> str:
+    if branch == "practice":
+        return _strip_bullet_lists(
+            f"Objetivo del taller **{title}**: aplicar a ciegas los conceptos previos de {course_title} en una batería "
+            f"de retos prácticos variados.\n"
+            f"Escenario operativo: resolverás casos integradores combinando **{key_phrases[0][:90]}** y "
+            f"**{key_phrases[min(1, len(key_phrases) - 1)][:90]}** sin consultar tus apuntes.\n"
+            f"Meta de aprobación: alcanzar al menos 7/10 demostrando dominio autónomo antes del examen."
+        )
     if engine_type == "language_studio":
         return _strip_bullet_lists(
             f"En **{title}** dentro de {course_title}, trabajamos estructuras esenciales en inglés a partir de tus "
@@ -1161,13 +1373,9 @@ def _fallback_nodes_from_chunks(
     default_language: str = "text",
 ) -> list[dict[str, Any]]:
     """Construye de 6 a 8 nodos reales (theory + practice) a partir de los apuntes cuando no hay IA externa."""
-    # Agrupar o expandir chunks para tener al menos 6 segmentos tematicos
-    segments: list[tuple[str, str]] = []
-    for ch in chunks:
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", ch.content) if len(s.strip()) > 25]
-        if not sentences:
-            sentences = [ch.content[:300]]
-        segments.append((ch.section_title, " ".join(sentences[:6])))
+    segments = _group_chunks_avoiding_generic_titles(chunks)
+    if not segments:
+        segments = [(course_title, f"Conceptos fundamentales de {course_title}.")]
 
     while len(segments) < 6:
         idx = len(segments) + 1
@@ -1183,7 +1391,7 @@ def _fallback_nodes_from_chunks(
         branch = "theory" if is_theory else "practice"
         nid = f"N{i}"
         if is_theory:
-            # Organizar teoria en 3 columnas paralelas (2 livelli por columna) en vez de 1 torre vertical
+            # Organizar teoria en 3 columnas paralelas (2 niveles por columna) en vez de 1 torre vertical
             col_idx = ((i - 1) // 2) + 1
             if i % 2 == 1:
                 parents: list[str] = []
@@ -1195,7 +1403,12 @@ def _fallback_nodes_from_chunks(
             block = "Bloque Practico · Examenes y Casos"
         raw_sec = re.sub(r"^(Seccion|Pagina|Slide)\s+\d+[:\s]*", "", sec_title).strip()
         clean_title = _sanitize_title(raw_sec, f"Concepto {i}")
-        title = f"{clean_title[:70]}" if is_theory else f"Taller Practico: {clean_title[:58]}"
+        if is_theory:
+            title = f"{clean_title[:70]}"
+        elif engine_type == "language_studio" and i == len(selected):
+            title = "Taller Oral · Simulador Speaking e Integración"
+        else:
+            title = f"Taller Practico: {clean_title[:58]}"
 
         key_phrases = [
             s.strip().rstrip(".")
@@ -1214,6 +1427,7 @@ def _fallback_nodes_from_chunks(
             key_phrases=key_phrases,
             engine_type=engine_type,
             default_language=default_language,
+            branch=branch,
         )
         q_text = _build_fallback_question(
             question_style=question_style,
@@ -1240,6 +1454,14 @@ def _fallback_nodes_from_chunks(
                 key_phrases=key_phrases,
                 default_language=default_language,
                 node_index=i,
+            )
+        elif branch == "practice":
+            eval_prompts = _build_fallback_concept_practice_prompts(
+                title=title,
+                course_title=course_title,
+                world_metaphor=world_metaphor,
+                question_style=question_style,
+                key_phrases=key_phrases,
             )
         else:
             eval_prompts = [
@@ -1436,15 +1658,17 @@ def _code_lab_architect_rules(default_language: str) -> str:
     lang = default_language if default_language in ("java", "sql", "python", "c") else "java"
     return (
         f"\nMODO ESPECIAL `code_lab` ACTIVO (Lenguaje dominante: `{lang}`):\n"
-        f"- BLOQUE DE CODIGO EN `story_script`: En cada nodo cuando `engine_type == \"code_lab\"`, incluye en `story_script` "
-        f"1 ejemplo de codigo real corto y limpio (10 a 22 lineas) en un bloque Markdown cercado (```{lang} ... ```) "
-        f"— o hasta 2 micro-fragmentos de 4 a 8 lineas si contrastan un error vs. su correccion — que enseñe explicitamente "
-        f"la sintaxis, anotaciones y mecanismos que se evaluaran en ese nodo.\n"
-        f"- En cada nodo `branch: \"theory\"`: genera 3 `eval_prompts` combinando al menos 1 pregunta conceptual "
-        f"(`\"challenge_type\": \"concept\"`, `\"starter_code\": null`) + 1 a 2 desafios de codigo reales "
-        f"(`\"challenge_type\": \"trace\" | \"debug\" | \"implement\"`, `\"language\": \"{lang}\"`).\n"
-        f"- En cada nodo `branch: \"practice\"` (Examenes / Laboratorios): genera desafios practicos de codigo reales "
-        f"(`\"challenge_type\": \"debug\"` e `\"implement\"`, `\"language\": \"{lang}\"`) estilo certamen universitario.\n"
+        f"- BLOQUE DE CODIGO EN `story_script` (SOLO EN `branch: \"theory\"`): En cada nodo `theory` cuando "
+        f"`engine_type == \"code_lab\"`, incluye en `story_script` 1 ejemplo de codigo real corto y limpio (10 a 22 lineas) "
+        f"en un bloque Markdown cercado (```{lang} ... ```) — o hasta 2 micro-fragmentos de 4 a 8 lineas si contrastan un "
+        f"error vs. su correccion — que enseñe explicitamente la sintaxis, anotaciones y mecanismos evaluados.\n"
+        f"- En cada nodo `branch: \"theory\"` (Leccion): genera 2 a 3 `eval_prompts` estrictamente sobre ese concepto, "
+        f"combinando 1 pregunta conceptual (`\"challenge_type\": \"concept\"`, `\"starter_code\": null`) + 1 a 2 desafios "
+        f"de codigo reales (`\"challenge_type\": \"trace\" | \"debug\" | \"implement\"`, `\"language\": \"{lang}\"`).\n"
+        f"- En cada nodo `branch: \"practice\"` (Taller / Simulacro / Laboratorio): PROHIBIDO escribir clase teorica larga "
+        f"en `story_script` (solo briefing accionable de 2 a 4 lineas indicando objetivo, escenario y conceptos integrados). "
+        f"A cambio, genera 6 a 8 desafios practicos de codigo reales variados (`\"challenge_type\": \"debug\"`, `\"implement\"` "
+        f"y `\"trace\"`, `\"language\": \"{lang}\"`) estilo certamen universitario integrando sus `parent_ids`.\n"
         f"- REGLA ESTRICTA DE `starter_code` Y `question`:\n"
         f"  * `debug` y `trace`: SI incluyen el codigo completo necesario en `starter_code` (con el bug concreto a "
         f"corregir o el fragmento completo a trazar paso a paso), SIEMPRE formateado en multiples lineas con `\\n` "
@@ -1462,32 +1686,43 @@ def _code_lab_architect_rules(default_language: str) -> str:
 
 def _language_studio_architect_rules() -> str:
     return (
-        "\nMODO ESPECIAL `language_studio` ACTIVO (Ingles universitario — Gramatica, Vocabulario, Comprension y Produccion a ciegas):\n"
-        "- EXPLICACION BILINGUE (`story_script`): Escribe `story_script` en espanol claro y conversado (2 a 3 parrafos "
-        "fluidos sin listas sueltas) con las **reglas gramaticales y de vocabulario clave en `**negrita**`**, explicando "
-        "las estructuras **afirmativa, negativa e interrogativa**, las **trampas tipicas de hispanohablantes** (L1-ES) y "
-        "**ejemplos concretos en ingles** claramente diferenciados (en un bloque ```en ... ``` y/o entre comillas con "
-        "traduccion breve opcional entre parentesis). DEBE cubrir explicitamente todo el vocabulario y gramatica que se "
-        "evaluara en `eval_prompts`.\n"
-        "- RETOS ACTIVOS A CIEGAS (`eval_prompts`, `\"language\": \"en\"`, `\"starter_code\": null`):\n"
-        "  * En cada nodo `branch: \"theory\"` y `branch: \"practice\"`, genera 3 a 4 retos mezclando las 4 mecanicas interactivas "
-        "con produccion escrita/oral (`fill_blank`, `translate`, `speaking_prompt`), atacando siempre interferencia real espanol->ingles:\n"
-        "    1. `\"challenge_type\": \"word_order\"` (armar oracion descartando distractores L1-ES): DEBE incluir "
+        "\nMODO ESPECIAL `language_studio` ACTIVO (Ingles universitario — Unidades Tematico-Situacionales + Talleres Integrados):\n"
+        "- ARQUITECTURA DE LA COPA (`branch: \"theory\"`) EN UNIDADES TEMATICO-SITUACIONALES INTEGRADAS:\n"
+        "  * Organiza los nodos `theory` en **Unidades Tematico-Situacionales** que fusionen la Gramatica al servicio del "
+        "Vocabulario situacional del apunte (ejemplos de nomenclatura: `U1 · Presentarme y Familia (To be)`, "
+        "`U2 · Estudios y Trabajo (Present Simple + Jobs/Study)`, `U3 · Rutina y Tecnologia (Have got + Routines/Tech)`, "
+        "`U4 · Comida y Restaurante (Quantifiers + Food)`, `U5 · Casa y Ciudad (There is/are + Furniture/Places)`).\n"
+        "  * PROHIBIDO crear nodos con titulos crudos de subtitulos repetidos como `\"Core Structures\"`, "
+        "`\"Common Spanish-Speaker Traps\"`, `\"Essential Uses\"`, `\"Examples\"` o copiar nombres literales de archivos PDF/MD.\n"
+        "  * En cada nodo `theory`: escribe un `story_script` bilingue completo en espanol claro y conversado (2 a 3 parrafos "
+        "fluidos sin listas sueltas) con las **reglas gramaticales y de vocabulario clave en `**negrita**`**, estructuras "
+        "**afirmativa, negativa e interrogativa**, **trampas tipicas de hispanohablantes** (L1-ES) y ejemplos concretos en "
+        "ingles (en un bloque ```en ... ``` y/o entre comillas con traduccion breve). Incluye **2 a 3 `eval_prompts`** "
+        "estrictamente enfocados en esa unidad.\n"
+        "- ARQUITECTURA DE LAS RAICES (`branch: \"practice\"`) EN TALLERES INTEGRADOS + SIMULADOR SPEAKING:\n"
+        "  * PROHIBIDO repetir una clase teorica larga en `story_script`; en `practice`, `story_script` guarda UNICAMENTE "
+        "un **briefing corto y accionable de 2 a 4 lineas** (objetivo del taller, situacion comunicativa y que unidades "
+        "de sus `parent_ids` integra).\n"
+        "  * En cada nodo `practice`, genera **6 a 8 retos integrados** (`eval_prompts`, `\"language\": \"en\"`, "
+        "`\"starter_code\": null`) mezclando las 4 mecanicas interactivas (`word_order`, `categorize`, `find_error`, "
+        "`dictation`) + `fill_blank`, `translate` y `speaking_prompt`, atacando interferencia real espanol->ingles.\n"
+        "  * Incluye SIEMPRE al menos **1 nodo raiz explicito de Simulador Speaking / Integracion Oral** "
+        "(ej. `Taller Oral · Simulador Speaking e Integracion`).\n"
+        "- CONTRATO DE `interaction_data` PARA RETOS INTERACTIVOS (`\"language\": \"en\"`, `\"starter_code\": null`):\n"
+        "  1. `\"challenge_type\": \"word_order\"` (armar oracion descartando distractores L1-ES): DEBE incluir "
         "`\"interaction_data\": {\"tiles\": [>=4 bloques de la oracion valida en orden], \"distractors\": [1-2 distractores reales "
         "como do/does, is/are, much/many, go/goes, have/has], \"hint_es\": \"breve pista en espanol\"}`.\n"
-        "    2. `\"challenge_type\": \"categorize\"` (clasificar expresiones por regla o situacion): DEBE incluir "
+        "  2. `\"challenge_type\": \"categorize\"` (clasificar expresiones por regla o situacion): DEBE incluir "
         "`\"interaction_data\": {\"categories\": [>=2 categorias funcionales], \"items\": [>=4 bloques de texto], "
         "\"expected_map\": {\"item\": \"categoria\"}}`.\n"
-        "    3. `\"challenge_type\": \"find_error\"` (detectar y corregir error L1-ES o validar si esta correcta): DEBE incluir "
+        "  3. `\"challenge_type\": \"find_error\"` (detectar y corregir error L1-ES o validar si esta correcta): DEBE incluir "
         "`\"interaction_data\": {\"sentence\": \"oracion en ingles\", \"tokens\": [>=4 tokens], \"allow_no_error\": true, "
         "\"error_token\": \"token\"|null, \"correction\": \"forma natural\"|null}`.\n"
-        "    4. `\"challenge_type\": \"dictation\"` (comprension auditiva y transcripcion con edge-tts): DEBE incluir "
+        "  4. `\"challenge_type\": \"dictation\"` (comprension auditiva y transcripcion con edge-tts): DEBE incluir "
         "`\"interaction_data\": {\"audio_text\": \"frase en ingles no vacia\", \"accent\": \"us\"|\"gb\"|\"au\", "
         "\"hint_es\": \"breve instruccion en espanol\"}`.\n"
-        "    5. `\"fill_blank\"`, `\"translate\"` y `\"speaking_prompt\"` (`\"interaction_data\": null`): completar huecos con `___`, "
+        "  5. `\"fill_blank\"`, `\"translate\"` y `\"speaking_prompt\"` (`\"interaction_data\": null`): completar huecos con `___`, "
         "traducir 1-2 oraciones naturales al ingles y responder preguntas abiertas en 3-4 oraciones.\n"
-        "  * Distribuye los 4 tipos interactivos a lo largo de los nodos del arbol para que el estudiante practique orden sintactico, "
-        "clasificacion, deteccion de errores L1-ES y dictado auditivo.\n"
     )
 
 
@@ -1536,26 +1771,32 @@ def _generate_nodes_with_ai(
     system_prompt = (
         "Eres el Arquitecto Pedagogico de Brotal. Convierte apuntes universitarios en un Arbol de Habilidades "
         "JSON profundo y exigente con ENTRE 8 Y 16 NODOS (si el material es muy corto, minimo 6):\n"
-        "- COPA SUPERIOR (`branch: \"theory\"`): entre 6 y 11 nodos conceptuales organizados en **3 a 4 ramas/bloques "
+        "- COPA SUPERIOR (`branch: \"theory\"`, Lecciones): entre 6 y 11 nodos conceptuales organizados en **3 a 4 ramas/bloques "
         "paralelos** (PROHIBIDO formar una sola torre vertical de 1 columna). El primer nodo de cada bloque principal "
         "DEBE llevar `parent_ids: []` para salir directo desde el nucleo central, y cada columna/bloque crece solo "
         "2 a 3 niveles hacia arriba.\n"
-        "- RAICES INFERIORES (`branch: \"practice\"`): entre 3 y 5 nodos explicitos de EXAMENES, CONTROLES, LABS o CASOS REALES "
-        "(ej. 'Examen Parcial 1 · ...', 'Caso Practico / Debugging · ...', 'Simulacro Examen Final'), "
+        "- RAICES INFERIORES (`branch: \"practice\"`, Talleres / Simulacros): entre 3 y 5 nodos explicitos de EXAMENES, "
+        "TALLERES, LABS o SIMULACROS (ej. 'Examen Parcial 1 · ...', 'Taller Practico · ...', 'Simulacro Examen Final'), "
         "conectados en `parent_ids` a los nodos 'theory' que ponen a prueba.\n"
         "REGLAS OBLIGATORIAS:\n"
-        f"1. `story_script` DEBE seguir esta preferencia del estudiante: {exp_rule}\n"
-        "2. DESTACADOS VISUALES EN `story_script`: Marca entre 3 y 6 conceptos, reglas o palabras clave fundamentales "
-        "por historia con `**negrita**` (ej. `**polimorfismo dinamico**`, `**@Override**`, `**pasa por valor**`).\n"
-        "3. CONTRATO ESTRICTO DE COBERTURA EXPLICACION <-> PREGUNTAS: El `story_script` DEBE explicar de forma explicita "
-        "y suficiente TODOS los conceptos, sintaxis, anotaciones y `rubric_points` que se evaluaran en `eval_prompts` "
-        "de ese nodo (ej. si una pregunta exige `@Override` o `super()`, `story_script` debe enseñarlo explicitamente "
-        "con ejemplo). PROHIBIDO exigir en `eval_prompts` sintaxis, anotaciones o conceptos que no aparezcan en `story_script`.\n"
-        "4. Ningun titulo (`title`) puede ser una linea separadora (`---`, `===`, `***`) ni tener menos de 3 caracteres alfanumericos.\n"
+        f"1. SEPARACION ESTRICTA `theory` vs `practice`:\n"
+        f"   - En `branch: \"theory\"` (Leccion): escribe un `story_script` completo siguiendo esta preferencia: {exp_rule} "
+        "Incluye entre 2 y 3 `eval_prompts` estrictamente enfocados en ese concepto.\n"
+        "   - En `branch: \"practice\"` (Taller / Simulacro): PROHIBIDO escribir una clase teorica larga en `story_script`. "
+        "Guarda UNICAMENTE un **briefing corto y accionable de 2 a 4 lineas** (objetivo del taller, escenario y que combina "
+        "de sus `parent_ids`). A cambio, genera **6 a 8 `eval_prompts` variados e integradores** mezclando los conceptos de "
+        "sus `parent_ids`.\n"
+        "2. DESTACADOS VISUALES EN `story_script`: En `theory`, marca entre 3 y 6 conceptos, reglas o palabras clave "
+        "fundamentales con `**negrita**` (ej. `**polimorfismo dinamico**`, `**@Override**`, `**pasa por valor**`).\n"
+        "3. CONTRATO ESTRICTO DE COBERTURA EXPLICACION <-> PREGUNTAS: En nodos `theory`, el `story_script` DEBE explicar de "
+        "forma explicita y suficiente TODOS los conceptos, sintaxis, anotaciones y `rubric_points` que se evaluaran en "
+        "`eval_prompts` de ese nodo. PROHIBIDO exigir en `eval_prompts` sintaxis o conceptos que no aparezcan en el arbol.\n"
+        "4. Ningun titulo (`title`) puede ser una linea separadora (`---`, `===`, `***`), ni tener menos de 3 caracteres "
+        "alfanumericos, ni repetir subtitulos genericos crudos ('Core Structures', 'Essential Uses', 'Common Spanish-Speaker Traps').\n"
         "5. Los nodos iniciales de los 3 a 4 bloques 'theory' llevan `parent_ids: []`. Los siguientes niveles de cada bloque "
         "conectan `parent_ids` al nodo inferior de su bloque formando 3 a 4 columnas paralelas de 2 a 3 niveles.\n"
-        f"6. Cada nodo DEBE incluir `eval_prompts` con 3 a 4 preguntas a ciegas siguiendo este estilo: {q_rule} "
-        "Cada pregunta lleva 2 a 3 `rubric_points` concretos y verificables.\n"
+        f"6. Estilo de `eval_prompts`: {q_rule} Cada pregunta lleva 2 a 3 `rubric_points` concretos y verificables "
+        "(2 a 3 preguntas en `theory`, 6 a 8 ejercicios variados e integradores en `practice`).\n"
         "7. Cubre TODOS los archivos entregados, no solo el primero.\n"
         f"{engine_extra}"
         "Responde UNICAMENTE JSON valido con la clave `nodes`:\n"
@@ -1597,7 +1838,7 @@ def _generate_nodes_with_ai(
             preferred_provider=preferred_provider,
             json_mode=True,
             temperature=0.35,
-            max_tokens=8192,
+            max_tokens=6144,
             timeout=90.0,
         )
         parsed = extract_json_object(comp.text)
@@ -1626,6 +1867,7 @@ def _generate_nodes_with_ai(
             )
 
             raw_prompts = n.get("eval_prompts") or []
+            prompt_cap = 10 if branch == "practice" else 5
             clean_prompts = [
                 _normalize_prompt_item(
                     p,
@@ -1635,7 +1877,7 @@ def _generate_nodes_with_ai(
                     engine_type=engine_type,
                     default_language=default_language,
                 )
-                for p_idx, p in enumerate(raw_prompts[:5], start=1)
+                for p_idx, p in enumerate(raw_prompts[:prompt_cap], start=1)
                 if isinstance(p, dict)
             ]
 
@@ -1752,12 +1994,9 @@ def _fallback_append_nodes_from_chunks(
     theory_anchors = [str(n["id"]) for n in existing_nodes if n.get("branch") == "theory"]
     anchor_id = theory_anchors[-1] if theory_anchors else str(existing_nodes[-1]["id"])
 
-    segments: list[tuple[str, str]] = []
-    for ch in chunks:
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", ch.content) if len(s.strip()) > 25]
-        if not sentences:
-            sentences = [ch.content[:300]]
-        segments.append((ch.section_title, " ".join(sentences[:6])))
+    segments = _group_chunks_avoiding_generic_titles(chunks)
+    if not segments:
+        segments = [(course_title, f"Conceptos incrementales de {course_title}.")]
 
     while len(segments) < 2:
         idx = len(segments) + 1
@@ -1801,6 +2040,7 @@ def _fallback_append_nodes_from_chunks(
             key_phrases=key_phrases,
             engine_type=engine_type,
             default_language=default_language,
+            branch=branch,
         )
         q_text = _build_fallback_question(
             question_style=question_style,
@@ -1827,6 +2067,14 @@ def _fallback_append_nodes_from_chunks(
                 key_phrases=key_phrases,
                 default_language=default_language,
                 node_index=i,
+            )
+        elif branch == "practice":
+            eval_prompts = _build_fallback_concept_practice_prompts(
+                title=title,
+                course_title=course_title,
+                world_metaphor=world_metaphor,
+                question_style=question_style,
+                key_phrases=key_phrases,
             )
         else:
             eval_prompts = [
@@ -1896,12 +2144,17 @@ def _generate_append_nodes_with_ai(
         "2. Cada nodo nuevo DEBE tener un `id` unico que NO colisione con ningun `id` existente (ej. 'A1', 'A2', 'P_NEW1').\n"
         "3. `parent_ids` de cada nodo nuevo DEBE conectarse al menos a un nodo existente del arbol (o a otro nodo nuevo recien creado) "
         "para que quede integrado en el DAG.\n"
-        f"4. `story_script` DEBE seguir esta preferencia: {exp_rule}\n"
-        "5. DESTACADOS VISUALES EN `story_script`: Marca entre 3 y 6 conceptos, reglas o palabras clave por historia con `**negrita**`.\n"
-        "6. CONTRATO ESTRICTO DE COBERTURA EXPLICACION <-> PREGUNTAS: El `story_script` DEBE explicar explicitamente todos los "
-        "conceptos, sintaxis, anotaciones y `rubric_points` evaluados en `eval_prompts` de ese nodo. PROHIBIDO evaluar en "
-        "`eval_prompts` sintaxis o conceptos que no aparezcan en `story_script`.\n"
-        f"7. Cada nodo nuevo DEBE incluir `eval_prompts` con 2 a 4 preguntas a ciegas ({q_rule}) y 2 a 3 `rubric_points` verificables.\n"
+        f"4. SEPARACION ESTRICTA `theory` vs `practice`:\n"
+        f"   - En `branch: \"theory\"` (Leccion): `story_script` completo siguiendo esta preferencia: {exp_rule} "
+        "Incluye 2 a 3 `eval_prompts` estrictamente sobre ese concepto.\n"
+        "   - En `branch: \"practice\"` (Taller / Simulacro): PROHIBIDO escribir una clase teorica larga en `story_script`; "
+        "guarda UNICAMENTE un briefing corto y accionable de 2 a 4 lineas (objetivo, escenario y que integra de sus `parent_ids`) "
+        "y genera **6 a 8 `eval_prompts` variados e integradores** mezclando los conceptos de sus `parent_ids`.\n"
+        "5. DESTACADOS VISUALES EN `story_script`: En `theory`, marca entre 3 y 6 conceptos, reglas o palabras clave con `**negrita**`.\n"
+        "6. CONTRATO ESTRICTO DE COBERTURA EXPLICACION <-> PREGUNTAS: En `theory`, el `story_script` DEBE explicar explicitamente "
+        "todos los conceptos, sintaxis, anotaciones y `rubric_points` evaluados en `eval_prompts` de ese nodo.\n"
+        f"7. Estilo de preguntas: {q_rule} Cada pregunta lleva 2 a 3 `rubric_points` verificables "
+        "(2 a 3 en `theory`, 6 a 8 en `practice`).\n"
         f"{engine_extra}"
         "Responde UNICAMENTE JSON valido con la clave `nodes`."
     )
@@ -1971,6 +2224,7 @@ def _generate_append_nodes_with_ai(
             )
 
             raw_prompts = n.get("eval_prompts") or []
+            prompt_cap = 10 if branch == "practice" else 5
             clean_prompts = [
                 _normalize_prompt_item(
                     p,
@@ -1980,7 +2234,7 @@ def _generate_append_nodes_with_ai(
                     engine_type=engine_type,
                     default_language=default_language,
                 )
-                for p_idx, p in enumerate(raw_prompts[:5], start=1)
+                for p_idx, p in enumerate(raw_prompts[:prompt_cap], start=1)
                 if isinstance(p, dict)
             ]
             if engine_type == "language_studio":

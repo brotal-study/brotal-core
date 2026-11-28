@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
+  Award,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -9,6 +10,7 @@ import {
   Eye,
   EyeOff,
   Flag,
+  GraduationCap,
   HelpCircle,
   Languages,
   Lightbulb,
@@ -20,22 +22,31 @@ import {
   Send,
   Sparkles,
   Square,
+  UserRound,
   Volume2,
   VolumeX,
+  Zap,
 } from 'lucide-react'
 import {
   fetchPhraseTtsBlob,
+  PASS_SCORE,
   sendLanguagePracticeChat,
+  SttApiError,
+  transcribeStudyAudio,
+  type LanguageChatMode,
   type LanguageChatSessionSummary,
   type LanguageChatTurn,
+  type LanguageSpeakerRole,
   type PackNode,
   type TtsAccent,
+  type TtsVoiceRole,
 } from '../../api/study'
 
 interface Props {
   courseId: string
   node: PackNode
   active: boolean
+  defaultMode?: LanguageChatMode
 }
 
 interface PracticeMessage {
@@ -45,6 +56,9 @@ interface PracticeMessage {
   translation_es?: string
   inline_correction_es?: string | null
   example_en?: string | null
+  speaker_role?: LanguageSpeakerRole
+  part_index?: number | null
+  part_label?: string
 }
 
 interface SpeechRecognitionResultAlternativeLike {
@@ -79,6 +93,12 @@ type SpeechRecognitionConstructor = new () => SpeechRecognitionInstance
 const SPEEDS = [0.8, 0.95, 1.0] as const
 type ChatSpeed = (typeof SPEEDS)[number]
 
+const EXAM_PARTS = [
+  { index: 1, short: 'Parte 1/3', fallbackLabel: 'Preguntas personales' },
+  { index: 2, short: 'Parte 2/3', fallbackLabel: 'Interacción en pareja' },
+  { index: 3, short: 'Parte 3/3', fallbackLabel: 'Opinión y cierre' },
+] as const
+
 function getSpeechRecognitionCtor(): SpeechRecognitionConstructor | null {
   if (typeof window === 'undefined') return null
   const win = window as unknown as {
@@ -86,6 +106,30 @@ function getSpeechRecognitionCtor(): SpeechRecognitionConstructor | null {
     webkitSpeechRecognition?: SpeechRecognitionConstructor
   }
   return win.SpeechRecognition ?? win.webkitSpeechRecognition ?? null
+}
+
+function isMediaRecorderAvailable(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof MediaRecorder !== 'undefined' &&
+    typeof navigator !== 'undefined' &&
+    Boolean(navigator.mediaDevices?.getUserMedia)
+  )
+}
+
+function pickSupportedAudioMimeType(): { mimeType: string; filename: string } {
+  const candidates = [
+    { mimeType: 'audio/webm;codecs=opus', filename: 'speech.webm' },
+    { mimeType: 'audio/webm', filename: 'speech.webm' },
+    { mimeType: 'audio/ogg;codecs=opus', filename: 'speech.ogg' },
+    { mimeType: 'audio/ogg', filename: 'speech.ogg' },
+  ]
+  if (typeof MediaRecorder !== 'undefined' && typeof MediaRecorder.isTypeSupported === 'function') {
+    for (const c of candidates) {
+      if (MediaRecorder.isTypeSupported(c.mimeType)) return c
+    }
+  }
+  return { mimeType: '', filename: 'speech.webm' }
 }
 
 function readStoredAccent(): TtsAccent {
@@ -119,10 +163,18 @@ function renderRecastText(text: string) {
   })
 }
 
-export default function LanguageChatTab({ courseId, node, active }: Props) {
+export default function LanguageChatTab({
+  courseId,
+  node,
+  active,
+  defaultMode = 'missions',
+}: Props) {
+  const [mode, setMode] = useState<LanguageChatMode>(defaultMode)
   const [messages, setMessages] = useState<PracticeMessage[]>([])
   const [missions, setMissions] = useState<string[]>([])
   const [missionsCompleted, setMissionsCompleted] = useState<number[]>([])
+  const [partIndex, setPartIndex] = useState<number | null>(defaultMode === 'exam_3parts' ? 1 : null)
+  const [partLabel, setPartLabel] = useState<string>('')
   const [lexicalChips, setLexicalChips] = useState<string[]>([])
   const [sentenceStarter, setSentenceStarter] = useState<string | null>(null)
   const [sessionSummary, setSessionSummary] = useState<LanguageChatSessionSummary | null>(null)
@@ -137,6 +189,7 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
   const [accent, setAccent] = useState<TtsAccent>(() => readStoredAccent())
   const [autoVoice, setAutoVoice] = useState(false)
   const [earOnly, setEarOnly] = useState(false)
+  const [autoSendVoice, setAutoSendVoice] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
 
   const [translatedIds, setTranslatedIds] = useState<Record<string, boolean>>({})
@@ -145,6 +198,8 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
   const [loadingAudioKey, setLoadingAudioKey] = useState<string | null>(null)
   const [playingAudioKey, setPlayingAudioKey] = useState<string | null>(null)
   const [dictating, setDictating] = useState(false)
+  const [transcribing, setTranscribing] = useState(false)
+  const [recordingSeconds, setRecordingSeconds] = useState(0)
   const [micNotice, setMicNotice] = useState<string | null>(null)
 
   const msgCounterRef = useRef(0)
@@ -153,24 +208,56 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
   const blobUrlRef = useRef<string | null>(null)
   const ttsAbortRef = useRef<AbortController | null>(null)
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const mediaStreamRef = useRef<MediaStream | null>(null)
+  const mediaChunksRef = useRef<Blob[]>([])
+  const recordingTimerRef = useRef<number | null>(null)
+  const sttAbortRef = useRef<AbortController | null>(null)
+  const discardRecordingRef = useRef(false)
+  const forceWebSpeechRef = useRef(false)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const bottomRef = useRef<HTMLDivElement | null>(null)
 
+  const modeRef = useRef<LanguageChatMode>(mode)
+  modeRef.current = mode
   const autoVoiceRef = useRef(autoVoice)
   autoVoiceRef.current = autoVoice
+  const autoSendVoiceRef = useRef(autoSendVoice)
+  autoSendVoiceRef.current = autoSendVoice
   const speedRef = useRef(speed)
   speedRef.current = speed
   const accentRef = useRef(accent)
   accentRef.current = accent
   const latestInputRef = useRef(input)
   latestInputRef.current = input
+  const busyRef = useRef(busy)
+  busyRef.current = busy
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
+  const sendTurnRef = useRef<(overrideText?: string) => Promise<void>>(async () => undefined)
 
+  const mediaRecorderSupported = useMemo(() => isMediaRecorderAvailable(), [])
   const speechRecognitionSupported = useMemo(() => getSpeechRecognitionCtor() !== null, [])
+  const micSupported = mediaRecorderSupported || speechRecognitionSupported
 
   const nextMsgId = () => {
     msgCounterRef.current += 1
     return `lchat-${node.id}-${msgCounterRef.current}`
   }
+
+  const clearRecordingTimer = useCallback(() => {
+    if (recordingTimerRef.current !== null) {
+      window.clearInterval(recordingTimerRef.current)
+      recordingTimerRef.current = null
+    }
+  }, [])
+
+  const releaseMediaStream = useCallback(() => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((t) => t.stop())
+      mediaStreamRef.current = null
+    }
+  }, [])
 
   const stopAudio = useCallback(() => {
     if (ttsAbortRef.current) {
@@ -190,20 +277,52 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
     setPlayingAudioKey(null)
   }, [])
 
-  const stopDictation = useCallback(() => {
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop()
-      } catch {
-        // Ignore if already stopped
+  const stopDictation = useCallback(
+    (discardAudio = false) => {
+      clearRecordingTimer()
+      if (discardAudio) {
+        discardRecordingRef.current = true
+        if (sttAbortRef.current) {
+          sttAbortRef.current.abort()
+          sttAbortRef.current = null
+        }
+        setTranscribing(false)
       }
-      recognitionRef.current = null
-    }
-    setDictating(false)
-  }, [])
+      if (mediaRecorderRef.current) {
+        const rec = mediaRecorderRef.current
+        mediaRecorderRef.current = null
+        try {
+          if (rec.state !== 'inactive') rec.stop()
+        } catch {
+          // Ignore if already stopped
+        }
+        if (discardAudio) {
+          releaseMediaStream()
+        }
+      } else if (discardAudio) {
+        releaseMediaStream()
+      }
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop()
+        } catch {
+          // Ignore if already stopped
+        }
+        recognitionRef.current = null
+      }
+      setDictating(false)
+      setRecordingSeconds(0)
+    },
+    [clearRecordingTimer, releaseMediaStream],
+  )
 
   const playEnglishText = useCallback(
-    async (audioKey: string, rawText: string, isAutoPlay = false) => {
+    async (
+      audioKey: string,
+      rawText: string,
+      isAutoPlay = false,
+      voiceRole: TtsVoiceRole = 'default',
+    ) => {
       const clean = stripBoldMarkers(rawText)
       if (!clean) return
       if (!isAutoPlay && (playingAudioKey === audioKey || loadingAudioKey === audioKey)) {
@@ -222,6 +341,7 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
           'en',
           accentRef.current,
           ctrl.signal,
+          voiceRole,
         )
         if (ctrl.signal.aborted) return
         const url = URL.createObjectURL(blob)
@@ -244,78 +364,101 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
     [courseId, loadingAudioKey, playingAudioKey, stopAudio],
   )
 
-  const startSession = useCallback(async () => {
-    requestAbortRef.current?.abort()
-    const ctrl = new AbortController()
-    requestAbortRef.current = ctrl
+  const startSession = useCallback(
+    async (targetMode?: LanguageChatMode) => {
+      const activeMode = targetMode ?? modeRef.current
+      requestAbortRef.current?.abort()
+      const ctrl = new AbortController()
+      requestAbortRef.current = ctrl
 
-    stopAudio()
-    stopDictation()
-    setError(null)
-    setMicNotice(null)
-    setInitializing(true)
-    setBusy(true)
-    setMessages([])
-    setMissions([])
-    setMissionsCompleted([])
-    setLexicalChips([])
-    setSentenceStarter(null)
-    setSessionSummary(null)
-    setTranslatedIds({})
-    setRevealedIds({})
-    setHelpOpen(false)
-    setInput('')
+      stopAudio()
+      stopDictation(true)
+      setError(null)
+      setMicNotice(null)
+      setInitializing(true)
+      setBusy(true)
+      setMessages([])
+      setMissions([])
+      setMissionsCompleted([])
+      setPartIndex(activeMode === 'exam_3parts' ? 1 : null)
+      setPartLabel('')
+      setLexicalChips([])
+      setSentenceStarter(null)
+      setSessionSummary(null)
+      setTranslatedIds({})
+      setRevealedIds({})
+      setHelpOpen(false)
+      setInput('')
 
-    try {
-      const res = await sendLanguagePracticeChat(
-        courseId,
-        node.id,
-        { start: true, turn_index: 0 },
-        ctrl.signal,
-      )
-      if (ctrl.signal.aborted) return
-      const msgId = nextMsgId()
-      const firstMsg: PracticeMessage = {
-        id: msgId,
-        role: 'assistant',
-        content: res.reply_en,
-        translation_es: res.translation_es,
-        inline_correction_es: res.inline_correction_es ?? null,
-        example_en: res.example_en ?? null,
-      }
-      setMessages([firstMsg])
-      setMissions(Array.isArray(res.missions) ? res.missions : [])
-      setMissionsCompleted(Array.isArray(res.missions_completed) ? res.missions_completed : [])
-      setLexicalChips(Array.isArray(res.lexical_chips) ? res.lexical_chips : [])
-      setSentenceStarter(res.sentence_starter ?? null)
-      setSessionSummary(res.session_summary ?? null)
-      setProvider(res.provider ?? null)
+      try {
+        const res = await sendLanguagePracticeChat(
+          courseId,
+          node.id,
+          { start: true, turn_index: 0, mode: activeMode },
+          ctrl.signal,
+        )
+        if (ctrl.signal.aborted) return
+        const msgId = nextMsgId()
+        const speakerRole: LanguageSpeakerRole | undefined =
+          res.speaker_role ?? (activeMode === 'exam_3parts' ? 'teacher' : undefined)
+        const resolvedPartIndex =
+          typeof res.part_index === 'number'
+            ? res.part_index
+            : activeMode === 'exam_3parts'
+              ? 1
+              : null
+        const resolvedPartLabel = res.part_label ?? ''
 
-      if (autoVoiceRef.current && res.reply_en) {
-        void playEnglishText(`msg:${msgId}`, res.reply_en, true)
+        const firstMsg: PracticeMessage = {
+          id: msgId,
+          role: 'assistant',
+          content: res.reply_en,
+          translation_es: res.translation_es,
+          inline_correction_es: res.inline_correction_es ?? null,
+          example_en: res.example_en ?? null,
+          speaker_role: speakerRole,
+          part_index: resolvedPartIndex,
+          part_label: resolvedPartLabel,
+        }
+        setMessages([firstMsg])
+        setMissions(Array.isArray(res.missions) ? res.missions : [])
+        setMissionsCompleted(Array.isArray(res.missions_completed) ? res.missions_completed : [])
+        setPartIndex(resolvedPartIndex)
+        setPartLabel(resolvedPartLabel)
+        setLexicalChips(Array.isArray(res.lexical_chips) ? res.lexical_chips : [])
+        setSentenceStarter(res.sentence_starter ?? null)
+        setSessionSummary(res.session_summary ?? null)
+        setProvider(res.provider ?? null)
+
+        if (autoVoiceRef.current && res.reply_en) {
+          void playEnglishText(`msg:${msgId}`, res.reply_en, true, speakerRole ?? 'default')
+        }
+      } catch {
+        if (ctrl.signal.aborted) return
+        setError(
+          'No se pudo iniciar la práctica conversacional. Verifica tu motor IA e intenta de nuevo.',
+        )
+      } finally {
+        if (requestAbortRef.current === ctrl) {
+          requestAbortRef.current = null
+          setInitializing(false)
+          setBusy(false)
+        }
       }
-    } catch {
-      if (ctrl.signal.aborted) return
-      setError('No se pudo iniciar la práctica conversacional. Verifica tu motor IA e intenta de nuevo.')
-    } finally {
-      if (requestAbortRef.current === ctrl) {
-        requestAbortRef.current = null
-        setInitializing(false)
-        setBusy(false)
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [courseId, node.id, stopAudio, stopDictation])
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    },
+    [courseId, node.id, stopAudio, stopDictation],
+  )
 
   // Auto-start Turn 0 the first time the user opens Práctica Chat for this node
   useEffect(() => {
     if (!active) {
       stopAudio()
-      stopDictation()
+      stopDictation(true)
       return
     }
     if (messages.length === 0 && !busy && !error && !requestAbortRef.current) {
-      void startSession()
+      void startSession(modeRef.current)
     }
   }, [active, messages.length, busy, error, startSession, stopAudio, stopDictation])
 
@@ -325,7 +468,7 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
       requestAbortRef.current?.abort()
       requestAbortRef.current = null
       stopAudio()
-      stopDictation()
+      stopDictation(true)
     }
   }, [stopAudio, stopDictation])
 
@@ -334,6 +477,13 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
     }
   }, [messages.length, sessionSummary, active])
+
+  const handleSelectMode = (nextMode: LanguageChatMode) => {
+    if (nextMode === mode) return
+    setMode(nextMode)
+    modeRef.current = nextMode
+    void startSession(nextMode)
+  }
 
   const handleSelectAccent = (nextAcc: TtsAccent) => {
     setAccent(nextAcc)
@@ -359,24 +509,28 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
       content: m.content,
     }))
 
-  const handleSend = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault()
-    const text = input.trim()
-    if (!text || busy) return
-    stopDictation()
+  const sendTurn = async (overrideText?: string) => {
+    const text = (overrideText ?? latestInputRef.current).trim()
+    if (!text || busyRef.current) return
+    stopDictation(true)
     setError(null)
     setMicNotice(null)
+
+    const currentMessages = messagesRef.current
+    const currentUserTurns = currentMessages.filter((m) => m.role === 'user').length
+    const activeMode = modeRef.current
 
     const userMsg: PracticeMessage = {
       id: nextMsgId(),
       role: 'user',
       content: text,
     }
-    const prevHistory = buildHistory(messages)
-    const nextTurnIndex = userTurnCount + 1
+    const prevHistory = buildHistory(currentMessages)
+    const nextTurnIndex = currentUserTurns + 1
 
     setMessages((prev) => [...prev, userMsg])
     setInput('')
+    latestInputRef.current = ''
     setBusy(true)
 
     const ctrl = new AbortController()
@@ -391,11 +545,18 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
           history: prevHistory,
           missions,
           turn_index: nextTurnIndex,
+          mode: activeMode,
         },
         ctrl.signal,
       )
       if (ctrl.signal.aborted) return
       const assistantId = nextMsgId()
+      const speakerRole: LanguageSpeakerRole | undefined =
+        res.speaker_role ?? (activeMode === 'exam_3parts' ? 'teacher' : undefined)
+      const resolvedPartIndex =
+        typeof res.part_index === 'number' ? res.part_index : partIndex
+      const resolvedPartLabel = res.part_label ?? partLabel
+
       const assistantMsg: PracticeMessage = {
         id: assistantId,
         role: 'assistant',
@@ -403,6 +564,9 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
         translation_es: res.translation_es,
         inline_correction_es: res.inline_correction_es ?? null,
         example_en: res.example_en ?? null,
+        speaker_role: speakerRole,
+        part_index: resolvedPartIndex,
+        part_label: resolvedPartLabel,
       }
       setMessages((prev) => [...prev, assistantMsg])
       if (Array.isArray(res.missions) && res.missions.length > 0) {
@@ -410,6 +574,12 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
       }
       if (Array.isArray(res.missions_completed)) {
         setMissionsCompleted(res.missions_completed)
+      }
+      if (typeof res.part_index === 'number') {
+        setPartIndex(res.part_index)
+      }
+      if (typeof res.part_label === 'string' && res.part_label.trim()) {
+        setPartLabel(res.part_label.trim())
       }
       setLexicalChips(Array.isArray(res.lexical_chips) ? res.lexical_chips : [])
       setSentenceStarter(res.sentence_starter ?? null)
@@ -419,13 +589,14 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
       setProvider(res.provider ?? null)
 
       if (autoVoiceRef.current && res.reply_en) {
-        void playEnglishText(`msg:${assistantId}`, res.reply_en, true)
+        void playEnglishText(`msg:${assistantId}`, res.reply_en, true, speakerRole ?? 'default')
       }
     } catch {
       if (ctrl.signal.aborted) return
       setError('No se pudo enviar tu mensaje. Intenta nuevamente.')
       setMessages((prev) => prev.filter((m) => m.id !== userMsg.id))
       setInput(text)
+      latestInputRef.current = text
     } finally {
       if (requestAbortRef.current === ctrl) {
         requestAbortRef.current = null
@@ -434,14 +605,22 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
     }
   }
 
+  sendTurnRef.current = sendTurn
+
+  const handleSend = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault()
+    await sendTurn()
+  }
+
   const handleFinish = async () => {
     if (busy || userTurnCount === 0) return
-    stopDictation()
+    stopDictation(true)
     setError(null)
     setBusy(true)
 
     const ctrl = new AbortController()
     requestAbortRef.current = ctrl
+    const activeMode = modeRef.current
 
     try {
       const res = await sendLanguagePracticeChat(
@@ -452,12 +631,15 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
           missions,
           turn_index: userTurnCount,
           finish: true,
+          mode: activeMode,
         },
         ctrl.signal,
       )
       if (ctrl.signal.aborted) return
       if (res.reply_en && res.reply_en.trim()) {
         const closingId = nextMsgId()
+        const speakerRole: LanguageSpeakerRole | undefined =
+          res.speaker_role ?? (activeMode === 'exam_3parts' ? 'teacher' : undefined)
         setMessages((prev) => [
           ...prev,
           {
@@ -467,10 +649,13 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
             translation_es: res.translation_es,
             inline_correction_es: res.inline_correction_es ?? null,
             example_en: res.example_en ?? null,
+            speaker_role: speakerRole,
+            part_index: res.part_index ?? partIndex,
+            part_label: res.part_label ?? partLabel,
           },
         ])
         if (autoVoiceRef.current) {
-          void playEnglishText(`msg:${closingId}`, res.reply_en, true)
+          void playEnglishText(`msg:${closingId}`, res.reply_en, true, speakerRole ?? 'default')
         }
       }
       if (Array.isArray(res.missions) && res.missions.length > 0) {
@@ -481,7 +666,10 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
       }
       setSessionSummary(
         res.session_summary ?? {
-          headline: 'Resumen de tu práctica conversacional',
+          headline:
+            activeMode === 'exam_3parts'
+              ? 'Evaluación del Simulacro Oral (3 Partes)'
+              : 'Resumen de tu práctica conversacional',
           items: [],
         },
       )
@@ -497,22 +685,33 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
     }
   }
 
-  const toggleMic = () => {
-    if (dictating) {
-      stopDictation()
-      return
+  const handleRecognizedSpeech = (transcript: string) => {
+    const clean = transcript.trim()
+    if (!clean) return
+    const prev = latestInputRef.current.trimEnd()
+    const next = prev ? `${prev} ${clean}` : clean
+    latestInputRef.current = next
+    if (autoSendVoiceRef.current && !busyRef.current) {
+      setInput('')
+      latestInputRef.current = ''
+      void sendTurnRef.current(next)
+    } else {
+      setInput(next)
+      inputRef.current?.focus()
     }
+  }
+
+  const startWebSpeechMic = () => {
     const Ctor = getSpeechRecognitionCtor()
     if (!Ctor) {
-      setMicNotice('Tu navegador no soporta reconocimiento de voz; escribe tu respuesta en el campo de texto.')
+      setMicNotice(
+        'Tu navegador no soporta reconocimiento de voz; escribe tu respuesta en el campo de texto.',
+      )
       return
     }
-    setMicNotice(null)
-    stopAudio()
-
     try {
       const recognition = new Ctor()
-      recognition.lang = accent === 'gb' ? 'en-GB' : 'en-US'
+      recognition.lang = accentRef.current === 'gb' ? 'en-GB' : 'en-US'
       recognition.continuous = false
       recognition.interimResults = false
       recognition.onresult = (event: SpeechRecognitionEventLike) => {
@@ -525,29 +724,169 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
         }
         const transcript = chunks.filter(Boolean).join(' ').trim()
         if (transcript) {
-          const prev = latestInputRef.current.trimEnd()
-          const next = prev ? `${prev} ${transcript}` : transcript
-          latestInputRef.current = next
-          setInput(next)
-          inputRef.current?.focus()
+          handleRecognizedSpeech(transcript)
         }
       }
       recognition.onerror = () => {
+        clearRecordingTimer()
         setDictating(false)
+        setRecordingSeconds(0)
         recognitionRef.current = null
-        setMicNotice('No se pudo capturar audio del micrófono. Revisa los permisos o escribe tu mensaje.')
+        setMicNotice(
+          'No se pudo capturar audio del micrófono. Revisa los permisos o escribe tu mensaje.',
+        )
       }
       recognition.onend = () => {
+        clearRecordingTimer()
         setDictating(false)
+        setRecordingSeconds(0)
         recognitionRef.current = null
       }
       recognitionRef.current = recognition
+      setRecordingSeconds(0)
       setDictating(true)
+      clearRecordingTimer()
+      recordingTimerRef.current = window.setInterval(() => {
+        setRecordingSeconds((s) => s + 1)
+      }, 1000)
       recognition.start()
     } catch {
+      clearRecordingTimer()
       setDictating(false)
+      setRecordingSeconds(0)
       recognitionRef.current = null
       setMicNotice('No se pudo iniciar el micrófono en este navegador.')
+    }
+  }
+
+  const toggleMic = async () => {
+    if (busy || transcribing) return
+    if (dictating) {
+      stopDictation(false)
+      return
+    }
+    setMicNotice(null)
+    stopAudio()
+
+    if (!mediaRecorderSupported || forceWebSpeechRef.current) {
+      startWebSpeechMic()
+      return
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      mediaStreamRef.current = stream
+      const { mimeType, filename } = pickSupportedAudioMimeType()
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream)
+      mediaChunksRef.current = []
+      discardRecordingRef.current = false
+
+      recorder.ondataavailable = (ev: BlobEvent) => {
+        if (ev.data && ev.data.size > 0) {
+          mediaChunksRef.current.push(ev.data)
+        }
+      }
+
+      recorder.onerror = () => {
+        clearRecordingTimer()
+        releaseMediaStream()
+        mediaRecorderRef.current = null
+        setDictating(false)
+        setRecordingSeconds(0)
+        setMicNotice('Error al grabar audio del micrófono. Intenta nuevamente.')
+      }
+
+      recorder.onstop = () => {
+        clearRecordingTimer()
+        releaseMediaStream()
+        mediaRecorderRef.current = null
+        setDictating(false)
+        setRecordingSeconds(0)
+
+        if (discardRecordingRef.current) {
+          mediaChunksRef.current = []
+          return
+        }
+
+        const chunks = mediaChunksRef.current
+        mediaChunksRef.current = []
+        const blobType = recorder.mimeType || mimeType || 'audio/webm'
+        const audioBlob = new Blob(chunks, { type: blobType })
+        if (audioBlob.size === 0) {
+          setMicNotice('No se capturó audio suficiente. Habla un poco más cerca del micrófono.')
+          return
+        }
+
+        const ctrl = new AbortController()
+        sttAbortRef.current = ctrl
+        setTranscribing(true)
+
+        const lastAssistant = [...messagesRef.current]
+          .reverse()
+          .find((m) => m.role === 'assistant')
+        const promptHint = [node.title, lastAssistant ? stripBoldMarkers(lastAssistant.content) : '']
+          .filter(Boolean)
+          .join(' - ')
+          .slice(0, 220)
+
+        void transcribeStudyAudio(audioBlob, {
+          language: 'en',
+          promptHint,
+          filename,
+          signal: ctrl.signal,
+        })
+          .then((res) => {
+            if (ctrl.signal.aborted) return
+            const text = (res.text ?? '').trim()
+            if (text) {
+              handleRecognizedSpeech(text)
+            } else {
+              setMicNotice('No se detectó voz clara en el audio. Intenta de nuevo.')
+            }
+          })
+          .catch((err: unknown) => {
+            if (ctrl.signal.aborted) return
+            if (err instanceof SttApiError && err.status === 503) {
+              forceWebSpeechRef.current = true
+              if (speechRecognitionSupported) {
+                setMicNotice(
+                  'STT en servidor no disponible (configura GROQ_API_KEY). Se activó el respaldo del navegador: pulsa el micrófono de nuevo.',
+                )
+              } else {
+                setMicNotice(
+                  'STT en servidor no disponible (falta GROQ_API_KEY) y este navegador no soporta dictado local.',
+                )
+              }
+            } else {
+              setMicNotice('No se pudo transcribir el audio. Intenta de nuevo o escribe tu mensaje.')
+            }
+          })
+          .finally(() => {
+            if (sttAbortRef.current === ctrl) {
+              sttAbortRef.current = null
+              setTranscribing(false)
+            }
+          })
+      }
+
+      mediaRecorderRef.current = recorder
+      setRecordingSeconds(0)
+      setDictating(true)
+      clearRecordingTimer()
+      recordingTimerRef.current = window.setInterval(() => {
+        setRecordingSeconds((s) => s + 1)
+      }, 1000)
+      recorder.start()
+    } catch {
+      releaseMediaStream()
+      clearRecordingTimer()
+      setDictating(false)
+      setRecordingSeconds(0)
+      setMicNotice(
+        'Permiso de micrófono denegado o dispositivo no disponible. Revisa los permisos o escribe tu respuesta.',
+      )
     }
   }
 
@@ -562,14 +901,81 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
     window.setTimeout(() => inputRef.current?.focus(), 20)
   }
 
+  const isExamMode = mode === 'exam_3parts'
+  const currentPart = partIndex ?? 1
   const completedSet = new Set(missionsCompleted)
   const completedCount = missions.filter((_, idx) => completedSet.has(idx)).length
 
+  const summaryScore =
+    sessionSummary && typeof sessionSummary.score_10 === 'number'
+      ? sessionSummary.score_10
+      : null
+  const summaryPassed =
+    sessionSummary?.passed !== undefined && sessionSummary?.passed !== null
+      ? sessionSummary.passed
+      : summaryScore !== null
+        ? summaryScore >= PASS_SCORE
+        : null
+
   return (
     <div className="flex min-w-0 max-w-full flex-col gap-3.5">
-      {/* Barra compacta de controles */}
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50/80 px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-800/60">
-        <div className="flex flex-wrap items-center gap-2">
+      {/* Selector de modo + barra compacta de controles */}
+      <div className="flex flex-col gap-2 rounded-md border border-slate-200 bg-slate-50/80 px-3 py-2.5 text-xs dark:border-slate-700 dark:bg-slate-800/60">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div
+            className="inline-flex flex-wrap items-center rounded-md border border-slate-300 bg-white p-0.5 dark:border-slate-600 dark:bg-slate-900"
+            role="group"
+            aria-label="Modo de práctica oral"
+          >
+            <button
+              type="button"
+              disabled={busy}
+              aria-pressed={!isExamMode}
+              onClick={() => handleSelectMode('missions')}
+              className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-semibold transition disabled:opacity-60 ${
+                !isExamMode
+                  ? 'bg-teal-700 text-white dark:bg-teal-500 dark:text-slate-950'
+                  : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
+              }`}
+            >
+              <Sparkles size={12} />
+              Práctica con Misiones
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              aria-pressed={isExamMode}
+              onClick={() => handleSelectMode('exam_3parts')}
+              className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-semibold transition disabled:opacity-60 ${
+                isExamMode
+                  ? 'bg-indigo-700 text-white dark:bg-indigo-500 dark:text-slate-950'
+                  : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
+              }`}
+            >
+              <Award size={12} />
+              Simulacro Oral (3 Partes)
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {provider && (
+              <span className="hidden font-mono text-[10px] text-slate-500 sm:inline dark:text-slate-400">
+                {provider}
+              </span>
+            )}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void startSession(mode)}
+              className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              <RotateCcw size={12} />
+              {isExamMode ? 'Reiniciar simulacro' : 'Reiniciar práctica'}
+            </button>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 border-t border-slate-200/80 pt-2 dark:border-slate-700/80">
           {/* Velocidad */}
           <div
             className="inline-flex items-center rounded border border-slate-300 bg-white p-0.5 dark:border-slate-600 dark:bg-slate-900"
@@ -646,27 +1052,52 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
             Solo oído: {earOnly ? 'ON' : 'OFF'}
           </button>
         </div>
-
-        <div className="flex items-center gap-2">
-          {provider && (
-            <span className="hidden font-mono text-[10px] text-slate-500 sm:inline dark:text-slate-400">
-              {provider}
-            </span>
-          )}
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void startSession()}
-            className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-          >
-            <RotateCcw size={12} />
-            Reiniciar práctica
-          </button>
-        </div>
       </div>
 
-      {/* Checklist visible de 3 misiones comunicativas */}
-      {missions.length > 0 && (
+      {/* Progreso visual Parte 1/3 · 2/3 · 3/3 en modo Simulacro Oral */}
+      {isExamMode && (
+        <div className="flex flex-col gap-2 rounded-md border border-indigo-200 bg-indigo-50/55 p-3 dark:border-indigo-800/70 dark:bg-indigo-950/25">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-indigo-900 dark:text-indigo-200">
+              <Award size={13} className="text-indigo-600 dark:text-indigo-400" />
+              Simulacro Oral · Parte {Math.min(Math.max(currentPart, 1), 3)}/3
+            </span>
+            {partLabel && (
+              <span className="rounded-full border border-indigo-300 bg-white px-2.5 py-0.5 text-[11px] font-medium text-indigo-900 dark:border-indigo-700 dark:bg-slate-900 dark:text-indigo-200">
+                {partLabel}
+              </span>
+            )}
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            {EXAM_PARTS.map((step) => {
+              const isDone = currentPart > step.index || Boolean(sessionSummary)
+              const isCurrent = currentPart === step.index && !sessionSummary
+              return (
+                <div
+                  key={step.index}
+                  className={`flex items-center gap-1.5 rounded border px-2 py-1.5 text-[11px] font-medium transition ${
+                    isCurrent
+                      ? 'border-indigo-500 bg-indigo-600 text-white dark:border-indigo-400 dark:bg-indigo-500 dark:text-slate-950'
+                      : isDone
+                        ? 'border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-200'
+                        : 'border-slate-200 bg-white text-slate-500 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-400'
+                  }`}
+                >
+                  {isDone ? (
+                    <CheckCircle2 size={12} className="shrink-0" />
+                  ) : (
+                    <Circle size={12} className="shrink-0" />
+                  )}
+                  <span className="truncate">{step.short}</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Checklist visible de 3 misiones comunicativas (en modo misiones o si llegan misiones) */}
+      {!isExamMode && missions.length > 0 && (
         <div className="rounded-md border border-teal-200 bg-teal-50/50 p-3 dark:border-teal-800/70 dark:bg-teal-950/25">
           <div className="mb-2 flex items-center justify-between gap-2">
             <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-teal-900 dark:text-teal-200">
@@ -717,7 +1148,11 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
           className="flex items-center gap-2.5 rounded-md border border-indigo-200 bg-indigo-50/70 px-3 py-4 text-xs text-indigo-950 dark:border-indigo-800/70 dark:bg-indigo-950/35 dark:text-indigo-200"
         >
           <Loader2 size={16} className="shrink-0 animate-spin text-indigo-600 dark:text-indigo-400" />
-          <span>Preparando escenario de práctica y tus 3 misiones en inglés para este nodo...</span>
+          <span>
+            {isExamMode
+              ? 'Preparando el Simulacro Oral de 3 Partes (Profesora + Compañero) para este taller...'
+              : 'Preparando escenario de práctica y tus 3 misiones en inglés para este nodo...'}
+          </span>
         </div>
       )}
 
@@ -731,7 +1166,7 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
           {messages.length === 0 && (
             <button
               type="button"
-              onClick={() => void startSession()}
+              onClick={() => void startSession(mode)}
               className="rounded border border-rose-400 bg-white px-2.5 py-1 text-xs font-semibold text-rose-900 hover:bg-rose-100 dark:border-rose-700 dark:bg-slate-900 dark:text-rose-200 dark:hover:bg-rose-950"
             >
               Reintentar
@@ -759,10 +1194,46 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
             const isAudioPlaying = playingAudioKey === audioKey
             const isTranslated = Boolean(translatedIds[msg.id])
             const isBlurred = earOnly && !revealedIds[msg.id]
+            const speakerRole = msg.speaker_role
+            const voiceRole: TtsVoiceRole = speakerRole ?? 'default'
+
+            const bubbleStyle =
+              speakerRole === 'teacher'
+                ? 'border-indigo-200 bg-indigo-50/50 dark:border-indigo-800/80 dark:bg-indigo-950/35'
+                : speakerRole === 'partner'
+                  ? 'border-teal-200 bg-teal-50/50 dark:border-teal-800/80 dark:bg-teal-950/35'
+                  : 'border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800/80'
 
             return (
               <div key={msg.id} className="flex flex-col items-start gap-1.5">
-                <div className="max-w-[92%] rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-100">
+                <div
+                  className={`max-w-[92%] rounded-lg border px-3.5 py-2.5 text-sm text-slate-900 dark:text-slate-100 ${bubbleStyle}`}
+                >
+                  {speakerRole && (
+                    <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+                      <span
+                        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
+                          speakerRole === 'teacher'
+                            ? 'border-indigo-300 bg-indigo-100 text-indigo-900 dark:border-indigo-700 dark:bg-indigo-900/70 dark:text-indigo-200'
+                            : 'border-teal-300 bg-teal-100 text-teal-900 dark:border-teal-700 dark:bg-teal-900/70 dark:text-teal-200'
+                        }`}
+                      >
+                        {speakerRole === 'teacher' ? (
+                          <GraduationCap size={12} />
+                        ) : (
+                          <UserRound size={12} />
+                        )}
+                        {speakerRole === 'teacher' ? 'Profesora' : 'Compañero'}
+                      </span>
+                      {typeof msg.part_index === 'number' && (
+                        <span className="font-mono text-[10px] font-medium text-slate-500 dark:text-slate-400">
+                          Parte {msg.part_index}/3
+                          {msg.part_label ? ` · ${msg.part_label}` : ''}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
                   <div
                     role={earOnly ? 'button' : undefined}
                     tabIndex={earOnly ? 0 : undefined}
@@ -794,7 +1265,7 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
                   <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-slate-200/80 pt-2 dark:border-slate-700/80">
                     <button
                       type="button"
-                      onClick={() => void playEnglishText(audioKey, msg.content)}
+                      onClick={() => void playEnglishText(audioKey, msg.content, false, voiceRole)}
                       className="inline-flex items-center gap-1 rounded border border-teal-300 bg-white px-2 py-0.5 text-[11px] font-medium text-teal-900 hover:bg-teal-50 dark:border-teal-700 dark:bg-slate-900 dark:text-teal-200 dark:hover:bg-teal-950/70"
                     >
                       {isAudioLoading ? (
@@ -934,47 +1405,88 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
         onSubmit={(e) => void handleSend(e)}
         className="flex flex-col gap-2 rounded-md border border-slate-200 bg-white p-2.5 dark:border-slate-700 dark:bg-slate-900/70"
       >
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={toggleMic}
-            disabled={busy}
+            onClick={() => void toggleMic()}
+            disabled={busy || transcribing || !micSupported}
             title={
-              speechRecognitionSupported
-                ? dictating
-                  ? 'Detener micrófono'
-                  : 'Hablar en inglés por micrófono'
+              micSupported
+                ? transcribing
+                  ? 'Transcribiendo audio...'
+                  : dictating
+                    ? 'Detener grabación y transcribir'
+                    : 'Hablar en inglés por micrófono'
                 : 'Dictado por voz no disponible en este navegador'
             }
-            aria-label={dictating ? 'Detener micrófono' : 'Hablar en inglés'}
-            className={`inline-flex shrink-0 items-center justify-center rounded-md border p-2 transition disabled:opacity-40 ${
+            aria-label={
+              transcribing
+                ? 'Transcribiendo audio'
+                : dictating
+                  ? `Detener micrófono (${recordingSeconds}s)`
+                  : 'Hablar en inglés'
+            }
+            className={`inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 py-2 text-xs font-semibold transition disabled:opacity-40 ${
               dictating
                 ? 'border-rose-400 bg-rose-50 text-rose-700 hover:bg-rose-100 dark:border-rose-700 dark:bg-rose-950/60 dark:text-rose-200'
-                : 'border-slate-300 bg-slate-50 text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700'
+                : transcribing
+                  ? 'border-indigo-300 bg-indigo-50 text-indigo-800 dark:border-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-200'
+                  : 'border-slate-300 bg-slate-50 text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700'
             }`}
           >
-            {dictating ? <MicOff size={16} /> : <Mic size={16} />}
+            {transcribing ? (
+              <Loader2 size={15} className="animate-spin" />
+            ) : dictating ? (
+              <MicOff size={15} />
+            ) : (
+              <Mic size={15} />
+            )}
+            {transcribing
+              ? 'Transcribiendo...'
+              : dictating
+                ? `Detener (${recordingSeconds}s)`
+                : 'Hablar'}
           </button>
 
           <input
             ref={inputRef}
             type="text"
             value={input}
-            disabled={busy || initializing}
+            disabled={busy || initializing || transcribing}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Responde en inglés (escribe o usa el micrófono)..."
-            className="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 disabled:opacity-60 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+            className="min-w-[160px] flex-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 disabled:opacity-60 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
           />
 
           <button
             type="submit"
-            disabled={busy || initializing || !input.trim()}
+            disabled={busy || initializing || transcribing || !input.trim()}
             className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-700 disabled:opacity-40 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
           >
             <Send size={14} />
             Enviar
           </button>
         </div>
+
+        {/* Toggle enviar automáticamente al terminar de hablar */}
+        {micSupported && (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autoSendVoice}
+              onClick={() => setAutoSendVoice((v) => !v)}
+              className={`inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] font-medium transition ${
+                autoSendVoice
+                  ? 'border-teal-400 bg-teal-50 text-teal-900 dark:border-teal-600 dark:bg-teal-950/60 dark:text-teal-200'
+                  : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-300 dark:hover:bg-slate-800'
+              }`}
+            >
+              <Zap size={12} />
+              Enviar automáticamente al terminar de hablar: {autoSendVoice ? 'ON' : 'OFF'}
+            </button>
+          </div>
+        )}
 
         {micNotice && (
           <p className="text-[11px] text-amber-700 dark:text-amber-300">{micNotice}</p>
@@ -987,29 +1499,58 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
           </span>
           <button
             type="button"
-            disabled={busy || userTurnCount === 0}
+            disabled={busy || transcribing || userTurnCount === 0}
             onClick={() => void handleFinish()}
             className="inline-flex items-center gap-1.5 rounded border border-indigo-300 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-900 hover:bg-indigo-100 disabled:opacity-40 dark:border-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-200 dark:hover:bg-indigo-900/60"
           >
             <Flag size={12} />
-            Terminar y ver resumen
+            {isExamMode ? 'Terminar simulacro y calificar' : 'Terminar y ver resumen'}
           </button>
         </div>
       </form>
 
       {/* Tarjeta final de resumen (session_summary) */}
       {sessionSummary && (
-        <div className="flex flex-col gap-3 rounded-md border border-emerald-300 bg-emerald-50/50 p-3.5 dark:border-emerald-800/80 dark:bg-emerald-950/25">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-emerald-200/80 pb-2 dark:border-emerald-800/60">
-            <div className="flex items-center gap-1.5 text-sm font-semibold text-emerald-950 dark:text-emerald-200">
-              <CheckCircle2 size={16} className="shrink-0 text-emerald-600 dark:text-emerald-400" />
+        <div
+          className={`flex flex-col gap-3 rounded-md border p-3.5 ${
+            summaryPassed === false
+              ? 'border-amber-300 bg-amber-50/50 dark:border-amber-800/80 dark:bg-amber-950/25'
+              : 'border-emerald-300 bg-emerald-50/50 dark:border-emerald-800/80 dark:bg-emerald-950/25'
+          }`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/80 pb-2.5 dark:border-slate-700/70">
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
+              {summaryPassed === false ? (
+                <Award size={16} className="shrink-0 text-amber-600 dark:text-amber-400" />
+              ) : (
+                <CheckCircle2 size={16} className="shrink-0 text-emerald-600 dark:text-emerald-400" />
+              )}
               <span>{sessionSummary.headline || 'Resumen de tu práctica'}</span>
             </div>
-            {sessionSummary.score_hint && (
-              <span className="rounded-full border border-emerald-300 bg-white px-2.5 py-0.5 text-xs font-semibold text-emerald-900 dark:border-emerald-700 dark:bg-slate-900 dark:text-emerald-200">
-                {sessionSummary.score_hint}
-              </span>
-            )}
+
+            <div className="flex flex-wrap items-center gap-2">
+              {summaryScore !== null && (
+                <div className="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-white px-3 py-0.5 text-xs font-bold text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100">
+                  <span>{summaryScore.toFixed(1)} / 10</span>
+                  {summaryPassed !== null && (
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                        summaryPassed
+                          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/70 dark:text-emerald-200'
+                          : 'bg-amber-100 text-amber-900 dark:bg-amber-900/70 dark:text-amber-200'
+                      }`}
+                    >
+                      {summaryPassed ? 'Aprobado' : 'En progreso'}
+                    </span>
+                  )}
+                </div>
+              )}
+              {sessionSummary.score_hint && (
+                <span className="rounded-full border border-emerald-300 bg-white px-2.5 py-0.5 text-xs font-semibold text-emerald-900 dark:border-emerald-700 dark:bg-slate-900 dark:text-emerald-200">
+                  {sessionSummary.score_hint}
+                </span>
+              )}
+            </div>
           </div>
 
           {sessionSummary.items.length === 0 ? (
@@ -1043,7 +1584,7 @@ export default function LanguageChatTab({ courseId, node, active }: Props) {
                           </span>
                           <button
                             type="button"
-                            onClick={() => void playEnglishText(audioKey, item.better)}
+                            onClick={() => void playEnglishText(audioKey, item.better, false, 'teacher')}
                             className="inline-flex items-center gap-1 rounded border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-900 hover:bg-emerald-100 dark:border-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-200 dark:hover:bg-emerald-900/60"
                           >
                             {isAudioLoading ? (
