@@ -5911,6 +5911,236 @@ _CINEMA_ACT_KINDS: tuple[str, ...] = ("hook", "analogy", "mechanism", "payoff", 
 _CINEMA_VISUAL_MODES: tuple[str, ...] = ("kinetic_blocks", "code_morph")
 _CINEMA_VALID_TONES: frozenset[str] = frozenset({"indigo", "emerald", "amber", "rose", "sky", "slate"})
 _CINEMA_VALID_STATUSES: frozenset[str] = frozenset({"active", "problem", "solved", "new", "core"})
+_CINEMA_DEFAULT_KICKERS: dict[str, str] = {
+    "hook": "// el problema",
+    "analogy": "// el truco",
+    "mechanism": "// por dentro",
+    "payoff": "// el resultado",
+    "takeaway": "// quédate con esto",
+}
+_CINEMA_FORBIDDEN_KICKER_WORDS: frozenset[str] = frozenset(
+    {
+        "acto",
+        "gancho",
+        "analogia",
+        "mecanismo",
+        "impacto",
+        "claves",
+        "hook",
+        "analogy",
+        "mechanism",
+        "payoff",
+        "takeaway",
+    }
+)
+_CINEMA_FALLBACK_REVEAL_SLOTS: tuple[float, ...] = (0.12, 0.38, 0.64, 0.80)
+_CINEMA_TRAILING_CONNECTORS: frozenset[str] = frozenset(
+    {"de", "del", "y", "e", "o", "u", "en", "con", "para", "por", "a", "al", "el", "la", "los", "las", "un", "una", "sin"}
+)
+_CINEMA_ACCENT_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "el",
+        "la",
+        "los",
+        "las",
+        "un",
+        "una",
+        "unos",
+        "unas",
+        "de",
+        "del",
+        "al",
+        "a",
+        "en",
+        "con",
+        "por",
+        "para",
+        "sin",
+        "sobre",
+        "y",
+        "o",
+        "u",
+        "e",
+        "que",
+        "como",
+        "su",
+        "sus",
+        "tu",
+        "tus",
+        "se",
+        "es",
+        "son",
+        "no",
+        "mas",
+        "pero",
+        "si",
+        "esta",
+        "este",
+        "todo",
+        "cada",
+    }
+)
+
+
+def _shorten_phrase_cleanly(
+    text: str,
+    *,
+    max_chars: int = 34,
+    max_words: int | None = None,
+) -> str:
+    """Acorta una frase respetando siempre limites de palabra (nunca corta palabras a la mitad)."""
+    cleaned = re.sub(r"\s+", " ", (text or "").strip()).strip(" ,.;:·-")
+    if not cleaned:
+        return ""
+    words = cleaned.split(" ")
+    if max_words is not None and len(words) > max_words:
+        words = words[:max_words]
+
+    kept: list[str] = []
+    for word in words:
+        candidate = " ".join([*kept, word])
+        if kept and len(candidate) > max_chars:
+            break
+        kept.append(word)
+
+    while len(kept) > 1 and _strip_accents_lower(kept[-1].strip(".,;:?!¿¡")) in _CINEMA_TRAILING_CONNECTORS:
+        kept.pop()
+
+    return " ".join(kept).strip(" ,.;:·-")
+
+
+def _sanitize_cinema_kicker(raw_kicker: Any, kind: str) -> str:
+    default_kicker = _CINEMA_DEFAULT_KICKERS.get(kind, "// idea clave")
+    if not isinstance(raw_kicker, str):
+        return default_kicker
+    text = re.sub(r"^/+\s*", "", raw_kicker.strip())
+    text = re.sub(r"\s+", " ", text).strip(" .,:;-")
+    if not text:
+        return default_kicker
+    norm_tokens = set(re.findall(r"[a-z0-9]+", _strip_accents_lower(text)))
+    if not norm_tokens or norm_tokens.intersection(_CINEMA_FORBIDDEN_KICKER_WORDS):
+        return default_kicker
+    short = _shorten_phrase_cleanly(text, max_chars=26, max_words=4)
+    if not short:
+        return default_kicker
+    return f"// {short.lower()}"
+
+
+def _sanitize_cinema_accent_words(raw_accents: Any, headline: str) -> list[str]:
+    headline_words = [w for w in re.split(r"\s+", (headline or "").strip()) if w]
+    if not headline_words:
+        return []
+
+    norm_to_clean: dict[str, str] = {}
+    for w in headline_words:
+        clean_w = w.strip(".,;:?!¿¡\"'()[]{}")
+        norm_w = _strip_accents_lower(clean_w)
+        if norm_w and norm_w not in norm_to_clean:
+            norm_to_clean[norm_w] = clean_w
+
+    candidates: list[str] = []
+    if isinstance(raw_accents, list):
+        for item in raw_accents:
+            if isinstance(item, str):
+                candidates.extend(re.split(r"[\s,]+", item.strip()))
+    elif isinstance(raw_accents, str):
+        candidates.extend(re.split(r"[\s,]+", raw_accents.strip()))
+
+    chosen: list[str] = []
+    seen: set[str] = set()
+    for cand in candidates:
+        clean_c = cand.strip(".,;:?!¿¡\"'()[]{}")
+        norm_c = _strip_accents_lower(clean_c)
+        if norm_c and norm_c in norm_to_clean and norm_c not in seen:
+            chosen.append(norm_to_clean[norm_c])
+            seen.add(norm_c)
+        if len(chosen) >= 2:
+            return chosen
+
+    if chosen:
+        return chosen
+
+    meaningful: list[tuple[str, str]] = []
+    for w in headline_words:
+        clean_w = w.strip(".,;:?!¿¡\"'()[]{}")
+        norm_w = _strip_accents_lower(clean_w)
+        if len(norm_w) >= 4 and norm_w not in _CINEMA_ACCENT_STOPWORDS:
+            meaningful.append((norm_w, clean_w))
+
+    if not meaningful:
+        last_clean = headline_words[-1].strip(".,;:?!¿¡\"'()[]{}")
+        return [last_clean] if last_clean else []
+
+    result = [meaningful[-1][1]]
+    if len(meaningful) >= 3:
+        longest_other = max(meaningful[:-1], key=lambda pair: len(pair[0]))
+        if longest_other[0] != meaningful[-1][0]:
+            result.insert(0, longest_other[1])
+    return result[:2]
+
+
+def _build_previous_echo(raw_echo: Any, prev_headline: str, act_index: int) -> str:
+    if act_index <= 0:
+        return ""
+    if isinstance(raw_echo, str) and raw_echo.strip():
+        cleaned = _shorten_phrase_cleanly(raw_echo.strip("¿?¡!."), max_chars=38, max_words=4)
+        if cleaned:
+            return cleaned
+    prev_clean = re.sub(r"\s+", " ", (prev_headline or "").strip()).strip("¿?¡!. ")
+    if not prev_clean:
+        return ""
+    words = prev_clean.split(" ")
+    if len(words) <= 4:
+        return " ".join(words)
+    tail = words[-4:]
+    while len(tail) > 2 and _strip_accents_lower(tail[0].strip(".,;:")) in _CINEMA_TRAILING_CONNECTORS:
+        tail.pop(0)
+    return " ".join(tail)
+
+
+def _compute_cinema_node_reveals(nodes: list[dict[str, Any]], narration: str) -> list[dict[str, Any]]:
+    """Calcula reveal_at estrictamente creciente (0.06..0.84) desde trigger_word en narration_es o slots progresivos."""
+    if not nodes:
+        return []
+    norm_narr = _strip_accents_lower(narration or "")
+    narr_len = max(1, len(norm_narr))
+
+    raw_reveals: list[float] = []
+    for idx, node in enumerate(nodes):
+        fallback_slot = (
+            _CINEMA_FALLBACK_REVEAL_SLOTS[idx]
+            if idx < len(_CINEMA_FALLBACK_REVEAL_SLOTS)
+            else 0.80
+        )
+        trigger = _strip_accents_lower(str(node.get("trigger_word") or "")).strip()
+        pos = -1
+        if trigger and norm_narr:
+            match = re.search(rf"(?<!\w){re.escape(trigger)}(?!\w)", norm_narr)
+            if match is not None:
+                pos = match.start()
+            elif len(trigger) >= 3:
+                pos = norm_narr.find(trigger)
+
+        if pos >= 0:
+            ratio = pos / narr_len
+            raw_reveals.append(max(0.06, min(0.84, round(ratio, 3))))
+        else:
+            raw_reveals.append(fallback_slot)
+
+    min_gap = 0.06
+    count = len(raw_reveals)
+    prev = 0.0
+    updated: list[dict[str, Any]] = []
+    for idx, (node, raw_val) in enumerate(zip(nodes, raw_reveals, strict=True)):
+        rem = count - 1 - idx
+        max_allowed = round(0.84 - rem * min_gap, 3)
+        min_allowed = 0.06 if idx == 0 else round(prev + min_gap, 3)
+        val = round(max(min_allowed, min(max_allowed, raw_val)), 3)
+        prev = val
+        item = dict(node)
+        item["reveal_at"] = val
+        updated.append(item)
+    return updated
 
 
 def _estimate_cinema_sec(narration: str, raw_val: Any = None) -> float:
@@ -6027,12 +6257,13 @@ def _build_fallback_cinema_reel(
     node_summary: str,
     story_script: str,
 ) -> dict[str, Any]:
-    clean_title = (node_title or "Concepto Clave").strip()[:90]
-    short_label = clean_title[:28]
+    clean_title = _shorten_phrase_cleanly(node_title or "Concepto Clave", max_chars=90) or "Concepto Clave"
+    topic_short = _shorten_phrase_cleanly(clean_title, max_chars=28, max_words=3) or clean_title.split(" ")[0]
+    course_short = _shorten_phrase_cleanly(course_title or "el curso", max_chars=24, max_words=3) or "el curso"
     summary_clean = re.sub(r"\s+", " ", (node_summary or "").strip()).rstrip(".")
     if not summary_clean:
         summary_clean = f"ordenar el funcionamiento interno de {clean_title}"
-    summary_short = summary_clean[:110]
+    summary_short = _shorten_phrase_cleanly(summary_clean, max_chars=110) or summary_clean
     pills = _extract_cinema_pills(clean_title, summary_clean, story_script)
 
     is_code_lab = engine_type == "code_lab"
@@ -6050,55 +6281,70 @@ def _build_fallback_cinema_reel(
 
     hook_narration = (
         f"Muchos memorizan {clean_title} como una definición suelta, pero sin ver qué problema evita. "
-        f"Cuando el sistema crece, improvisar sin esta pieza rompe el diseño completo."
+        f"Cuando el sistema crece, improvisar sin una regla clara rompe el diseño completo."
     )
     analogy_narration = (
-        f"Piénsalo como un tablero de conexiones claras en un taller bien organizado: "
-        f"cada módulo cumple un rol preciso y se comunica por un contrato limpio, "
-        f"permitiendo {summary_short.lower()} sin mezclar responsabilidades ni adivinar efectos ocultos."
+        f"Piénsalo como un tablero de conexiones claras en un taller organizado: "
+        f"cada entrada pasa por un contrato limpio para {summary_short.lower()} "
+        f"y devolver un resultado predecible sin adivinar efectos ocultos."
     )
     mechanism_narration = (
         f"El giro mental ocurre aquí: en lugar de parchear casos aislados cada vez que algo falla, "
         f"{clean_title} fija una regla central verificable. "
-        f"Así el flujo pasa de una estructura frágil a un mecanismo predecible que puedes trazar paso a paso "
-        f"incluso bajo presión."
+        f"Así pasas de una estructura frágil a un invariante firme que trazas paso a paso."
     )
     payoff_narration = (
-        "El impacto real se nota al escalar o rendir una prueba exigente: "
-        "el núcleo del sistema permanece intacto mientras enchufas nuevos casos, "
-        "evitando errores silenciosos y defendiendo tu diseño con criterio técnico."
+        "El resultado se nota al escalar o rendir una prueba exigente: "
+        "el núcleo del sistema permanece intacto mientras enchufas nuevos casos "
+        "y defiendes tu diseño con criterio técnico."
     )
     takeaway_narration = (
         f"Quédate con este mapa mental de {clean_title}. "
         f"Ahora baja a la guía y al ejemplo concreto para consolidar cada detalle antes de evaluarte."
     )
 
-    acts = [
+    if len(clean_title.split()) <= 3 and len(clean_title) <= 28:
+        hook_headline = f"Por qué existe {clean_title}"
+        takeaway_headline = f"Domina {clean_title} hoy"
+    else:
+        hook_headline = "Improvisar rompe el sistema"
+        takeaway_headline = "Tres claves para dominarlo"
+
+    analogy_headline = "Un contrato, piezas limpias"
+    mechanism_headline = "De frágil a predecible"
+    payoff_headline = "Núcleo intacto al escalar"
+
+    raw_acts: list[dict[str, Any]] = [
         {
             "index": 0,
             "kind": "hook",
             "title": "El problema oculto",
+            "kicker": "// el problema",
             "narration_es": hook_narration,
             "estimated_sec": _estimate_cinema_sec(hook_narration),
             "visual_mode": "kinetic_blocks",
-            "headline": f"¿Por qué existe {short_label}?",
+            "headline": hook_headline,
+            "accent_words": _sanitize_cinema_accent_words([], hook_headline),
+            "previous_echo": "",
             "nodes": [
                 {
                     "id": "n_old",
                     "label": "Enfoque improvisado",
-                    "sublabel": "Frágil al crecer o cambiar",
+                    "sublabel": "Se quiebra cuando el sistema crece",
                     "tone": "rose",
                     "status": "problem",
+                    "trigger_word": "improvisar",
                 },
                 {
                     "id": "n_new",
-                    "label": short_label,
-                    "sublabel": "Regla clara y predecible",
+                    "label": topic_short,
+                    "sublabel": "Regla clara que sostiene el diseño",
                     "tone": "emerald",
                     "status": "solved",
+                    "trigger_word": "regla clara",
                 },
             ],
-            "flow_label": "Contraste inicial: improvisación vs. modelo mental",
+            "flow_label": "Diseño · Antes vs. después",
             "code_before": None,
             "code_after": None,
             "pills": [],
@@ -6107,35 +6353,41 @@ def _build_fallback_cinema_reel(
         {
             "index": 1,
             "kind": "analogy",
-            "title": "Analogía cotidiana",
+            "title": "Modelo mental",
+            "kicker": "// el truco",
             "narration_es": analogy_narration,
             "estimated_sec": _estimate_cinema_sec(analogy_narration),
             "visual_mode": "kinetic_blocks",
-            "headline": "Cómo se conectan las piezas",
+            "headline": analogy_headline,
+            "accent_words": ["contrato", "limpias"],
+            "previous_echo": _build_previous_echo("", hook_headline, 1),
             "nodes": [
                 {
                     "id": "a_in",
-                    "label": "Entrada / Situación",
-                    "sublabel": "Demanda real del sistema",
+                    "label": "Entrada real",
+                    "sublabel": "Demanda concreta del problema",
                     "tone": "sky",
                     "status": "active",
+                    "trigger_word": "entrada",
                 },
                 {
                     "id": "a_core",
-                    "label": short_label,
-                    "sublabel": "Filtro y regla central",
+                    "label": topic_short,
+                    "sublabel": "Contrato central sin ambigüedad",
                     "tone": "indigo",
                     "status": "core",
+                    "trigger_word": "contrato limpio",
                 },
                 {
                     "id": "a_out",
                     "label": "Resultado estable",
-                    "sublabel": "Comportamiento predecible",
+                    "sublabel": "Salida trazable y predecible",
                     "tone": "emerald",
                     "status": "solved",
+                    "trigger_word": "resultado predecible",
                 },
             ],
-            "flow_label": "Entrada -> Regla central -> Resultado predecible",
+            "flow_label": "Entrada -> Contrato -> Salida",
             "code_before": None,
             "code_after": None,
             "pills": [],
@@ -6144,25 +6396,30 @@ def _build_fallback_cinema_reel(
         {
             "index": 2,
             "kind": "mechanism",
-            "title": "El giro del mecanismo",
+            "title": "Por dentro",
+            "kicker": "// por dentro",
             "narration_es": mechanism_narration,
             "estimated_sec": _estimate_cinema_sec(mechanism_narration),
             "visual_mode": mech_mode,
-            "headline": "De frágil a predecible",
+            "headline": mechanism_headline,
+            "accent_words": ["predecible"],
+            "previous_echo": _build_previous_echo("", analogy_headline, 2),
             "nodes": [
                 {
                     "id": "m_prob",
-                    "label": "Punto de quiebre",
-                    "sublabel": "Parches repetidos",
+                    "label": "Parches aislados",
+                    "sublabel": "Cada cambio introduce fallas",
                     "tone": "rose",
                     "status": "problem",
+                    "trigger_word": "parchear",
                 },
                 {
                     "id": "m_turn",
-                    "label": "Giro estructural",
+                    "label": "Regla verificable",
                     "sublabel": pills[0],
                     "tone": "amber",
                     "status": "active",
+                    "trigger_word": "regla central",
                 },
                 {
                     "id": "m_fix",
@@ -6170,9 +6427,10 @@ def _build_fallback_cinema_reel(
                     "sublabel": pills[1],
                     "tone": "emerald",
                     "status": "solved",
+                    "trigger_word": "invariante firme",
                 },
             ],
-            "flow_label": "Problema -> Giro clave -> Invariante protegido",
+            "flow_label": "Flujo · Regla interna",
             "code_before": code_before,
             "code_after": code_after,
             "pills": [],
@@ -6181,35 +6439,41 @@ def _build_fallback_cinema_reel(
         {
             "index": 3,
             "kind": "payoff",
-            "title": "Impacto y escala",
+            "title": "En acción",
+            "kicker": "// el resultado",
             "narration_es": payoff_narration,
             "estimated_sec": _estimate_cinema_sec(payoff_narration),
             "visual_mode": "kinetic_blocks",
-            "headline": "Núcleo intacto al escalar",
+            "headline": payoff_headline,
+            "accent_words": ["intacto", "escalar"],
+            "previous_echo": _build_previous_echo("", mechanism_headline, 3),
             "nodes": [
                 {
                     "id": "p_core",
-                    "label": "Núcleo intacto",
-                    "sublabel": f"Base de {course_title[:24]}",
+                    "label": "Base intacta",
+                    "sublabel": f"Núcleo de {course_short}",
                     "tone": "indigo",
                     "status": "core",
+                    "trigger_word": "intacto",
                 },
                 {
                     "id": "p_new",
-                    "label": "Nuevo caso / requisito",
-                    "sublabel": "Se enchufa sin romper nada",
+                    "label": "Nuevos casos",
+                    "sublabel": "Se integran sin tocar el resto",
                     "tone": "amber",
                     "status": "new",
+                    "trigger_word": "nuevos casos",
                 },
                 {
                     "id": "p_ok",
-                    "label": "Listo para examen",
-                    "sublabel": "Criterio defendible",
+                    "label": "Criterio de examen",
+                    "sublabel": "Diseño sólido y defendible",
                     "tone": "emerald",
                     "status": "solved",
+                    "trigger_word": "criterio tecnico",
                 },
             ],
-            "flow_label": "Núcleo estable + Nuevo caso -> Diseño escalable",
+            "flow_label": "Escala · Extensible",
             "code_before": None,
             "code_after": None,
             "pills": [],
@@ -6218,11 +6482,14 @@ def _build_fallback_cinema_reel(
         {
             "index": 4,
             "kind": "takeaway",
-            "title": "Idea para llevar",
+            "title": "Para recordar",
+            "kicker": "// quédate con esto",
             "narration_es": takeaway_narration,
             "estimated_sec": _estimate_cinema_sec(takeaway_narration),
             "visual_mode": "kinetic_blocks",
-            "headline": f"Tu mapa mental de {short_label}",
+            "headline": takeaway_headline,
+            "accent_words": _sanitize_cinema_accent_words([], takeaway_headline),
+            "previous_echo": _build_previous_echo("", payoff_headline, 4),
             "nodes": [
                 {
                     "id": "t_1",
@@ -6230,13 +6497,15 @@ def _build_fallback_cinema_reel(
                     "sublabel": "Idea ancla",
                     "tone": "indigo",
                     "status": "core",
+                    "trigger_word": "mapa mental",
                 },
                 {
                     "id": "t_2",
                     "label": pills[1],
-                    "sublabel": "Mecanismo",
+                    "sublabel": "Regla operativa",
                     "tone": "sky",
                     "status": "active",
+                    "trigger_word": "guia",
                 },
                 {
                     "id": "t_3",
@@ -6244,9 +6513,10 @@ def _build_fallback_cinema_reel(
                     "sublabel": "Aplicación",
                     "tone": "emerald",
                     "status": "solved",
+                    "trigger_word": "evaluarte",
                 },
             ],
-            "flow_label": "Ahora baja a la guía para dominar los detalles",
+            "flow_label": "",
             "code_before": None,
             "code_after": None,
             "pills": pills,
@@ -6254,29 +6524,33 @@ def _build_fallback_cinema_reel(
         },
     ]
 
+    for act in raw_acts:
+        act["nodes"] = _compute_cinema_node_reveals(act["nodes"], act["narration_es"])
+
     return {
-        "title": f"Por qué importa {clean_title}",
-        "acts": acts,
+        "title": clean_title,
+        "acts": raw_acts,
     }
 
 
-def _sanitize_cinema_nodes(raw_nodes: Any, fallback_nodes: list[dict[str, str]]) -> list[dict[str, str]]:
-    clean_nodes: list[dict[str, str]] = []
+def _sanitize_cinema_nodes(raw_nodes: Any, fallback_nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    clean_nodes: list[dict[str, Any]] = []
     if isinstance(raw_nodes, list):
         for idx, item in enumerate(raw_nodes[:4]):
             if not isinstance(item, dict):
                 continue
-            label = str(item.get("label") or "").strip()[:48]
+            label = _shorten_phrase_cleanly(str(item.get("label") or ""), max_chars=44)
             if not label:
                 continue
             node_id = str(item.get("id") or f"n{idx + 1}").strip()[:24] or f"n{idx + 1}"
-            sublabel = str(item.get("sublabel") or "").strip()[:72]
+            sublabel = _shorten_phrase_cleanly(str(item.get("sublabel") or ""), max_chars=68)
             tone = str(item.get("tone") or "indigo").strip().lower()
             if tone not in _CINEMA_VALID_TONES:
                 tone = "indigo"
             status = str(item.get("status") or "active").strip().lower()
             if status not in _CINEMA_VALID_STATUSES:
                 status = "active"
+            trigger_word = _shorten_phrase_cleanly(str(item.get("trigger_word") or ""), max_chars=40)
             clean_nodes.append(
                 {
                     "id": node_id,
@@ -6284,6 +6558,8 @@ def _sanitize_cinema_nodes(raw_nodes: Any, fallback_nodes: list[dict[str, str]])
                     "sublabel": sublabel,
                     "tone": tone,
                     "status": status,
+                    "trigger_word": trigger_word,
+                    "reveal_at": None,
                 }
             )
     return clean_nodes if clean_nodes else [dict(n) for n in fallback_nodes]
@@ -6317,17 +6593,38 @@ def _sanitize_cinema_reel_payload(
         if candidate is None and idx < len(positional):
             candidate = positional[idx]
 
+        prev_headline = str(sanitized_acts[idx - 1]["headline"]) if idx > 0 else ""
+
         if not isinstance(candidate, dict):
-            sanitized_acts.append(dict(fb_act))
+            cloned = dict(fb_act)
+            cloned["previous_echo"] = _build_previous_echo(cloned.get("previous_echo"), prev_headline, idx)
+            cloned["nodes"] = _compute_cinema_node_reveals(
+                [dict(n) for n in fb_act["nodes"]],
+                str(cloned["narration_es"]),
+            )
+            sanitized_acts.append(cloned)
             continue
 
         narration = re.sub(r"\s+", " ", str(candidate.get("narration_es") or "").strip())
         if len(narration.split()) < 8:
             narration = str(fb_act["narration_es"])
 
-        act_title = str(candidate.get("title") or fb_act["title"]).strip()[:70] or str(fb_act["title"])
-        headline = str(candidate.get("headline") or fb_act["headline"]).strip()[:90]
-        flow_label = str(candidate.get("flow_label") or fb_act["flow_label"]).strip()[:110]
+        act_title = (
+            _shorten_phrase_cleanly(str(candidate.get("title") or fb_act["title"]), max_chars=70)
+            or str(fb_act["title"])
+        )
+        headline = (
+            _shorten_phrase_cleanly(str(candidate.get("headline") or fb_act["headline"]), max_chars=64, max_words=8)
+            or str(fb_act["headline"])
+        )
+        kicker = _sanitize_cinema_kicker(candidate.get("kicker"), kind)
+        accent_words = _sanitize_cinema_accent_words(candidate.get("accent_words"), headline)
+        previous_echo = _build_previous_echo(candidate.get("previous_echo"), prev_headline, idx)
+
+        if "flow_label" in candidate and candidate.get("flow_label") is not None:
+            flow_label = _shorten_phrase_cleanly(str(candidate.get("flow_label") or ""), max_chars=52)
+        else:
+            flow_label = str(fb_act.get("flow_label") or "")
 
         raw_mode = str(candidate.get("visual_mode") or "kinetic_blocks").strip().lower()
         visual_mode = raw_mode if raw_mode in _CINEMA_VISUAL_MODES else "kinetic_blocks"
@@ -6343,13 +6640,14 @@ def _sanitize_cinema_reel_payload(
             code_before = None
             code_after = None
 
-        nodes = _sanitize_cinema_nodes(candidate.get("nodes"), fb_act["nodes"])
+        raw_nodes = _sanitize_cinema_nodes(candidate.get("nodes"), fb_act["nodes"])
+        nodes = _compute_cinema_node_reveals(raw_nodes, narration)
 
         raw_pills = candidate.get("pills")
         pills: list[str] = []
         if isinstance(raw_pills, list):
             for p in raw_pills:
-                ps = str(p).strip()[:44]
+                ps = _shorten_phrase_cleanly(str(p), max_chars=44)
                 if ps and ps.lower() not in {x.lower() for x in pills}:
                     pills.append(ps)
                 if len(pills) >= 3:
@@ -6369,10 +6667,13 @@ def _sanitize_cinema_reel_payload(
                 "index": idx,
                 "kind": kind,
                 "title": act_title,
+                "kicker": kicker,
                 "narration_es": narration,
                 "estimated_sec": _estimate_cinema_sec(narration, candidate.get("estimated_sec")),
                 "visual_mode": visual_mode,
                 "headline": headline,
+                "accent_words": accent_words,
+                "previous_echo": previous_echo,
                 "nodes": nodes,
                 "flow_label": flow_label,
                 "code_before": code_before,
@@ -6382,7 +6683,10 @@ def _sanitize_cinema_reel_payload(
             }
         )
 
-    reel_title = str(parsed.get("title") or fallback_reel["title"]).strip()[:100] or str(fallback_reel["title"])
+    reel_title = (
+        _shorten_phrase_cleanly(str(parsed.get("title") or fallback_reel["title"]), max_chars=90)
+        or str(fallback_reel["title"])
+    )
     return {
         "title": reel_title,
         "acts": sanitized_acts,
@@ -6398,7 +6702,7 @@ def generate_cinema_reel_with_ai(
     story_script: str,
     preferred_provider: str = "auto",
 ) -> tuple[dict[str, Any], str]:
-    """Genera un mini-video conceptual narrado en 5 actos ('Por qué' y modelo mental) con IA o fallback determinista."""
+    """Genera un mini-video editorial de 5 actos ('Por qué' y modelo mental) con IA o fallback determinista."""
     fallback_reel = _build_fallback_cinema_reel(
         course_title=course_title,
         engine_type=engine_type,
@@ -6411,43 +6715,54 @@ def generate_cinema_reel_with_ai(
         "En el acto 3 (`mechanism`), si existe un patron de codigo claro, puedes usar `visual_mode: \"code_morph\"` "
         "con `code_before` y `code_after` concisos de 3 a 6 lineas; si no, usa `\"kinetic_blocks\"`."
         if engine_type == "code_lab"
-        else "Usa `visual_mode: \"kinetic_blocks\"` con bloques claros y conectados (`code_before: null`, `code_after: null`)."
+        else "Usa `visual_mode: \"kinetic_blocks\"` con piezas visuales progresivas (`code_before: null`, `code_after: null`)."
     )
 
     system_prompt = (
-        "Eres el director pedagogico del Modo Cine de Brotal. Tu mision es crear un mini-video narrado de 5 actos "
-        "que explique el **POR QUE** y el **MODELO MENTAL** del concepto antes de que el estudiante lea la guia.\n"
-        "PROHIBIDO repetir secamente el texto de la guia y PROHIBIDO usar emojis.\n"
-        "Escribe en espanol natural, claro y cinematografico (~140 a 180 palabras en TOTAL entre los 5 actos).\n"
-        "DEBE contener EXACTAMENTE 5 actos en este orden estricto de `kind` y presupuesto de palabras:\n"
-        "1. `index: 0, kind: \"hook\"` (~22-32 palabras): gancho contraintuitivo que revela el problema real que resuelve "
-        "el concepto; 2 tarjetas de contraste en `nodes` + `headline` fuerte.\n"
-        "2. `index: 1, kind: \"analogy\"` (~30-40 palabras): analogia cotidiana concreta con 2 a 4 piezas visuales "
-        "conectadas en `nodes` y `flow_label` claro.\n"
-        "3. `index: 2, kind: \"mechanism\"` (~35-48 palabras): problema -> giro / mecanismo interno. "
+        "Eres el director editorial y de motion graphics del Modo Cine de Brotal. "
+        "Disenas piezas audiovisuales 16:9 de Tipografia Kinetica Editorial + Escenario Flotante progresivo "
+        "que explican el POR QUE y el MODELO MENTAL del concepto antes de estudiar la guia.\n"
+        "PROHIBIDO repetir secamente la guia, PROHIBIDO usar emojis y PROHIBIDO poner muros de texto en pantalla.\n"
+        "La VOZ (`narration_es`) lleva toda la explicacion en espanol natural y rico (~24 a 38 palabras por acto, ~140 a 180 palabras en total).\n"
+        "La PANTALLA muestra solo titulares ultra-cortos y piezas visuales que aparecen una tras otra al ritmo de la voz.\n"
+        "DEBE contener EXACTAMENTE 5 actos en este orden estricto de `kind`:\n"
+        "1. `index: 0, kind: \"hook\"`: el problema real que evita el concepto (`previous_echo: \"\"`).\n"
+        "2. `index: 1, kind: \"analogy\"`: analogia cotidiana memorable que cristaliza el modelo mental.\n"
+        "3. `index: 2, kind: \"mechanism\"`: como funciona por dentro (problema -> giro -> regla). "
         f"{code_morph_hint}\n"
-        "4. `index: 3, kind: \"payoff\"` (~25-35 palabras): impacto real, escalabilidad o caso tipico de examen; "
-        "`nodes` mostrando el nucleo intacto (`status: \"core\"`) + pieza nueva enchufandose (`status: \"new\"` / `\"solved\"`).\n"
-        "5. `index: 4, kind: \"takeaway\"` (~20-28 palabras): cierre memorable + puente natural hacia la guia/codigo de abajo, "
-        "con EXACTAMENTE 3 `pills` clave concisas.\n"
-        "REGLAS DE CAMPOS:\n"
-        "- `tone` de cada nodo en `nodes`: solo uno de `\"indigo\" | \"emerald\" | \"amber\" | \"rose\" | \"sky\" | \"slate\"`.\n"
-        "- `status` de cada nodo en `nodes`: solo uno de `\"active\" | \"problem\" | \"solved\" | \"new\" | \"core\"`.\n"
+        "4. `index: 3, kind: \"payoff\"`: impacto real al escalar o defender el criterio en un examen.\n"
+        "5. `index: 4, kind: \"takeaway\"`: cierre memorable + puente hacia la guia/codigo, con EXACTAMENTE 3 `pills` concisas.\n"
+        "REGLAS ESTRICTAS POR ACTO:\n"
+        "- `kicker`: micro-etiqueta editorial de 2 a 3 palabras en minuscula con prefijo `// `, ej. `// el problema`, `// el truco`, `// por dentro`, `// el resultado`, `// quedate con esto`. "
+        "PROHIBIDO usar palabras meta como `Acto 1`, `Gancho`, `Analogia`, `Mecanismo`, `Impacto` o `Claves`.\n"
+        "- `headline`: ULTRA CORTO y contundente de 3 a 6 palabras MAXIMO (nunca frases largas ni titulos cortados), ej. `\"Un contrato, cero dependencias\"` o `\"Compila una vez, corre en todo\"`.\n"
+        "- `accent_words`: lista de 1 a 2 palabras EXACTAS que aparecen en `headline` para resaltar en color acento.\n"
+        "- `previous_echo`: frase muy breve de 2 a 4 palabras que hace eco del acto previo (`\"\"` en el acto 0).\n"
+        "- `nodes`: 2 a 4 piezas visuales concisas que apareceran secuencialmente al ritmo de la voz. "
+        "Cada nodo tiene `label` (<= 4 palabras), `sublabel` (<= 6 palabras, opcional), `tone` (`indigo|emerald|amber|rose|sky|slate`), "
+        "`status` (`active|problem|solved|new|core`) y `trigger_word` (palabra o frase corta EXACTA presente en `narration_es` en el orden en que se dice, para sincronizar su entrada).\n"
+        "- `flow_label`: muy corto (2 a 4 palabras) para el encabezado de la ventana flotante (ej. `JVM · Ejecucion` o `Checkout -> Contrato`) o `\"\"` si no aporta contexto.\n"
         "- `estimated_sec`: numero en segundos acorde al largo (~palabras / 2.6, entre 6 y 20).\n"
         "Responde UNICAMENTE JSON valido con esta estructura:\n"
         "{\n"
-        '  "title": "Titulo atractivo del mini-video",\n'
+        '  "title": "Titulo breve del concepto",\n'
         '  "acts": [\n'
         "    {\n"
         '      "index": 0,\n'
         '      "kind": "hook",\n'
         '      "title": "El problema oculto",\n'
+        '      "kicker": "// sin esto",\n'
         '      "narration_es": "...",\n'
-        '      "estimated_sec": 10.5,\n'
+        '      "estimated_sec": 11.0,\n'
         '      "visual_mode": "kinetic_blocks",\n'
-        '      "headline": "...",\n'
-        '      "nodes": [{"id": "n1", "label": "...", "sublabel": "...", "tone": "rose", "status": "problem"}],\n'
-        '      "flow_label": "...",\n'
+        '      "headline": "Un contrato, cero dependencias",\n'
+        '      "accent_words": ["contrato", "cero"],\n'
+        '      "previous_echo": "",\n'
+        '      "nodes": [\n'
+        '        {"id": "n1", "label": "Codigo rigido", "sublabel": "Se rompe al crecer", "tone": "rose", "status": "problem", "trigger_word": "rompe"},\n'
+        '        {"id": "n2", "label": "Contrato estable", "sublabel": "Desacopla cada modulo", "tone": "emerald", "status": "solved", "trigger_word": "contrato"}\n'
+        "      ],\n"
+        '      "flow_label": "Modulo -> Contrato",\n'
         '      "code_before": null,\n'
         '      "code_after": null,\n'
         '      "pills": []\n'
@@ -6473,7 +6788,7 @@ def generate_cinema_reel_with_ai(
             preferred_provider=preferred_provider,
             json_mode=True,
             temperature=0.45,
-            max_tokens=2200,
+            max_tokens=4096,
         )
         parsed = extract_json_object(comp.text)
         sanitized = _sanitize_cinema_reel_payload(parsed, fallback_reel=fallback_reel)

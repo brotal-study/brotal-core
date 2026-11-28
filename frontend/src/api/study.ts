@@ -280,6 +280,8 @@ export interface CinemaVisualNode {
   sublabel: string
   tone: string // 'indigo' | 'emerald' | 'amber' | 'rose' | 'sky' | 'slate'
   status: string // 'active' | 'problem' | 'solved' | 'new' | 'core'
+  trigger_word?: string
+  reveal_at?: number | null
 }
 
 export interface CinemaAct {
@@ -290,6 +292,9 @@ export interface CinemaAct {
   estimated_sec: number
   visual_mode: CinemaVisualMode
   headline: string
+  kicker?: string
+  accent_words?: string[]
+  previous_echo?: string
   nodes: CinemaVisualNode[]
   flow_label: string
   code_before?: string | null
