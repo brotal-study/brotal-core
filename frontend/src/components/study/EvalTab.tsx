@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
+  ArrowUpDown,
   Bug,
   CheckCircle2,
   ChevronDown,
@@ -15,9 +16,11 @@ import {
   Cpu,
   EyeOff,
   GraduationCap,
+  Headphones,
   Info,
   Languages,
   Layers,
+  LayoutGrid,
   Loader2,
   MessageCircle,
   MessageSquare,
@@ -25,12 +28,16 @@ import {
   PenLine,
   RefreshCw,
   RotateCcw,
+  SearchCheck,
   Send,
   Shuffle,
+  Square,
   Terminal,
+  Volume2,
   Wrench,
 } from 'lucide-react'
 import {
+  fetchPhraseTtsBlob,
   inCooldown,
   MAX_MASTERY,
   PASS_SCORE,
@@ -50,6 +57,7 @@ import { useStudyStore } from '../../store/useStudyStore'
 import MarkdownView from '../common/MarkdownView'
 import CodeChallengeInput, {
   getLanguageExtension,
+  isInteractiveLanguageChallenge,
   sanitizeCodePrompt,
   type SupportLevel,
 } from './CodeChallengeInput'
@@ -113,11 +121,219 @@ function buildInitialAnswers(prompts: EvalPrompt[]): Record<string, string> {
 function isPromptEditedOrAnswered(q: EvalPrompt, answers: Record<string, string>): boolean {
   const val = (answers[q.id] ?? '').trim()
   if (val.length === 0) return false
-  if ((q.challenge_type === 'debug' || q.challenge_type === 'implement') && q.starter_code) {
+  const ct = q.challenge_type
+  if (ct === 'word_order' || ct === 'categorize' || ct === 'dictation') {
+    return val.length > 0
+  }
+  if (ct === 'find_error') {
+    const data = q.interaction_data
+    const hasInteractiveTokens =
+      data != null &&
+      typeof data === 'object' &&
+      ((Array.isArray(data.tokens) && data.tokens.length > 0) ||
+        (typeof data.sentence === 'string' && data.sentence.trim().length > 0))
+    if (!hasInteractiveTokens) return val.length > 0
+    if (val === 'Sin error') return true
+    const marker = 'Corrección:'
+    const markerIdx = val.indexOf(marker)
+    if (markerIdx !== -1) {
+      return val.slice(markerIdx + marker.length).trim().length > 0
+    }
+    return false
+  }
+  if ((ct === 'debug' || ct === 'implement') && q.starter_code) {
     const { starterCode } = sanitizeCodePrompt(q.question, q.starter_code, q.language)
     return val !== starterCode.trim()
   }
   return true
+}
+
+type DiffTokenKind = 'match' | 'missing' | 'extra'
+
+interface DiffToken {
+  kind: DiffTokenKind
+  text: string
+}
+
+function normalizeDictationWord(w: string): string {
+  return w.toLowerCase().replace(/^[^a-z0-9']+|[^a-z0-9']+$/gi, '')
+}
+
+function computeDictationDiff(studentText: string, originalText: string): DiffToken[] {
+  const sWords = studentText.trim().split(/\s+/).filter(Boolean)
+  const oWords = originalText.trim().split(/\s+/).filter(Boolean)
+  const m = sWords.length
+  const n = oWords.length
+
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array<number>(n + 1).fill(0))
+  for (let i = m - 1; i >= 0; i--) {
+    const sw = normalizeDictationWord(sWords[i])
+    for (let j = n - 1; j >= 0; j--) {
+      const ow = normalizeDictationWord(oWords[j])
+      if (sw && sw === ow) {
+        dp[i][j] = 1 + dp[i + 1][j + 1]
+      } else {
+        dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1])
+      }
+    }
+  }
+
+  const out: DiffToken[] = []
+  let i = 0
+  let j = 0
+  while (i < m && j < n) {
+    const sw = normalizeDictationWord(sWords[i])
+    const ow = normalizeDictationWord(oWords[j])
+    if (sw && sw === ow) {
+      out.push({ kind: 'match', text: oWords[j] })
+      i++
+      j++
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      out.push({ kind: 'extra', text: sWords[i] })
+      i++
+    } else {
+      out.push({ kind: 'missing', text: oWords[j] })
+      j++
+    }
+  }
+  while (i < m) {
+    out.push({ kind: 'extra', text: sWords[i] })
+    i++
+  }
+  while (j < n) {
+    out.push({ kind: 'missing', text: oWords[j] })
+    j++
+  }
+  return out
+}
+
+function DictationComparisonCard({
+  courseId,
+  ttsAccent,
+  studentText,
+  originalText,
+}: {
+  courseId: string
+  ttsAccent: TtsAccent
+  studentText: string
+  originalText: string
+}) {
+  const [loading, setLoading] = useState(false)
+  const [playing, setPlaying] = useState(false)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const urlRef = useRef<string | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
+
+  const stopAudio = () => {
+    abortRef.current?.abort()
+    abortRef.current = null
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current = null
+    }
+    if (urlRef.current) {
+      URL.revokeObjectURL(urlRef.current)
+      urlRef.current = null
+    }
+    setLoading(false)
+    setPlaying(false)
+  }
+
+  useEffect(() => () => stopAudio(), [originalText])
+
+  const playOriginal = async () => {
+    if (!originalText) return
+    if (loading || playing) {
+      stopAudio()
+      return
+    }
+    stopAudio()
+    setLoading(true)
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    try {
+      const blob = await fetchPhraseTtsBlob(courseId || 'default', originalText, 'en', ttsAccent, ctrl.signal)
+      if (ctrl.signal.aborted) return
+      const url = URL.createObjectURL(blob)
+      urlRef.current = url
+      const audio = new Audio(url)
+      audioRef.current = audio
+      audio.onended = () => setPlaying(false)
+      audio.onerror = () => setPlaying(false)
+      setLoading(false)
+      setPlaying(true)
+      await audio.play()
+    } catch {
+      if (!ctrl.signal.aborted) {
+        setLoading(false)
+        setPlaying(false)
+      }
+    }
+  }
+
+  if (!originalText) return null
+
+  const diffTokens = computeDictationDiff(studentText, originalText)
+
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-indigo-200 bg-indigo-50/50 p-3 text-xs dark:border-indigo-800/70 dark:bg-indigo-950/25">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="inline-flex items-center gap-1.5 font-semibold uppercase tracking-wide text-indigo-900 dark:text-indigo-200">
+          <Headphones size={13} className="text-indigo-600 dark:text-indigo-400" />
+          Comparación de dictado
+        </span>
+        <button
+          type="button"
+          onClick={() => void playOriginal()}
+          className="inline-flex items-center gap-1.5 rounded border border-indigo-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-indigo-900 hover:bg-indigo-100 dark:border-indigo-700 dark:bg-slate-900 dark:text-indigo-200 dark:hover:bg-indigo-950/80"
+        >
+          {loading ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : playing ? (
+            <Square size={11} />
+          ) : (
+            <Volume2 size={12} />
+          )}
+          {loading ? 'Cargando...' : playing ? 'Detener' : 'Escuchar frase original'}
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1.5 rounded border border-slate-200 bg-white p-2.5 leading-relaxed dark:border-slate-700 dark:bg-slate-900">
+        {diffTokens.map((tok, i) => (
+          <span
+            key={i}
+            className={`rounded px-1.5 py-0.5 text-xs font-medium ${
+              tok.kind === 'match'
+                ? 'bg-emerald-100 text-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200'
+                : tok.kind === 'missing'
+                  ? 'border border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/50 dark:text-amber-200'
+                  : 'bg-rose-100 text-rose-800 line-through dark:bg-rose-950/60 dark:text-rose-300'
+            }`}
+          >
+            {tok.text}
+          </span>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600 dark:text-slate-300">
+        <span>
+          <strong className="font-semibold text-slate-800 dark:text-slate-100">Frase original:</strong>{' '}
+          {originalText}
+        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1">
+            <span className="h-2 w-2 rounded-full bg-emerald-500" /> Correcta
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <span className="h-2 w-2 rounded-full bg-amber-500" /> Esperada / faltante
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <span className="h-2 w-2 rounded-full bg-rose-500" /> Sobrante / error
+          </span>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 export default function EvalTab({
@@ -466,6 +682,8 @@ export default function EvalTab({
 
       {phase === 'result' && result && (
         <Result
+          courseId={effectiveCourseId}
+          ttsAccent={accent}
           nodeTitle={node.title}
           orderedPrompts={order}
           answers={answers}
@@ -485,6 +703,8 @@ export default function EvalTab({
 }
 
 function Result({
+  courseId,
+  ttsAccent,
   nodeTitle,
   orderedPrompts,
   answers,
@@ -498,6 +718,8 @@ function Result({
   onBackToStory,
   onAskTutor,
 }: {
+  courseId: string
+  ttsAccent: TtsAccent
   nodeTitle: string
   orderedPrompts: EvalPrompt[]
   answers: Record<string, string>
@@ -724,9 +946,22 @@ function Result({
                 ct === 'fill_blank' ||
                 ct === 'translate' ||
                 ct === 'speaking_prompt' ||
+                isInteractiveLanguageChallenge(ct) ||
                 q.language === 'en'
-              const langLabel = (q.language && q.language !== 'text' ? q.language : 'java').toUpperCase()
+              const langLabel = (
+                q.language && q.language !== 'text'
+                  ? q.language
+                  : isLanguageChallenge
+                    ? 'en'
+                    : 'java'
+              ).toUpperCase()
               const extensions = getLanguageExtension(q.language)
+              const rawDictationAudio =
+                ct === 'dictation' &&
+                q.interaction_data &&
+                typeof q.interaction_data.audio_text === 'string'
+                  ? q.interaction_data.audio_text.trim()
+                  : ''
 
               const qFeedback = feedback.filter((f) => f.prompt_id === q.id)
               const rubricItems =
@@ -792,6 +1027,14 @@ function Result({
                             <Languages size={11} />
                           ) : ct === 'speaking_prompt' ? (
                             <Mic size={11} />
+                          ) : ct === 'word_order' ? (
+                            <ArrowUpDown size={11} />
+                          ) : ct === 'categorize' ? (
+                            <LayoutGrid size={11} />
+                          ) : ct === 'find_error' ? (
+                            <SearchCheck size={11} />
+                          ) : ct === 'dictation' ? (
+                            <Headphones size={11} />
                           ) : (
                             <Code2 size={11} />
                           )}
@@ -801,7 +1044,15 @@ function Result({
                               ? 'Redactar en inglés'
                               : ct === 'speaking_prompt'
                                 ? 'Speaking'
-                                : ct}{' '}
+                                : ct === 'word_order'
+                                  ? 'Ordenar palabras'
+                                  : ct === 'categorize'
+                                    ? 'Categorizar'
+                                    : ct === 'find_error'
+                                      ? 'Encontrar error'
+                                      : ct === 'dictation'
+                                        ? 'Dictado'
+                                        : ct}{' '}
                           · {langLabel}
                         </span>
                       )}
@@ -872,6 +1123,15 @@ function Result({
                       </div>
                     )}
                   </div>
+
+                  {ct === 'dictation' && (rawDictationAudio || correctedSolution) && (
+                    <DictationComparisonCard
+                      courseId={courseId}
+                      ttsAccent={ttsAccent}
+                      studentText={studentAnswer}
+                      originalText={rawDictationAudio || correctedSolution || ''}
+                    />
+                  )}
 
                   {/* 3. Puntos de rubrica solo de esa pregunta */}
                   <div className="flex flex-col gap-1.5">

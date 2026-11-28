@@ -32,6 +32,7 @@ import {
   type NodeStoryboardResponse,
   type PackNode,
   type StoryboardStreamProgress,
+  type TtsAccent,
   type TtsSentenceTiming,
   type TtsWordTiming,
 } from '../../api/study'
@@ -204,6 +205,24 @@ export default function StoryTab({
   const [serverWords, setServerWords] = useState<TtsWordTiming[]>([])
   const [regenerating, setRegenerating] = useState(false)
   const [quickQuestion, setQuickQuestion] = useState('')
+  const [englishAccent, setEnglishAccent] = useState<TtsAccent>(() => {
+    try {
+      const stored = window.localStorage.getItem('brotal_tts_accent')
+      if (stored === 'us' || stored === 'gb') return stored
+    } catch {
+      // Ignore storage errors
+    }
+    return 'us'
+  })
+
+  const handleEnglishAccentChange = (nextAccent: TtsAccent) => {
+    setEnglishAccent(nextAccent)
+    try {
+      window.localStorage.setItem('brotal_tts_accent', nextAccent)
+    } catch {
+      // Ignore storage errors
+    }
+  }
 
   const [storyboard, setStoryboard] = useState<NodeStoryboardResponse | null>(null)
   const [playerOpen, setPlayerOpen] = useState(false)
@@ -818,6 +837,8 @@ export default function StoryTab({
                 courseId={courseId}
                 language={block.language}
                 code={block.code}
+                englishAccent={englishAccent}
+                onEnglishAccentChange={handleEnglishAccentChange}
               />
             )
           }
@@ -935,10 +956,14 @@ function StoryCodeBlock({
   courseId,
   language,
   code,
+  englishAccent,
+  onEnglishAccentChange,
 }: {
   courseId: string
   language: string
   code: string
+  englishAccent: TtsAccent
+  onEnglishAccentChange: (accent: TtsAccent) => void
 }) {
   const theme = useAppStore((s) => s.theme)
   const [copied, setCopied] = useState(false)
@@ -969,7 +994,7 @@ function StoryCodeBlock({
     setPlayingVoice(false)
   }
 
-  useEffect(() => () => stopVoice(), [code])
+  useEffect(() => () => stopVoice(), [code, englishAccent])
 
   const handlePlayEnglish = async () => {
     if (loadingVoice || playingVoice) {
@@ -995,7 +1020,13 @@ function StoryCodeBlock({
     const ctrl = new AbortController()
     voiceAbortRef.current = ctrl
     try {
-      const blob = await fetchPhraseTtsBlob(courseId, englishOnly, 'en', 'us', ctrl.signal)
+      const blob = await fetchPhraseTtsBlob(
+        courseId,
+        englishOnly,
+        'en',
+        englishAccent,
+        ctrl.signal,
+      )
       if (ctrl.signal.aborted) return
       const url = URL.createObjectURL(blob)
       voiceUrlRef.current = url
@@ -1036,7 +1067,28 @@ function StoryCodeBlock({
             <Languages size={13} className="text-sky-600 dark:text-sky-400" />
             Ejemplos en inglés
           </span>
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <div
+              className="inline-flex rounded border border-sky-300 bg-white p-0.5 dark:border-sky-700 dark:bg-slate-900"
+              role="group"
+              aria-label="Acento en inglés"
+            >
+              {(['us', 'gb'] as const).map((acc) => (
+                <button
+                  key={acc}
+                  type="button"
+                  aria-pressed={englishAccent === acc}
+                  onClick={() => onEnglishAccentChange(acc)}
+                  className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase transition ${
+                    englishAccent === acc
+                      ? 'bg-sky-900 text-white dark:bg-sky-200 dark:text-slate-950'
+                      : 'text-sky-800 hover:bg-sky-100 dark:text-sky-300 dark:hover:bg-sky-950'
+                  }`}
+                >
+                  {acc === 'us' ? 'US' : 'UK'}
+                </button>
+              ))}
+            </div>
             <button
               type="button"
               onClick={() => void handlePlayEnglish()}

@@ -18,6 +18,8 @@ from app.schemas.study import (
     EvaluateResponse,
     ExamRouteRequest,
     ExamRouteResponse,
+    LanguageChatRequest,
+    LanguageChatResponse,
     NodeProgress,
     NodeStoryboardResponse,
     PhraseTtsRequest,
@@ -28,13 +30,16 @@ from app.schemas.study import (
     normalize_answers,
 )
 from app.services.ai_router import (
+    LANGUAGE_INTERACTIVE_CHALLENGE_TYPES,
     AiProviderError,
     build_prompt_reviews_and_routing,
+    evaluate_language_fallback_deterministic,
     evaluate_with_ai,
     generate_code_storyboard_with_ai,
     generate_exam_route_with_ai,
     regenerate_questions_with_ai,
     regenerate_story_with_ai,
+    run_language_practice_chat_with_ai,
 )
 from app.services.evaluator import (
     PASS_SCORE,
@@ -215,17 +220,35 @@ def post_evaluate_node(
             prompt_reviews_raw = list(ai_res.get("prompt_reviews") or [])
             routing_suggestion = ai_res.get("routing_suggestion")
         except (AiProviderError, ValueError, KeyError):
-            raw_feedback = evaluate_rubric(eval_prompts, answers_by_prompt, None)
-            computed_score = score_from_feedback(raw_feedback)
-            evaluated_by = "local_fallback"
-            if computed_score < PASS_SCORE:
-                missed_pts = [f["point"] for f in raw_feedback if not f["covered"]]
-                if missed_pts:
-                    re_explanation = (
-                        "Repasemos lo que falto en tu respuesta: "
-                        + "; ademas, ".join(missed_pts[:3])
-                        + "."
-                    )
+            is_lang_fallback = (course_row["engine_type"] or "") == "language_studio" or any(
+                str(q.get("challenge_type") or "").strip().lower() in LANGUAGE_INTERACTIVE_CHALLENGE_TYPES
+                for q in eval_prompts
+            )
+            if is_lang_fallback:
+                fb_res = evaluate_language_fallback_deterministic(
+                    node_title=node_row["title"],
+                    eval_prompts=eval_prompts,
+                    answers_by_prompt=answers_by_prompt,
+                )
+                raw_feedback = evaluate_rubric(eval_prompts, answers_by_prompt, fb_res["covered_points"])
+                computed_score = float(fb_res["score"])
+                imprecisions = list(fb_res.get("imprecisions") or [])
+                re_explanation = fb_res.get("re_explanation")
+                evaluated_by = "local_fallback"
+                prompt_reviews_raw = list(fb_res.get("prompt_reviews") or [])
+                routing_suggestion = fb_res.get("routing_suggestion")
+            else:
+                raw_feedback = evaluate_rubric(eval_prompts, answers_by_prompt, None)
+                computed_score = score_from_feedback(raw_feedback)
+                evaluated_by = "local_fallback"
+                if computed_score < PASS_SCORE:
+                    missed_pts = [f["point"] for f in raw_feedback if not f["covered"]]
+                    if missed_pts:
+                        re_explanation = (
+                            "Repasemos lo que falto en tu respuesta: "
+                            + "; ademas, ".join(missed_pts[:3])
+                            + "."
+                        )
     else:
         raw_feedback = evaluate_rubric(eval_prompts, answers_by_prompt, req.covered_points)
         if req.score is not None:
@@ -958,3 +981,27 @@ def post_exam_route(
         provider=provider,
         updated_at=now_iso,
     )
+
+
+@router.post("/study/{course_id}/{node_id}/language-chat", response_model=LanguageChatResponse)
+def post_language_practice_chat(
+    course_id: str,
+    node_id: str,
+    req: LanguageChatRequest,
+    conn: DbConn,
+) -> LanguageChatResponse:
+    course_row, node_row = _load_course_and_node(conn, course_id, node_id)
+    result = run_language_practice_chat_with_ai(
+        course_title=course_row["title"],
+        node_title=node_row["title"],
+        node_summary=node_row["summary"] or "",
+        story_script=node_row["story_script"] or "",
+        message=req.message,
+        history=req.history,
+        missions=req.missions,
+        turn_index=req.turn_index,
+        start=req.start,
+        finish=req.finish,
+        preferred_provider=_profile_ai_provider(conn),
+    )
+    return LanguageChatResponse.model_validate(result)

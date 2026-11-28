@@ -24,11 +24,14 @@ from typing import Any, Literal
 from app.schemas.pack import CoursePack, PackMetadata
 from app.services import ai_router
 from app.services.ai_router import (
+    ALL_VALID_CHALLENGE_TYPES,
+    LANGUAGE_CHALLENGE_TYPES,
     AiProviderError,
     _fallback_language_story_examples,
     _fallback_story_code_block,
     explanation_style_instruction,
     extract_json_object,
+    normalize_language_interaction_data,
     question_style_instruction,
     sanitize_code_prompt,
 )
@@ -470,28 +473,86 @@ def _build_fallback_language_studio_prompts(
     key_phrases: list[str],
     node_index: int = 1,
 ) -> list[dict[str, Any]]:
-    """Construye los eval_prompts deterministas de un nodo language_studio (fill_blank, translate, speaking_prompt)."""
+    """Construye los eval_prompts deterministas de un nodo language_studio mezclando las 4 mecánicas interactivas."""
     p1_criterion = key_phrases[0][:160]
     p2_criterion = key_phrases[min(1, len(key_phrases) - 1)][:160]
+    idx0 = max(0, node_index - 1)
+
+    word_order_prompt = {
+        "id": "q_wo",
+        "question": (
+            f"[{title}] Ordena los bloques para formar una oración natural en inglés "
+            "y descarta los distractores de interferencia español-inglés."
+        ),
+        "rubric_points": [
+            f"Construye la oración en orden natural en inglés aplicando {title}",
+            "Descarta distractores típicos de interferencia español-inglés",
+        ],
+        "challenge_type": "word_order",
+        "language": "en",
+        "starter_code": None,
+        "interaction_data": normalize_language_interaction_data(
+            "word_order", None, node_title=title, idx=idx0
+        ),
+    }
+    categorize_prompt = {
+        "id": "q_cat",
+        "question": (
+            f"[{title}] Clasifica cada bloque en la categoría gramatical o situacional correcta "
+            "sin dejar elementos sin asignar."
+        ),
+        "rubric_points": [
+            f"Distingue correctamente las categorías funcionales de {title}",
+            p1_criterion,
+        ],
+        "challenge_type": "categorize",
+        "language": "en",
+        "starter_code": None,
+        "interaction_data": normalize_language_interaction_data(
+            "categorize", None, node_title=title, idx=idx0
+        ),
+    }
+    find_error_prompt = {
+        "id": "q_fe",
+        "question": (
+            f"[{title}] Inspecciona la oración en inglés: señala el error típico de hispanohablante "
+            "y escribe su corrección natural (o indica 'Sin error' si es válida)."
+        ),
+        "rubric_points": [
+            f"Detecta y corrige el error de interferencia L1-español vinculado a {title}",
+            p2_criterion,
+        ],
+        "challenge_type": "find_error",
+        "language": "en",
+        "starter_code": None,
+        "interaction_data": normalize_language_interaction_data(
+            "find_error", None, node_title=title, idx=idx0
+        ),
+    }
+    dictation_prompt = {
+        "id": "q_di",
+        "question": (
+            f"[{title}] Escucha el audio en inglés y transcribe exactamente la oración completa "
+            "cuidando auxiliares, plurales y ortografía."
+        ),
+        "rubric_points": [
+            f"Transcribe con precisión la frase dictada aplicando {title}",
+            "Respeta auxiliares, conjugación y ortografía natural en inglés",
+        ],
+        "challenge_type": "dictation",
+        "language": "en",
+        "starter_code": None,
+        "interaction_data": normalize_language_interaction_data(
+            "dictation", None, node_title=title, idx=idx0
+        ),
+    }
 
     if branch == "practice":
-        return [
+        practice_mix = [
+            find_error_prompt if idx0 % 2 == 0 else dictation_prompt,
+            word_order_prompt if idx0 % 2 == 0 else categorize_prompt,
             {
-                "id": "q1",
-                "question": (
-                    f"[Integrated Exam · {title}] Complete with the correct form (there is / there are / some / any / "
-                    "do / does): ___ ___ ___ study rooms available in the library, and ___ your classmate need help?"
-                ),
-                "rubric_points": [
-                    f"Completa correctamente los huecos gramaticales de {title} en inglés",
-                    p1_criterion,
-                ],
-                "challenge_type": "fill_blank",
-                "language": "en",
-                "starter_code": None,
-            },
-            {
-                "id": "q2",
+                "id": "q3",
                 "question": (
                     f"[Writing / Translation · {title}] Write in natural English (1-2 complete sentences): "
                     "'Ella estudia inglés todos los días en la universidad, pero no tiene clases los sábados.'"
@@ -503,9 +564,10 @@ def _build_fallback_language_studio_prompts(
                 "challenge_type": "translate",
                 "language": "en",
                 "starter_code": None,
+                "interaction_data": None,
             },
             {
-                "id": "q3",
+                "id": "q4",
                 "question": (
                     f"What is your daily routine at university and what are your main study habits for {course_title}? "
                     "Answer in 3-4 complete sentences in English."
@@ -517,8 +579,12 @@ def _build_fallback_language_studio_prompts(
                 "challenge_type": "speaking_prompt",
                 "language": "en",
                 "starter_code": None,
+                "interaction_data": None,
             },
         ]
+        for q_idx, item in enumerate(practice_mix, start=1):
+            item["id"] = f"q{q_idx}"
+        return practice_mix
 
     fill_variants = [
         "Complete with there is / there are / some / any: ___ ___ ___ coffee on the table, or do we need to buy more?",
@@ -532,43 +598,59 @@ def _build_fallback_language_studio_prompts(
         "What is your daily routine on weekdays and what are your study habits? Answer in 3-4 sentences in English.",
         "Describe your classroom or workspace at home and mention three things you use to study. Answer in 3-4 sentences in English.",
     ]
-    v_idx = (node_index - 1) % 2
+    v_idx = idx0 % 2
 
-    return [
-        {
-            "id": "q1",
-            "question": f"[{title}] {fill_variants[v_idx]}",
-            "rubric_points": [
-                f"Aplica la estructura gramatical correcta de {title}",
-                p1_criterion,
-            ],
-            "challenge_type": "fill_blank",
-            "language": "en",
-            "starter_code": None,
-        },
-        {
-            "id": "q2",
-            "question": f"[{title}] {translate_variants[v_idx]}",
-            "rubric_points": [
-                "Construye oraciones naturales en inglés sin omitir el sujeto ni confundir auxiliares",
-                p2_criterion,
-            ],
-            "challenge_type": "translate",
-            "language": "en",
-            "starter_code": None,
-        },
-        {
-            "id": "q3",
-            "question": speaking_variants[v_idx],
-            "rubric_points": [
-                "Comunica ideas claras en 3-4 oraciones completas en inglés",
-                f"Integra vocabulario y gramática pertinente de {title}",
-            ],
-            "challenge_type": "speaking_prompt",
-            "language": "en",
-            "starter_code": None,
-        },
-    ]
+    fill_prompt = {
+        "id": "q1",
+        "question": f"[{title}] {fill_variants[v_idx]}",
+        "rubric_points": [
+            f"Aplica la estructura gramatical correcta de {title}",
+            p1_criterion,
+        ],
+        "challenge_type": "fill_blank",
+        "language": "en",
+        "starter_code": None,
+        "interaction_data": None,
+    }
+    translate_prompt = {
+        "id": "q2",
+        "question": f"[{title}] {translate_variants[v_idx]}",
+        "rubric_points": [
+            "Construye oraciones naturales en inglés sin omitir el sujeto ni confundir auxiliares",
+            p2_criterion,
+        ],
+        "challenge_type": "translate",
+        "language": "en",
+        "starter_code": None,
+        "interaction_data": None,
+    }
+    speaking_prompt = {
+        "id": "q3",
+        "question": speaking_variants[v_idx],
+        "rubric_points": [
+            "Comunica ideas claras en 3-4 oraciones completas en inglés",
+            f"Integra vocabulario y gramática pertinente de {title}",
+        ],
+        "challenge_type": "speaking_prompt",
+        "language": "en",
+        "starter_code": None,
+        "interaction_data": None,
+    }
+
+    if node_index == 1:
+        selected = [fill_prompt, translate_prompt, speaking_prompt, word_order_prompt]
+    elif idx0 % 4 == 1:
+        selected = [categorize_prompt, find_error_prompt, translate_prompt, speaking_prompt]
+    elif idx0 % 4 == 2:
+        selected = [dictation_prompt, word_order_prompt, fill_prompt]
+    elif idx0 % 4 == 3:
+        selected = [find_error_prompt, categorize_prompt, dictation_prompt]
+    else:
+        selected = [word_order_prompt, dictation_prompt, translate_prompt, speaking_prompt]
+
+    for q_idx, item in enumerate(selected, start=1):
+        item["id"] = f"q{q_idx}"
+    return selected
 
 
 def _normalize_prompt_item(
@@ -580,37 +662,28 @@ def _normalize_prompt_item(
     engine_type: str,
     default_language: str,
 ) -> dict[str, Any]:
-    """Normaliza un item de eval_prompts preservando challenge_type, language y starter_code."""
+    """Normaliza un item de eval_prompts preservando challenge_type, language, starter_code e interaction_data."""
     pts = [str(x).strip() for x in (raw_prompt.get("rubric_points") or []) if str(x).strip()]
     if not pts:
         pts = [f"Explica los conceptos centrales de {node_title}"]
 
     raw_ct = str(raw_prompt.get("challenge_type") or "concept").strip().lower()
-    valid_cts = (
-        "concept",
-        "trace",
-        "debug",
-        "implement",
-        "fill_blank",
-        "translate",
-        "speaking_prompt",
-    )
-    challenge_type = raw_ct if raw_ct in valid_cts else "concept"
+    challenge_type = raw_ct if raw_ct in ALL_VALID_CHALLENGE_TYPES else "concept"
 
     raw_lang = str(raw_prompt.get("language") or "").strip().lower()
     if raw_lang in ("cpp", "c++"):
         raw_lang = "c"
     elif raw_lang in ("english", "eng", "en-us", "en-gb", "en-au"):
         raw_lang = "en"
-    if raw_lang in ("java", "sql", "python", "c", "en", "text"):
-        language = raw_lang
-    elif engine_type == "language_studio" or challenge_type in ("fill_blank", "translate", "speaking_prompt"):
+    if engine_type == "language_studio" or challenge_type in LANGUAGE_CHALLENGE_TYPES:
         language = "en"
+    elif raw_lang in ("java", "sql", "python", "c", "en", "text"):
+        language = raw_lang
     else:
         language = default_language if engine_type == "code_lab" else "text"
 
     starter_raw = raw_prompt.get("starter_code")
-    if isinstance(starter_raw, str) and challenge_type not in ("fill_blank", "translate", "speaking_prompt"):
+    if isinstance(starter_raw, str) and challenge_type not in LANGUAGE_CHALLENGE_TYPES:
         starter_code: str | None = starter_raw.strip()
     else:
         starter_code = None
@@ -637,6 +710,13 @@ def _normalize_prompt_item(
 
     raw_question = str(raw_prompt.get("question") or f"Explica con tus palabras {node_title or nid}.")
     clean_question, clean_starter = sanitize_code_prompt(raw_question, starter_code, language)
+    interaction_data = normalize_language_interaction_data(
+        challenge_type,
+        raw_prompt.get("interaction_data"),
+        question=clean_question,
+        node_title=node_title,
+        idx=max(0, p_idx - 1),
+    )
 
     return {
         "id": str(raw_prompt.get("id") or f"q{p_idx}"),
@@ -645,7 +725,11 @@ def _normalize_prompt_item(
         "challenge_type": challenge_type,
         "language": language,
         "starter_code": clean_starter,
+        "interaction_data": interaction_data,
     }
+
+
+_normalize_eval_prompt = _normalize_prompt_item
 
 
 def _is_valid_title(raw: str) -> bool:
@@ -1170,23 +1254,32 @@ def _code_lab_architect_rules(default_language: str) -> str:
 
 def _language_studio_architect_rules() -> str:
     return (
-        "\nMODO ESPECIAL `language_studio` ACTIVO (Ingles universitario — Gramatica, Vocabulario, Comprension y Produccion):\n"
+        "\nMODO ESPECIAL `language_studio` ACTIVO (Ingles universitario — Gramatica, Vocabulario, Comprension y Produccion a ciegas):\n"
         "- EXPLICACION BILINGUE (`story_script`): Escribe `story_script` en espanol claro y conversado (2 a 3 parrafos "
         "fluidos sin listas sueltas) con las **reglas gramaticales y de vocabulario clave en `**negrita**`**, explicando "
-        "las estructuras **afirmativa, negativa e interrogativa**, las **trampas tipicas de hispanohablantes** y "
+        "las estructuras **afirmativa, negativa e interrogativa**, las **trampas tipicas de hispanohablantes** (L1-ES) y "
         "**ejemplos concretos en ingles** claramente diferenciados (en un bloque ```en ... ``` y/o entre comillas con "
         "traduccion breve opcional entre parentesis). DEBE cubrir explicitamente todo el vocabulario y gramatica que se "
         "evaluara en `eval_prompts`.\n"
-        "- PREGUNTAS DE EXAMEN DE INGLES (`eval_prompts`, `\"language\": \"en\"`, `\"starter_code\": null`):\n"
-        "  * En cada nodo `branch: \"theory\"`, mezcla 3 retos practicos reales de examen:\n"
-        "    1. `\"challenge_type\": \"fill_blank\"`: completar huecos de gramatica/vocabulario en ingles "
-        "(ej. `\"Complete with there is / there are / some / any: ___ ___ any coffee on the table?\"`).\n"
-        "    2. `\"challenge_type\": \"translate\"`: redactar o traducir 1-2 oraciones completas al ingles usando el "
-        "vocabulario y tiempo verbal del nodo.\n"
-        "    3. `\"challenge_type\": \"speaking_prompt\"`: pregunta abierta en ingles tipo examen oral/escrito corto "
-        "(ej. `\"What is your daily routine and what are your study habits? Answer in 3-4 sentences in English.\"`).\n"
-        "  * En cada nodo `branch: \"practice\"` (Simulacros / Examenes integrados): combina gramatica (`\"fill_blank\"`), "
-        "redaccion (`\"translate\"`) y respuesta abierta (`\"speaking_prompt\"`).\n"
+        "- RETOS ACTIVOS A CIEGAS (`eval_prompts`, `\"language\": \"en\"`, `\"starter_code\": null`):\n"
+        "  * En cada nodo `branch: \"theory\"` y `branch: \"practice\"`, genera 3 a 4 retos mezclando las 4 mecanicas interactivas "
+        "con produccion escrita/oral (`fill_blank`, `translate`, `speaking_prompt`), atacando siempre interferencia real espanol->ingles:\n"
+        "    1. `\"challenge_type\": \"word_order\"` (armar oracion descartando distractores L1-ES): DEBE incluir "
+        "`\"interaction_data\": {\"tiles\": [>=4 bloques de la oracion valida en orden], \"distractors\": [1-2 distractores reales "
+        "como do/does, is/are, much/many, go/goes, have/has], \"hint_es\": \"breve pista en espanol\"}`.\n"
+        "    2. `\"challenge_type\": \"categorize\"` (clasificar expresiones por regla o situacion): DEBE incluir "
+        "`\"interaction_data\": {\"categories\": [>=2 categorias funcionales], \"items\": [>=4 bloques de texto], "
+        "\"expected_map\": {\"item\": \"categoria\"}}`.\n"
+        "    3. `\"challenge_type\": \"find_error\"` (detectar y corregir error L1-ES o validar si esta correcta): DEBE incluir "
+        "`\"interaction_data\": {\"sentence\": \"oracion en ingles\", \"tokens\": [>=4 tokens], \"allow_no_error\": true, "
+        "\"error_token\": \"token\"|null, \"correction\": \"forma natural\"|null}`.\n"
+        "    4. `\"challenge_type\": \"dictation\"` (comprension auditiva y transcripcion con edge-tts): DEBE incluir "
+        "`\"interaction_data\": {\"audio_text\": \"frase en ingles no vacia\", \"accent\": \"us\"|\"gb\"|\"au\", "
+        "\"hint_es\": \"breve instruccion en espanol\"}`.\n"
+        "    5. `\"fill_blank\"`, `\"translate\"` y `\"speaking_prompt\"` (`\"interaction_data\": null`): completar huecos con `___`, "
+        "traducir 1-2 oraciones naturales al ingles y responder preguntas abiertas en 3-4 oraciones.\n"
+        "  * Distribuye los 4 tipos interactivos a lo largo de los nodos del arbol para que el estudiante practique orden sintactico, "
+        "clasificacion, deteccion de errores L1-ES y dictado auditivo.\n"
     )
 
 
@@ -1218,9 +1311,10 @@ def _generate_nodes_with_ai(
         lang_hint = "text"
 
     prompt_examples_json = (
-        '        {"id": "q1", "question": "Complete with there is / there are / some / any: ___ ___ any coffee on the table?", "rubric_points": ["...", "..."], "challenge_type": "fill_blank", "language": "en", "starter_code": null},\n'
-        '        {"id": "q2", "question": "Translate into natural English: \'Ella estudia todos los dias en la biblioteca.\'", "rubric_points": ["...", "..."], "challenge_type": "translate", "language": "en", "starter_code": null},\n'
-        '        {"id": "q3", "question": "What is your daily routine and what are your study habits? Answer in 3-4 sentences in English.", "rubric_points": ["...", "..."], "challenge_type": "speaking_prompt", "language": "en", "starter_code": null}\n'
+        '        {"id": "q1", "question": "Ordena los bloques en ingles y descarta distractores.", "rubric_points": ["...", "..."], "challenge_type": "word_order", "language": "en", "starter_code": null, "interaction_data": {"tiles": ["She", "goes", "to", "university", "every", "morning"], "distractors": ["go", "does"], "hint_es": "3a persona singular en Present Simple"}},\n'
+        '        {"id": "q2", "question": "Detecta y corrige el error tipico de hispanohablante.", "rubric_points": ["...", "..."], "challenge_type": "find_error", "language": "en", "starter_code": null, "interaction_data": {"sentence": "She don\'t study English on Mondays.", "tokens": ["She", "don\'t", "study", "English", "on", "Mondays."], "allow_no_error": true, "error_token": "don\'t", "correction": "doesn\'t"}},\n'
+        '        {"id": "q3", "question": "Escucha el dictado en ingles y transcribe exactamente lo que oyes.", "rubric_points": ["...", "..."], "challenge_type": "dictation", "language": "en", "starter_code": null, "interaction_data": {"audio_text": "There aren\'t any notebooks on the desk.", "accent": "us", "hint_es": "Cuida la contraccion negativa y el plural."}},\n'
+        '        {"id": "q4", "question": "Translate into natural English: \'Ella estudia todos los dias en la biblioteca.\'", "rubric_points": ["...", "..."], "challenge_type": "translate", "language": "en", "starter_code": null, "interaction_data": null}\n'
         if engine_type == "language_studio"
         else (
             f'        {{"id": "q1", "question": "...", "rubric_points": ["...", "..."], "challenge_type": "concept", "language": "{lang_hint}", "starter_code": null}},\n'
@@ -1337,7 +1431,7 @@ def _generate_nodes_with_ai(
 
             if engine_type == "language_studio":
                 has_lang_challenge = any(
-                    cp.get("challenge_type") in ("fill_blank", "translate", "speaking_prompt")
+                    cp.get("challenge_type") in LANGUAGE_CHALLENGE_TYPES
                     for cp in clean_prompts
                 )
                 if not has_lang_challenge:
@@ -1679,7 +1773,7 @@ def _generate_append_nodes_with_ai(
             ]
             if engine_type == "language_studio":
                 has_lang_challenge = any(
-                    cp.get("challenge_type") in ("fill_blank", "translate", "speaking_prompt")
+                    cp.get("challenge_type") in LANGUAGE_CHALLENGE_TYPES
                     for cp in clean_prompts
                 )
                 if not has_lang_challenge:
