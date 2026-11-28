@@ -125,6 +125,7 @@ export default function StudyStation({
         {tab === 'story' ? (
           <StoryTab
             courseId={courseId}
+            engineType={engineType}
             node={node}
             worldMetaphor={worldMetaphor}
             onEvaluate={() => setTab('eval')}

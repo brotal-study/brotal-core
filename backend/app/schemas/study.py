@@ -137,6 +137,52 @@ class ExamRouteResponse(BaseModel):
     updated_at: str
 
 
+StoryboardVariant = Literal[
+    "execution_trace",
+    "oop_dispatch",
+    "error_contrast",
+    "data_structure",
+    "sql_pipeline",
+]
+
+
+class StoryboardSubgoal(BaseModel):
+    id: str
+    label: str
+
+
+class StoryboardCheckpoint(BaseModel):
+    enabled: bool = False
+    question: str = ""
+    options: list[str] = Field(default_factory=list)
+    correct_index: int = 0
+    explanation: str = ""
+
+
+class StoryboardStep(BaseModel):
+    index: int
+    subgoal_id: str
+    active_lines: list[int] = Field(default_factory=list)
+    caption: str
+    sentence_index: int | None = None
+    checkpoint: StoryboardCheckpoint | None = None
+    state: dict[str, Any] = Field(default_factory=dict)
+
+
+class NodeStoryboardResponse(BaseModel):
+    course_id: str
+    node_id: str
+    variant: StoryboardVariant
+    language: str = "java"
+    title: str
+    source_code: str
+    fixed_code: str | None = None
+    subgoals: list[StoryboardSubgoal] = Field(default_factory=list)
+    steps: list[StoryboardStep] = Field(default_factory=list)
+    provider: str = "local_fallback"
+    updated_at: str
+
+
 def normalize_answers(
     raw_answers: list[AnswerItem] | list[str] | dict[str, str] | Any,
     eval_prompts: list[dict[str, Any]],

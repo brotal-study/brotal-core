@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
@@ -25,6 +26,7 @@ from app.config import (
     configured_providers,
     get_secret,
 )
+from app.services.tts import split_story_sentences
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -2043,3 +2045,2139 @@ def generate_exam_route_with_ai(
             exam_topics=exam_topics,
         )
         return (fallback, exam_dt, days_left, "local_fallback")
+
+
+# ---------------------------------------------------------------------------
+# Animaciones explicativas auto-adaptativas por nodo (v1.2.2)
+# ---------------------------------------------------------------------------
+
+_STORYBOARD_VARIANTS = (
+    "execution_trace",
+    "oop_dispatch",
+    "error_contrast",
+    "data_structure",
+    "sql_pipeline",
+)
+_STORYBOARD_LANGUAGES = ("java", "python", "c", "sql")
+_SQL_PIPELINE_STAGES = ["FROM/JOIN", "WHERE", "GROUP BY", "HAVING", "SELECT", "ORDER BY"]
+
+
+def _strip_accents_lower(text: str) -> str:
+    norm = unicodedata.normalize("NFKD", text or "")
+    return "".join(ch for ch in norm if not unicodedata.combining(ch)).lower()
+
+
+def _detect_storyboard_language_and_variant(
+    course_title: str,
+    node_title: str,
+    node_summary: str,
+    story_script: str,
+) -> tuple[str, str]:
+    """Detecta de forma heurística determinista (language, variant) para un nodo."""
+    raw_node = f"{node_title or ''}\n{node_summary or ''}"
+    raw_story = story_script or ""
+
+    norm_course = _strip_accents_lower(course_title)
+    norm_node = _strip_accents_lower(raw_node)
+    norm_story = _strip_accents_lower(raw_story)
+    norm_full = f"{norm_course}\n{norm_node}\n{norm_story}"
+
+    fence_langs = [
+        m.group(1).lower()
+        for m in re.finditer(r"```\s*(java|python|py|c|sql)\b", raw_story, flags=re.IGNORECASE)
+    ]
+
+    sql_clause_patterns = (
+        r"\bSELECT\b",
+        r"\bFROM\b",
+        r"\bWHERE\b",
+        r"\bGROUP\s+BY\b",
+        r"\bHAVING\b",
+        r"\bINNER\s+JOIN\b",
+        r"\bLEFT\s+JOIN\b",
+        r"\bORDER\s+BY\b",
+    )
+    sql_clause_hits = sum(
+        1 for pat in sql_clause_patterns if re.search(pat, raw_node + "\n" + raw_story, flags=re.IGNORECASE)
+    )
+    has_select_from = bool(
+        re.search(r"\bSELECT\b[\s\S]{1,360}\bFROM\b", raw_node + "\n" + raw_story, flags=re.IGNORECASE)
+    )
+    has_sql_heavy_clause = bool(
+        re.search(
+            r"\b(?:GROUP\s+BY|HAVING|INNER\s+JOIN|LEFT\s+JOIN|ORDER\s+BY)\b",
+            raw_node + "\n" + raw_story,
+            flags=re.IGNORECASE,
+        )
+    )
+
+    language = "java"
+    if (
+        "sql" in fence_langs
+        or has_select_from
+        or sql_clause_hits >= 3
+        or (has_sql_heavy_clause and sql_clause_hits >= 2)
+        or (re.search(r"\bsql\b", norm_full) and (sql_clause_hits >= 1 or "consulta" in norm_full))
+    ):
+        language = "sql"
+    elif (
+        "python" in fence_langs
+        or "py" in fence_langs
+        or re.search(r"\bpython\b", norm_full)
+        or re.search(r"\bdef\s+[A-Za-z_]\w*\s*\([^)]*\)\s*:", raw_story)
+    ):
+        language = "python"
+    elif (
+        "c" in fence_langs
+        or re.search(r"#include\s*<", raw_story)
+        or re.search(r"\b(?:malloc|calloc|free|printf|scanf|sizeof)\s*\(", raw_story)
+        or re.search(r"\blenguaje\s+c\b|\ben\s+c\b|\bpunteros\s+en\s+c\b", norm_full)
+    ):
+        language = "c"
+    elif "java" in fence_langs:
+        language = "java"
+
+    # 1. SQL Pipeline
+    if language == "sql" or has_select_from or sql_clause_hits >= 3 or (has_sql_heavy_clause and sql_clause_hits >= 2):
+        return ("sql", "sql_pipeline")
+
+    def _weighted_hits(
+        norm_pats: tuple[str, ...],
+        raw_pats: tuple[str, ...] = (),
+    ) -> tuple[int, int]:
+        node_hits = 0
+        story_hits = 0
+        for p in norm_pats:
+            if re.search(p, norm_node):
+                node_hits += 1
+            if re.search(p, norm_story):
+                story_hits += 1
+        for p in raw_pats:
+            if re.search(p, raw_node):
+                node_hits += 1
+            if re.search(p, raw_story):
+                story_hits += 1
+        return (node_hits, node_hits * 4 + story_hits)
+
+    oop_norm_pats = (
+        r"\bextends\b",
+        r"\bimplements\b",
+        r"\bsuper\s*\(",
+        r"\bsuper\.",
+        r"\bpolimorfismo\b",
+        r"\bherencia\b",
+        r"\bsobrescritura\b",
+        r"despacho\s+dinamico",
+        r"clase(?:s)?\s+abstracta(?:s)?",
+        r"\binterfaz\b|\binterfaces\b",
+        r"tipo\s+estatico",
+        r"tipo\s+dinamico",
+    )
+    oop_raw_pats = (r"@Override\b",)
+
+    err_norm_pats = (
+        r"\btry\b",
+        r"\bcatch\b",
+        r"\bthrow\b",
+        r"\bthrows\b",
+        r"\bexcepcion(?:es)?\b",
+        r"stack\s+unwinding",
+        r"\bbug(?:s)?\b",
+        r"segmentation\s+fault",
+        r"error(?:es)?\s+comun(?:es)?",
+        r"nullpointer",
+        r"indexoutofbounds",
+        r"(?:comparacion\s+de\s+strings|==\s*vs\.?\s*equals)[\s\S]{0,90}(?:fallo|bug|error|trampa|null)",
+    )
+    err_raw_pats = (r"\b[A-Za-z]*Exception\b",)
+
+    ds_norm_pats = (
+        r"\barraylist\b",
+        r"\bhashmap\b",
+        r"\blinkedlist\b",
+        r"\barreglo(?:s)?\b",
+        r"\barray(?:s)?\b",
+        r"lista(?:s)?\s+enlazada(?:s)?",
+        r"\bpila(?:s)?\b",
+        r"\bcola(?:s)?\b",
+        r"\bmatriz\b|\bmatrices\b",
+        r"\bbucket(?:s)?\b",
+        r"\bpuntero(?:s)?\b",
+        r"\bindice(?:s)?\b",
+        r"\bdiccionario(?:s)?\b",
+        r"estructura(?:s)?\s+de\s+datos|nodos\s+enlazados",
+    )
+
+    oop_node_hits, oop_score = _weighted_hits(oop_norm_pats, oop_raw_pats)
+    err_node_hits, err_score = _weighted_hits(err_norm_pats, err_raw_pats)
+    ds_node_hits, ds_score = _weighted_hits(ds_norm_pats)
+
+    if max(oop_score, err_score, ds_score) == 0:
+        return (language, "execution_trace")
+
+    # Desempate explícito entre OOP y Error Contrast según foco del nodo
+    if err_node_hits > 0 and err_node_hits >= oop_node_hits and err_score >= ds_score:
+        return (language, "error_contrast")
+    if oop_node_hits > 0 and oop_node_hits > err_node_hits and oop_score >= ds_score:
+        return (language, "oop_dispatch")
+    if ds_node_hits > 0 and ds_score > oop_score and ds_score > err_score:
+        return (language, "data_structure")
+
+    if oop_score >= err_score and oop_score >= ds_score and oop_score > 0:
+        if err_score > oop_score:
+            return (language, "error_contrast")
+        return (language, "oop_dispatch")
+    if err_score >= oop_score and err_score >= ds_score and err_score > 0:
+        return (language, "error_contrast")
+    if ds_score > 0:
+        return (language, "data_structure")
+
+    return (language, "execution_trace")
+
+
+def _clean_micro_caption(raw: Any, fallback: str) -> str:
+    text = str(raw or "").strip()
+    text = re.sub(r"```[\s\S]*?```", " ", text)
+    text = text.replace("**", "").replace("`", "")
+    text = re.sub(r"\s+", " ", text).strip()
+    words = [w for w in text.split(" ") if w]
+    if not words:
+        words = [w for w in fallback.split(" ") if w]
+    if len(words) > 12:
+        words = words[:12]
+        words[-1] = words[-1].rstrip(",;:")
+        if words[-1] and words[-1][-1] not in ".!?":
+            words[-1] = words[-1] + "."
+    return " ".join(words[:12])
+
+
+def _clean_storyboard_code(raw_code: Any, language: str, max_lines: int = 22) -> str:
+    s = _clean_fenced_solution(raw_code)
+    if not s and isinstance(raw_code, str):
+        s = raw_code.strip()
+    if not s:
+        return ""
+    formatted = format_multiline_starter_code(s, language) or s
+    lines = [ln.rstrip() for ln in formatted.splitlines()]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+    return "\n".join(lines)
+
+
+def _extract_story_code_block(story_script: str, language: str) -> str | None:
+    if not story_script:
+        return None
+    m = re.search(r"```(?:[A-Za-z0-9_+-]*)?[ \t]*\n([\s\S]*?)```", story_script)
+    if not m:
+        return None
+    cleaned = _clean_storyboard_code(m.group(1), language, max_lines=22)
+    line_count = len(cleaned.splitlines())
+    if 6 <= line_count <= 22:
+        return cleaned
+    return None
+
+
+def _compute_sentence_indices(
+    raw_indices: list[int | None],
+    story_script: str,
+    step_count: int,
+) -> list[int]:
+    sentences = split_story_sentences(story_script or "")
+    num_sentences = len(sentences)
+    if step_count <= 0:
+        return []
+    if num_sentences <= 0:
+        return [0 for _ in range(step_count)]
+
+    out: list[int] = []
+    prev = 0
+    for idx in range(step_count):
+        prop = min(num_sentences - 1, (idx * num_sentences) // max(1, step_count))
+        cand = raw_indices[idx] if idx < len(raw_indices) else None
+        if isinstance(cand, int) and 0 <= cand < num_sentences and cand >= prev:
+            chosen = cand
+        else:
+            chosen = max(prev, prop)
+        prev = chosen
+        out.append(chosen)
+    return out
+
+
+def _sanitize_execution_trace_state(raw_state: Any, step_idx: int, caption: str) -> dict[str, Any]:
+    st = raw_state if isinstance(raw_state, dict) else {}
+    frames_out: list[dict[str, Any]] = []
+    raw_frames = st.get("frames")
+    if isinstance(raw_frames, list):
+        for f_idx, fr in enumerate(raw_frames[:6]):
+            if not isinstance(fr, dict):
+                continue
+            vars_out: list[dict[str, Any]] = []
+            raw_vars = fr.get("vars")
+            if isinstance(raw_vars, list):
+                for vr in raw_vars[:10]:
+                    if not isinstance(vr, dict):
+                        continue
+                    ref_raw = vr.get("ref_id")
+                    vars_out.append(
+                        {
+                            "name": str(vr.get("name") or "var"),
+                            "value": str(vr.get("value") if vr.get("value") is not None else ""),
+                            "type": str(vr.get("type") or "int"),
+                            "changed": bool(vr.get("changed", False)),
+                            "ref_id": str(ref_raw) if ref_raw else None,
+                        }
+                    )
+            frames_out.append(
+                {
+                    "name": str(fr.get("name") or ("main" if f_idx == 0 else f"frame_{f_idx}")),
+                    "active": bool(fr.get("active", f_idx == len(raw_frames) - 1)),
+                    "vars": vars_out,
+                }
+            )
+    if not frames_out:
+        frames_out = [
+            {
+                "name": "main",
+                "active": True,
+                "vars": [{"name": "paso", "value": str(step_idx + 1), "type": "int", "changed": True, "ref_id": None}],
+            }
+        ]
+
+    heap_out: list[dict[str, Any]] = []
+    raw_heap = st.get("heap")
+    if isinstance(raw_heap, list):
+        for h_idx, hp in enumerate(raw_heap[:6]):
+            if not isinstance(hp, dict):
+                continue
+            fields_out: list[dict[str, Any]] = []
+            raw_fields = hp.get("fields")
+            if isinstance(raw_fields, list):
+                for fld in raw_fields[:8]:
+                    if not isinstance(fld, dict):
+                        continue
+                    fields_out.append(
+                        {
+                            "name": str(fld.get("name") or "campo"),
+                            "value": str(fld.get("value") if fld.get("value") is not None else ""),
+                            "changed": bool(fld.get("changed", False)),
+                        }
+                    )
+            heap_out.append(
+                {
+                    "id": str(hp.get("id") or f"obj{h_idx + 1}"),
+                    "class_name": str(hp.get("class_name") or "Objeto"),
+                    "address": str(hp.get("address") or f"@0x{10 + h_idx:02X}"),
+                    "fields": fields_out,
+                }
+            )
+
+    raw_stdout = st.get("stdout")
+    stdout_out = [str(x) for x in raw_stdout[:8]] if isinstance(raw_stdout, list) else []
+    delta_out = str(st.get("delta") or caption).strip() or f"Paso {step_idx + 1}"
+
+    return {
+        "frames": frames_out,
+        "heap": heap_out,
+        "stdout": stdout_out,
+        "delta": delta_out,
+    }
+
+
+def _sanitize_oop_dispatch_state(raw_state: Any) -> dict[str, Any]:
+    st = raw_state if isinstance(raw_state, dict) else {}
+    classes_out: list[dict[str, Any]] = []
+    raw_classes = st.get("classes")
+    if isinstance(raw_classes, list):
+        for cl in raw_classes[:6]:
+            if not isinstance(cl, dict):
+                continue
+            parent_raw = cl.get("parent")
+            methods_raw = cl.get("methods")
+            classes_out.append(
+                {
+                    "name": str(cl.get("name") or "Base"),
+                    "parent": str(parent_raw) if parent_raw else None,
+                    "methods": [str(m) for m in methods_raw[:6]] if isinstance(methods_raw, list) else [],
+                    "active": bool(cl.get("active", False)),
+                }
+            )
+    if not classes_out:
+        classes_out = [
+            {"name": "Base", "parent": None, "methods": ["ejecutar()"], "active": False},
+            {"name": "Subclase", "parent": "Base", "methods": ["@Override ejecutar()"], "active": True},
+        ]
+
+    refs_out: list[dict[str, str]] = []
+    raw_refs = st.get("references")
+    if isinstance(raw_refs, list):
+        for rf in raw_refs[:6]:
+            if not isinstance(rf, dict):
+                continue
+            refs_out.append(
+                {
+                    "var_name": str(rf.get("var_name") or "ref"),
+                    "static_type": str(rf.get("static_type") or classes_out[0]["name"]),
+                    "dynamic_type": str(rf.get("dynamic_type") or classes_out[-1]["name"]),
+                    "heap_id": str(rf.get("heap_id") or "obj1"),
+                }
+            )
+
+    heap_out: list[dict[str, Any]] = []
+    raw_heap = st.get("heap_objects")
+    if isinstance(raw_heap, list):
+        for h_idx, hp in enumerate(raw_heap[:6]):
+            if not isinstance(hp, dict):
+                continue
+            fields_out: list[dict[str, str]] = []
+            raw_fields = hp.get("fields")
+            if isinstance(raw_fields, list):
+                for fld in raw_fields[:8]:
+                    if isinstance(fld, dict):
+                        fields_out.append(
+                            {
+                                "name": str(fld.get("name") or "estado"),
+                                "value": str(fld.get("value") if fld.get("value") is not None else ""),
+                            }
+                        )
+            heap_out.append(
+                {
+                    "id": str(hp.get("id") or f"obj{h_idx + 1}"),
+                    "class_name": str(hp.get("class_name") or classes_out[-1]["name"]),
+                    "fields": fields_out,
+                }
+            )
+
+    raw_disp = st.get("dispatch") if isinstance(st.get("dispatch"), dict) else {}
+    raw_lookup = raw_disp.get("lookup_path")
+    lookup_out = (
+        [str(x) for x in raw_lookup[:6]]
+        if isinstance(raw_lookup, list) and raw_lookup
+        else [classes_out[-1]["name"]]
+    )
+    dispatch_out = {
+        "call_expr": str(raw_disp.get("call_expr") or "ref.ejecutar()"),
+        "static_check": str(raw_disp.get("static_check") or f"{classes_out[0]['name']}.ejecutar() verificado"),
+        "lookup_path": lookup_out,
+        "resolved_class": str(raw_disp.get("resolved_class") or lookup_out[-1]),
+        "resolved_method": str(raw_disp.get("resolved_method") or "ejecutar()"),
+        "via_super": bool(raw_disp.get("via_super", False)),
+    }
+
+    return {
+        "classes": classes_out,
+        "references": refs_out,
+        "heap_objects": heap_out,
+        "dispatch": dispatch_out,
+    }
+
+
+def _sanitize_error_contrast_state(raw_state: Any, max_line: int) -> dict[str, Any]:
+    st = raw_state if isinstance(raw_state, dict) else {}
+    valid_phases = ("running", "exception_thrown", "stack_unwinding", "caught", "contrast_fix")
+    raw_phase = str(st.get("phase") or "running").strip().lower()
+    phase = raw_phase if raw_phase in valid_phases else "running"
+
+    raw_view = str(st.get("code_view") or "").strip().lower()
+    if raw_view in ("broken", "fixed"):
+        code_view = raw_view
+    else:
+        code_view = "fixed" if phase == "contrast_fix" else "broken"
+
+    exc_out: dict[str, Any] | None = None
+    raw_exc = st.get("exception")
+    if isinstance(raw_exc, dict) and (raw_exc.get("type") or raw_exc.get("message")):
+        try:
+            exc_line = max(1, min(max_line, int(raw_exc.get("line") or 1)))
+        except (TypeError, ValueError):
+            exc_line = 1
+        exc_out = {
+            "type": str(raw_exc.get("type") or "RuntimeException"),
+            "message": str(raw_exc.get("message") or "Operación inválida en tiempo de ejecución"),
+            "line": exc_line,
+        }
+
+    valid_statuses = ("active", "crashed", "unwinding", "catching", "ok")
+    stack_out: list[dict[str, Any]] = []
+    raw_stack = st.get("call_stack")
+    if isinstance(raw_stack, list):
+        for fr in raw_stack[:8]:
+            if not isinstance(fr, dict):
+                continue
+            raw_st = str(fr.get("status") or "active").strip().lower()
+            st_val = raw_st if raw_st in valid_statuses else "active"
+            try:
+                fr_line = max(1, min(max_line, int(fr.get("line") or 1)))
+            except (TypeError, ValueError):
+                fr_line = 1
+            stack_out.append(
+                {
+                    "frame": str(fr.get("frame") or "main()"),
+                    "status": st_val,
+                    "line": fr_line,
+                }
+            )
+    if not stack_out:
+        default_status = "ok" if code_view == "fixed" else ("crashed" if phase == "exception_thrown" else "active")
+        stack_out = [{"frame": "main()", "status": default_status, "line": 1}]
+
+    raw_contrast = st.get("contrast") if isinstance(st.get("contrast"), dict) else {}
+    contrast_out = {
+        "bug_cause": str(raw_contrast.get("bug_cause") or "Falta validación previa antes de desreferenciar u operar."),
+        "broken_line": str(raw_contrast.get("broken_line") or "return texto.trim().toUpperCase();"),
+        "fixed_line": str(raw_contrast.get("fixed_line") or "if (texto == null) return \"\";"),
+        "fix_explanation": str(
+            raw_contrast.get("fix_explanation")
+            or "La guarda explícita evita disparar la excepción y mantiene el invariante seguro."
+        ),
+    }
+
+    return {
+        "phase": phase,
+        "code_view": code_view,
+        "exception": exc_out,
+        "call_stack": stack_out,
+        "contrast": contrast_out,
+    }
+
+
+def _sanitize_data_structure_state(raw_state: Any, caption: str) -> dict[str, Any]:
+    st = raw_state if isinstance(raw_state, dict) else {}
+    valid_types = ("array", "arraylist", "hashmap", "linkedlist")
+    raw_type = str(st.get("structure_type") or "arraylist").strip().lower()
+    structure_type = raw_type if raw_type in valid_types else "arraylist"
+
+    cells_out: list[dict[str, Any]] = []
+    valid_cell_states = ("normal", "active", "changed", "empty")
+    raw_cells = st.get("cells")
+    if isinstance(raw_cells, list):
+        for c_idx, cell in enumerate(raw_cells[:12]):
+            if not isinstance(cell, dict):
+                continue
+            try:
+                idx_val = int(cell.get("index", c_idx))
+            except (TypeError, ValueError):
+                idx_val = c_idx
+            c_state = str(cell.get("state") or "normal").strip().lower()
+            if c_state not in valid_cell_states:
+                c_state = "normal"
+            nxt = cell.get("next_index")
+            try:
+                nxt_val: int | None = int(nxt) if nxt is not None else None
+            except (TypeError, ValueError):
+                nxt_val = None
+            cells_out.append(
+                {
+                    "index": idx_val,
+                    "value": str(cell.get("value") if cell.get("value") is not None else ""),
+                    "state": c_state,
+                    "next_index": nxt_val,
+                }
+            )
+
+    pointers_out: list[dict[str, Any]] = []
+    raw_ptrs = st.get("pointers")
+    if isinstance(raw_ptrs, list):
+        for ptr in raw_ptrs[:6]:
+            if not isinstance(ptr, dict):
+                continue
+            try:
+                p_idx = int(ptr.get("index") or 0)
+            except (TypeError, ValueError):
+                p_idx = 0
+            pointers_out.append({"name": str(ptr.get("name") or "i"), "index": p_idx})
+
+    buckets_out: list[dict[str, Any]] = []
+    raw_buckets = st.get("buckets")
+    if isinstance(raw_buckets, list):
+        for b_idx, bk in enumerate(raw_buckets[:8]):
+            if not isinstance(bk, dict):
+                continue
+            try:
+                b_num = int(bk.get("bucket", b_idx))
+            except (TypeError, ValueError):
+                b_num = b_idx
+            entries_out: list[dict[str, Any]] = []
+            raw_entries = bk.get("entries")
+            if isinstance(raw_entries, list):
+                for ent in raw_entries[:6]:
+                    if not isinstance(ent, dict):
+                        continue
+                    entries_out.append(
+                        {
+                            "key": str(ent.get("key") or ""),
+                            "value": str(ent.get("value") or ""),
+                            "hash_formula": str(ent.get("hash_formula") or f"hash % 4 = {b_num}"),
+                            "active": bool(ent.get("active", False)),
+                        }
+                    )
+            buckets_out.append({"bucket": b_num, "entries": entries_out})
+
+    try:
+        size_val = max(0, int(st.get("size", len([c for c in cells_out if c["state"] != "empty"]))))
+    except (TypeError, ValueError):
+        size_val = 0
+    try:
+        cap_val = max(size_val, int(st.get("capacity", max(4, len(cells_out) or len(buckets_out) or 4))))
+    except (TypeError, ValueError):
+        cap_val = max(4, size_val)
+
+    return {
+        "structure_type": structure_type,
+        "label": str(st.get("label") or structure_type),
+        "size": size_val,
+        "capacity": cap_val,
+        "cells": cells_out,
+        "pointers": pointers_out,
+        "buckets": buckets_out,
+        "operation": str(st.get("operation") or caption),
+    }
+
+
+def _sanitize_sql_pipeline_state(raw_state: Any, caption: str) -> dict[str, Any]:
+    st = raw_state if isinstance(raw_state, dict) else {}
+    valid_clauses = ("FROM", "JOIN", "WHERE", "GROUP BY", "HAVING", "SELECT", "ORDER BY")
+    raw_clause = str(st.get("active_clause") or "FROM").strip().upper()
+    if raw_clause in ("INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FROM/JOIN"):
+        raw_clause = "JOIN" if "JOIN" in raw_clause and raw_clause != "FROM/JOIN" else "FROM"
+    active_clause = raw_clause if raw_clause in valid_clauses else "FROM"
+
+    raw_stages = st.get("pipeline_stages")
+    stages_out = (
+        [str(x) for x in raw_stages[:8] if str(x).strip()]
+        if isinstance(raw_stages, list) and raw_stages
+        else list(_SQL_PIPELINE_STAGES)
+    )
+
+    raw_cols = st.get("columns")
+    cols_out = [str(c) for c in raw_cols[:8]] if isinstance(raw_cols, list) and raw_cols else ["id", "valor"]
+
+    valid_row_statuses = ("kept", "filtered_out", "grouped", "projected")
+    rows_out: list[dict[str, Any]] = []
+    raw_rows = st.get("rows")
+    if isinstance(raw_rows, list):
+        for rw in raw_rows[:12]:
+            if not isinstance(rw, dict):
+                continue
+            raw_vals = rw.get("values")
+            vals = [str(v) for v in raw_vals[: len(cols_out)]] if isinstance(raw_vals, list) else []
+            while len(vals) < len(cols_out):
+                vals.append("")
+            r_status = str(rw.get("status") or "kept").strip().lower()
+            if r_status not in valid_row_statuses:
+                r_status = "kept"
+            gk = rw.get("group_key")
+            rows_out.append(
+                {
+                    "values": vals,
+                    "status": r_status,
+                    "group_key": str(gk) if gk is not None and str(gk) != "" else None,
+                }
+            )
+
+    return {
+        "active_clause": active_clause,
+        "pipeline_stages": stages_out,
+        "clause_sql": str(st.get("clause_sql") or active_clause),
+        "columns": cols_out,
+        "rows": rows_out,
+        "note": str(st.get("note") or caption),
+    }
+
+
+def _sanitize_state_for_variant(
+    variant: str,
+    raw_state: Any,
+    step_idx: int,
+    caption: str,
+    max_line: int,
+) -> dict[str, Any]:
+    if variant == "oop_dispatch":
+        return _sanitize_oop_dispatch_state(raw_state)
+    if variant == "error_contrast":
+        return _sanitize_error_contrast_state(raw_state, max_line)
+    if variant == "data_structure":
+        return _sanitize_data_structure_state(raw_state, caption)
+    if variant == "sql_pipeline":
+        return _sanitize_sql_pipeline_state(raw_state, caption)
+    return _sanitize_execution_trace_state(raw_state, step_idx, caption)
+
+
+def _default_checkpoint_for_variant(variant: str) -> dict[str, Any]:
+    if variant == "oop_dispatch":
+        return {
+            "enabled": True,
+            "question": "¿Qué versión del método ejecuta la JVM en tiempo de ejecución?",
+            "options": [
+                "La versión sobrescrita (@Override) del objeto real en el heap",
+                "La versión de la clase padre según el tipo estático",
+                "Falla en compilación por ambigüedad de tipos",
+            ],
+            "correct_index": 0,
+            "explanation": "El despacho dinámico resuelve el método según el tipo dinámico del objeto en el heap.",
+        }
+    if variant == "error_contrast":
+        return {
+            "enabled": True,
+            "question": "¿Qué ocurre en la pila de llamadas al lanzarse la excepción?",
+            "options": [
+                "Desenrolla marcos activos hasta hallar un catch compatible",
+                "Ignora la línea con fallo y continúa en la siguiente instrucción",
+                "Reinicia automáticamente el método desde la primera línea",
+            ],
+            "correct_index": 0,
+            "explanation": "El stack unwinding desapila marcos hasta encontrar un manejador catch compatible.",
+        }
+    if variant == "data_structure":
+        return {
+            "enabled": True,
+            "question": "¿Qué garantiza actualizar referencias e índices en orden correcto?",
+            "options": [
+                "Conservar acceso O(1)/enlaces íntegros sin perder elementos",
+                "Reducir el tamaño físico en disco a cero bytes",
+                "Ordenar alfabéticamente toda la estructura en cada lectura",
+            ],
+            "correct_index": 0,
+            "explanation": "Mantener tamaño, capacidad y punteros sincronizados preserva el invariante de la colección.",
+        }
+    if variant == "sql_pipeline":
+        return {
+            "enabled": True,
+            "question": "¿Qué cláusula filtra grupos después de aplicar GROUP BY?",
+            "options": [
+                "HAVING sobre funciones de agregación del grupo",
+                "WHERE antes de construir las tablas origen",
+                "ORDER BY eliminando filas nulas automáticamente",
+            ],
+            "correct_index": 0,
+            "explanation": "WHERE filtra filas individuales antes de agrupar; HAVING filtra grupos ya agregados.",
+        }
+    return {
+        "enabled": True,
+        "question": "¿Qué almacena la variable de referencia en el marco de pila?",
+        "options": [
+            "La dirección del objeto en el heap (@0x1A), no una copia completa",
+            "Una copia independiente de todos los atributos del objeto",
+            "Únicamente el nombre textual de la clase compilada",
+        ],
+        "correct_index": 0,
+        "explanation": "En el stack vive la referencia que apunta a la instancia real alojada en el heap.",
+    }
+
+
+def _disabled_checkpoint() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "question": "",
+        "options": [],
+        "correct_index": 0,
+        "explanation": "",
+    }
+
+
+def _build_fallback_code_storyboard(
+    *,
+    variant: str,
+    language: str,
+    node_title: str,
+    node_summary: str,
+    story_script: str,
+) -> dict[str, Any]:
+    """Construye un storyboard determinista completo y rico para cualquiera de las 5 variantes."""
+    clean_title = (node_title or "Traza Interactiva").strip()[:80]
+    norm_context = _strip_accents_lower(f"{node_title} {node_summary} {story_script}")
+
+    if variant == "sql_pipeline":
+        source_code = (
+            "SELECT\n"
+            "    d.nombre AS depto,\n"
+            "    COUNT(e.id) AS total,\n"
+            "    AVG(e.sueldo) AS promedio\n"
+            "FROM empleados e\n"
+            "INNER JOIN departamentos d ON e.depto_id = d.id\n"
+            "WHERE e.activo = 1\n"
+            "GROUP BY d.nombre\n"
+            "HAVING COUNT(e.id) >= 2\n"
+            "ORDER BY promedio DESC;"
+        )
+        subgoals = [
+            {"id": "sg1", "label": "1. Origen y combinación (FROM / JOIN)"},
+            {"id": "sg2", "label": "2. Filtrado y agrupación (WHERE / GROUP BY)"},
+            {"id": "sg3", "label": "3. Filtro de grupos y proyección (HAVING / SELECT)"},
+        ]
+        raw_steps: list[dict[str, Any]] = [
+            {
+                "subgoal_id": "sg1",
+                "active_lines": [5],
+                "caption": "FROM carga las filas base de la tabla empleados.",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "active_clause": "FROM",
+                    "pipeline_stages": list(_SQL_PIPELINE_STAGES),
+                    "clause_sql": "FROM empleados e",
+                    "columns": ["e.id", "e.nombre", "e.depto_id", "e.activo", "e.sueldo"],
+                    "rows": [
+                        {"values": ["1", "Ana", "10", "1", "1200"], "status": "kept", "group_key": None},
+                        {"values": ["2", "Luis", "10", "1", "1500"], "status": "kept", "group_key": None},
+                        {"values": ["3", "Mar", "20", "0", "1100"], "status": "kept", "group_key": None},
+                        {"values": ["4", "Sol", "20", "1", "1400"], "status": "kept", "group_key": None},
+                    ],
+                    "note": "El motor relacional comienza leyendo las tuplas fuente antes de proyectar SELECT.",
+                },
+            },
+            {
+                "subgoal_id": "sg1",
+                "active_lines": [6],
+                "caption": "INNER JOIN enlaza cada empleado con su departamento.",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "active_clause": "JOIN",
+                    "pipeline_stages": list(_SQL_PIPELINE_STAGES),
+                    "clause_sql": "INNER JOIN departamentos d ON e.depto_id = d.id",
+                    "columns": ["e.nombre", "d.nombre", "e.activo", "e.sueldo"],
+                    "rows": [
+                        {"values": ["Ana", "Datos", "1", "1200"], "status": "kept", "group_key": None},
+                        {"values": ["Luis", "Datos", "1", "1500"], "status": "kept", "group_key": None},
+                        {"values": ["Mar", "Redes", "0", "1100"], "status": "kept", "group_key": None},
+                        {"values": ["Sol", "Redes", "1", "1400"], "status": "kept", "group_key": None},
+                    ],
+                    "note": "Cada clave foránea e.depto_id empareja su fila con d.id.",
+                },
+            },
+            {
+                "subgoal_id": "sg2",
+                "active_lines": [7],
+                "caption": "WHERE descarta empleados inactivos antes de agrupar.",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "active_clause": "WHERE",
+                    "pipeline_stages": list(_SQL_PIPELINE_STAGES),
+                    "clause_sql": "WHERE e.activo = 1",
+                    "columns": ["e.nombre", "d.nombre", "e.activo", "e.sueldo"],
+                    "rows": [
+                        {"values": ["Ana", "Datos", "1", "1200"], "status": "kept", "group_key": None},
+                        {"values": ["Luis", "Datos", "1", "1500"], "status": "kept", "group_key": None},
+                        {"values": ["Mar", "Redes", "0", "1100"], "status": "filtered_out", "group_key": None},
+                        {"values": ["Sol", "Redes", "1", "1400"], "status": "kept", "group_key": None},
+                    ],
+                    "note": "Mar queda fuera porque e.activo = 0 no cumple el predicado WHERE.",
+                },
+            },
+            {
+                "subgoal_id": "sg2",
+                "active_lines": [8],
+                "caption": "GROUP BY colapsa filas activas por nombre de departamento.",
+                "checkpoint": _default_checkpoint_for_variant("sql_pipeline"),
+                "state": {
+                    "active_clause": "GROUP BY",
+                    "pipeline_stages": list(_SQL_PIPELINE_STAGES),
+                    "clause_sql": "GROUP BY d.nombre",
+                    "columns": ["d.nombre", "COUNT(e.id)", "AVG(e.sueldo)"],
+                    "rows": [
+                        {"values": ["Datos", "2", "1350"], "status": "grouped", "group_key": "Datos"},
+                        {"values": ["Redes", "1", "1400"], "status": "grouped", "group_key": "Redes"},
+                    ],
+                    "note": "Datos reúne 2 filas activas; Redes queda con solo 1 fila activa.",
+                },
+            },
+            {
+                "subgoal_id": "sg3",
+                "active_lines": [9],
+                "caption": "HAVING filtra grupos exigiendo al menos dos integrantes.",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "active_clause": "HAVING",
+                    "pipeline_stages": list(_SQL_PIPELINE_STAGES),
+                    "clause_sql": "HAVING COUNT(e.id) >= 2",
+                    "columns": ["d.nombre", "COUNT(e.id)", "AVG(e.sueldo)"],
+                    "rows": [
+                        {"values": ["Datos", "2", "1350"], "status": "kept", "group_key": "Datos"},
+                        {"values": ["Redes", "1", "1400"], "status": "filtered_out", "group_key": "Redes"},
+                    ],
+                    "note": "Redes se descarta en HAVING porque su conteo agregado es 1 (< 2).",
+                },
+            },
+            {
+                "subgoal_id": "sg3",
+                "active_lines": [1, 2, 3, 4, 10],
+                "caption": "SELECT proyecta alias finales y ORDER BY ordena resultado.",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "active_clause": "SELECT",
+                    "pipeline_stages": list(_SQL_PIPELINE_STAGES),
+                    "clause_sql": "SELECT d.nombre AS depto, COUNT(e.id) AS total, AVG(e.sueldo) AS promedio",
+                    "columns": ["depto", "total", "promedio"],
+                    "rows": [
+                        {"values": ["Datos", "2", "1350"], "status": "projected", "group_key": "Datos"},
+                    ],
+                    "note": "Recién al final se proyectan las columnas definitivas y se ordena la salida.",
+                },
+            },
+        ]
+        s_idx = _compute_sentence_indices([None] * len(raw_steps), story_script, len(raw_steps))
+        for i, st in enumerate(raw_steps):
+            st["index"] = i
+            st["sentence_index"] = s_idx[i]
+        return {
+            "variant": "sql_pipeline",
+            "language": "sql",
+            "title": clean_title,
+            "source_code": source_code,
+            "fixed_code": None,
+            "subgoals": subgoals,
+            "steps": raw_steps,
+        }
+
+    if variant == "oop_dispatch":
+        source_code = (
+            "class Notificador {\n"
+            "    public String enviar(String msg) { return \"[BASE] \" + msg; }\n"
+            "}\n"
+            "class NotificadorPush extends Notificador {\n"
+            "    @Override\n"
+            "    public String enviar(String msg) {\n"
+            "        return super.enviar(msg) + \" -> PUSH\";\n"
+            "    }\n"
+            "}\n"
+            "public class DemoDespacho {\n"
+            "    public static void main(String[] args) {\n"
+            "        Notificador canal = new NotificadorPush();\n"
+            "        String res = canal.enviar(\"Alerta\");\n"
+            "    }\n"
+            "}"
+        )
+        subgoals = [
+            {"id": "sg1", "label": "1. Jerarquía y sobrescritura (@Override)"},
+            {"id": "sg2", "label": "2. Referencia polimórfica (tipo estático vs dinámico)"},
+            {"id": "sg3", "label": "3. Despacho dinámico y delegación con super"},
+        ]
+        raw_steps = [
+            {
+                "subgoal_id": "sg1",
+                "active_lines": [1, 4, 5],
+                "caption": "NotificadorPush extiende Notificador y sobrescribe enviar con @Override.",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "classes": [
+                        {"name": "Notificador", "parent": None, "methods": ["enviar(String)"], "active": True},
+                        {
+                            "name": "NotificadorPush",
+                            "parent": "Notificador",
+                            "methods": ["@Override enviar(String)"],
+                            "active": True,
+                        },
+                    ],
+                    "references": [],
+                    "heap_objects": [],
+                    "dispatch": {
+                        "call_expr": "definición de jerarquía",
+                        "static_check": "Firma enviar(String) compatible en ambas clases",
+                        "lookup_path": ["NotificadorPush", "Notificador"],
+                        "resolved_class": "NotificadorPush",
+                        "resolved_method": "enviar(String)",
+                        "via_super": False,
+                    },
+                },
+            },
+            {
+                "subgoal_id": "sg2",
+                "active_lines": [12],
+                "caption": "Se instancia NotificadorPush en el heap bajo referencia Notificador.",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "classes": [
+                        {"name": "Notificador", "parent": None, "methods": ["enviar(String)"], "active": False},
+                        {
+                            "name": "NotificadorPush",
+                            "parent": "Notificador",
+                            "methods": ["@Override enviar(String)"],
+                            "active": True,
+                        },
+                    ],
+                    "references": [
+                        {
+                            "var_name": "canal",
+                            "static_type": "Notificador",
+                            "dynamic_type": "NotificadorPush",
+                            "heap_id": "obj1",
+                        }
+                    ],
+                    "heap_objects": [
+                        {"id": "obj1", "class_name": "NotificadorPush", "fields": [{"name": "modo", "value": "\"PUSH\""}]}
+                    ],
+                    "dispatch": {
+                        "call_expr": "new NotificadorPush()",
+                        "static_check": "Upcasting implícito NotificadorPush -> Notificador válido",
+                        "lookup_path": ["NotificadorPush"],
+                        "resolved_class": "NotificadorPush",
+                        "resolved_method": "<init>()",
+                        "via_super": False,
+                    },
+                },
+            },
+            {
+                "subgoal_id": "sg2",
+                "active_lines": [13],
+                "caption": "El compilador valida canal.enviar usando el tipo estático Notificador.",
+                "checkpoint": _default_checkpoint_for_variant("oop_dispatch"),
+                "state": {
+                    "classes": [
+                        {"name": "Notificador", "parent": None, "methods": ["enviar(String)"], "active": True},
+                        {
+                            "name": "NotificadorPush",
+                            "parent": "Notificador",
+                            "methods": ["@Override enviar(String)"],
+                            "active": False,
+                        },
+                    ],
+                    "references": [
+                        {
+                            "var_name": "canal",
+                            "static_type": "Notificador",
+                            "dynamic_type": "NotificadorPush",
+                            "heap_id": "obj1",
+                        }
+                    ],
+                    "heap_objects": [
+                        {"id": "obj1", "class_name": "NotificadorPush", "fields": [{"name": "modo", "value": "\"PUSH\""}]}
+                    ],
+                    "dispatch": {
+                        "call_expr": "canal.enviar(\"Alerta\")",
+                        "static_check": "Notificador declara enviar(String): compilación exitosa",
+                        "lookup_path": ["Notificador"],
+                        "resolved_class": "NotificadorPush",
+                        "resolved_method": "enviar(String)",
+                        "via_super": False,
+                    },
+                },
+            },
+            {
+                "subgoal_id": "sg3",
+                "active_lines": [6, 7],
+                "caption": "En ejecución, la JVM despacha NotificadorPush.enviar desde obj1.",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "classes": [
+                        {"name": "Notificador", "parent": None, "methods": ["enviar(String)"], "active": False},
+                        {
+                            "name": "NotificadorPush",
+                            "parent": "Notificador",
+                            "methods": ["@Override enviar(String)"],
+                            "active": True,
+                        },
+                    ],
+                    "references": [
+                        {
+                            "var_name": "canal",
+                            "static_type": "Notificador",
+                            "dynamic_type": "NotificadorPush",
+                            "heap_id": "obj1",
+                        }
+                    ],
+                    "heap_objects": [
+                        {"id": "obj1", "class_name": "NotificadorPush", "fields": [{"name": "modo", "value": "\"PUSH\""}]}
+                    ],
+                    "dispatch": {
+                        "call_expr": "canal.enviar(\"Alerta\")",
+                        "static_check": "Notificador.enviar(String)",
+                        "lookup_path": ["NotificadorPush"],
+                        "resolved_class": "NotificadorPush",
+                        "resolved_method": "NotificadorPush.enviar(String)",
+                        "via_super": False,
+                    },
+                },
+            },
+            {
+                "subgoal_id": "sg3",
+                "active_lines": [2, 7],
+                "caption": "super.enviar delega explícitamente la lógica base hacia Notificador.",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "classes": [
+                        {"name": "Notificador", "parent": None, "methods": ["enviar(String)"], "active": True},
+                        {
+                            "name": "NotificadorPush",
+                            "parent": "Notificador",
+                            "methods": ["@Override enviar(String)"],
+                            "active": True,
+                        },
+                    ],
+                    "references": [
+                        {
+                            "var_name": "canal",
+                            "static_type": "Notificador",
+                            "dynamic_type": "NotificadorPush",
+                            "heap_id": "obj1",
+                        }
+                    ],
+                    "heap_objects": [
+                        {"id": "obj1", "class_name": "NotificadorPush", "fields": [{"name": "modo", "value": "\"PUSH\""}]}
+                    ],
+                    "dispatch": {
+                        "call_expr": "super.enviar(\"Alerta\")",
+                        "static_check": "Acceso a superclase directa Notificador",
+                        "lookup_path": ["NotificadorPush", "Notificador"],
+                        "resolved_class": "Notificador",
+                        "resolved_method": "Notificador.enviar(String)",
+                        "via_super": True,
+                    },
+                },
+            },
+            {
+                "subgoal_id": "sg3",
+                "active_lines": [13],
+                "caption": "Retorna el resultado combinado en res sin romper polimorfismo.",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "classes": [
+                        {"name": "Notificador", "parent": None, "methods": ["enviar(String)"], "active": False},
+                        {
+                            "name": "NotificadorPush",
+                            "parent": "Notificador",
+                            "methods": ["@Override enviar(String)"],
+                            "active": True,
+                        },
+                    ],
+                    "references": [
+                        {
+                            "var_name": "canal",
+                            "static_type": "Notificador",
+                            "dynamic_type": "NotificadorPush",
+                            "heap_id": "obj1",
+                        }
+                    ],
+                    "heap_objects": [
+                        {
+                            "id": "obj1",
+                            "class_name": "NotificadorPush",
+                            "fields": [{"name": "ultimoEnvio", "value": "\"[BASE] Alerta -> PUSH\""}],
+                        }
+                    ],
+                    "dispatch": {
+                        "call_expr": "res = \"[BASE] Alerta -> PUSH\"",
+                        "static_check": "Retorno String asignado correctamente",
+                        "lookup_path": ["NotificadorPush", "Notificador"],
+                        "resolved_class": "NotificadorPush",
+                        "resolved_method": "enviar(String)",
+                        "via_super": True,
+                    },
+                },
+            },
+        ]
+        s_idx = _compute_sentence_indices([None] * len(raw_steps), story_script, len(raw_steps))
+        for i, st in enumerate(raw_steps):
+            st["index"] = i
+            st["sentence_index"] = s_idx[i]
+        return {
+            "variant": "oop_dispatch",
+            "language": language if language in ("java", "python") else "java",
+            "title": clean_title,
+            "source_code": source_code,
+            "fixed_code": None,
+            "subgoals": subgoals,
+            "steps": raw_steps,
+        }
+
+    if variant == "error_contrast":
+        source_code = (
+            "public class ValidadorCodigo {\n"
+            "    static String normalizar(String codigo) {\n"
+            "        return codigo.trim().toUpperCase();\n"
+            "    }\n"
+            "    public static void main(String[] args) {\n"
+            "        try {\n"
+            "            String limpio = normalizar(null);\n"
+            "            System.out.println(limpio);\n"
+            "        } catch (NullPointerException e) {\n"
+            "            System.out.println(\"Error: codigo nulo\");\n"
+            "        }\n"
+            "    }\n"
+            "}"
+        )
+        fixed_code = (
+            "public class ValidadorCodigo {\n"
+            "    static String normalizar(String codigo) {\n"
+            "        if (codigo == null) {\n"
+            "            return \"SIN_CODIGO\";\n"
+            "        }\n"
+            "        return codigo.trim().toUpperCase();\n"
+            "    }\n"
+            "    public static void main(String[] args) {\n"
+            "        String limpio = normalizar(null);\n"
+            "        System.out.println(limpio);\n"
+            "    }\n"
+            "}"
+        )
+        contrast_info = {
+            "bug_cause": "Se invoca codigo.trim() directamente cuando la referencia codigo es null.",
+            "broken_line": "return codigo.trim().toUpperCase();",
+            "fixed_line": "if (codigo == null) { return \"SIN_CODIGO\"; }",
+            "fix_explanation": "Validar null en la frontera del método evita lanzar NullPointerException innecesariamente.",
+        }
+        subgoals = [
+            {"id": "sg1", "label": "1. Ejecución hasta el punto de fallo"},
+            {"id": "sg2", "label": "2. Desenrollado de pila y captura (try / catch)"},
+            {"id": "sg3", "label": "3. Contraste con el código defensivo corregido"},
+        ]
+        raw_steps = [
+            {
+                "subgoal_id": "sg1",
+                "active_lines": [6, 7],
+                "caption": "main entra al bloque try e invoca normalizar(null).",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "phase": "running",
+                    "code_view": "broken",
+                    "exception": None,
+                    "call_stack": [
+                        {"frame": "main(String[])", "status": "active", "line": 7},
+                    ],
+                    "contrast": contrast_info,
+                },
+            },
+            {
+                "subgoal_id": "sg1",
+                "active_lines": [2, 3],
+                "caption": "normalizar recibe codigo = null e intenta ejecutar trim().",
+                "checkpoint": _default_checkpoint_for_variant("error_contrast"),
+                "state": {
+                    "phase": "running",
+                    "code_view": "broken",
+                    "exception": None,
+                    "call_stack": [
+                        {"frame": "main(String[])", "status": "active", "line": 7},
+                        {"frame": "normalizar(codigo=null)", "status": "active", "line": 3},
+                    ],
+                    "contrast": contrast_info,
+                },
+            },
+            {
+                "subgoal_id": "sg2",
+                "active_lines": [3],
+                "caption": "Desreferenciar null aborta línea 3 lanzando NullPointerException.",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "phase": "exception_thrown",
+                    "code_view": "broken",
+                    "exception": {
+                        "type": "NullPointerException",
+                        "message": "Cannot invoke String.trim() because codigo is null",
+                        "line": 3,
+                    },
+                    "call_stack": [
+                        {"frame": "main(String[])", "status": "active", "line": 7},
+                        {"frame": "normalizar(codigo=null)", "status": "crashed", "line": 3},
+                    ],
+                    "contrast": contrast_info,
+                },
+            },
+            {
+                "subgoal_id": "sg2",
+                "active_lines": [7, 8],
+                "caption": "La excepción desenrolla normalizar y salta println de línea 8.",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "phase": "stack_unwinding",
+                    "code_view": "broken",
+                    "exception": {
+                        "type": "NullPointerException",
+                        "message": "Cannot invoke String.trim() because codigo is null",
+                        "line": 3,
+                    },
+                    "call_stack": [
+                        {"frame": "main(String[])", "status": "catching", "line": 9},
+                        {"frame": "normalizar(codigo=null)", "status": "unwinding", "line": 3},
+                    ],
+                    "contrast": contrast_info,
+                },
+            },
+            {
+                "subgoal_id": "sg2",
+                "active_lines": [9, 10],
+                "caption": "El bloque catch intercepta la excepción y maneja el error.",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "phase": "caught",
+                    "code_view": "broken",
+                    "exception": {
+                        "type": "NullPointerException",
+                        "message": "Capturada en catch (NullPointerException e)",
+                        "line": 9,
+                    },
+                    "call_stack": [
+                        {"frame": "main(String[]) [catch]", "status": "catching", "line": 10},
+                    ],
+                    "contrast": contrast_info,
+                },
+            },
+            {
+                "subgoal_id": "sg3",
+                "active_lines": [3, 4, 5],
+                "caption": "Con guarda de null explícita el flujo termina sin excepción.",
+                "checkpoint": _disabled_checkpoint(),
+                "state": {
+                    "phase": "contrast_fix",
+                    "code_view": "fixed",
+                    "exception": None,
+                    "call_stack": [
+                        {"frame": "main(String[])", "status": "ok", "line": 10},
+                        {"frame": "normalizar(codigo=null)", "status": "ok", "line": 4},
+                    ],
+                    "contrast": contrast_info,
+                },
+            },
+        ]
+        s_idx = _compute_sentence_indices([None] * len(raw_steps), story_script, len(raw_steps))
+        for i, st in enumerate(raw_steps):
+            st["index"] = i
+            st["sentence_index"] = s_idx[i]
+        return {
+            "variant": "error_contrast",
+            "language": language if language in ("java", "python", "c") else "java",
+            "title": clean_title,
+            "source_code": source_code,
+            "fixed_code": fixed_code,
+            "subgoals": subgoals,
+            "steps": raw_steps,
+        }
+
+    if variant == "data_structure":
+        is_hashmap = bool(re.search(r"hashmap|bucket|diccionario|hashcode", norm_context))
+        if is_hashmap:
+            source_code = (
+                "import java.util.HashMap;\n"
+                "public class IndiceCursos {\n"
+                "    public static void main(String[] args) {\n"
+                "        HashMap<String, Integer> cupos = new HashMap<>(4);\n"
+                "        cupos.put(\"INF1\", 40);\n"
+                "        cupos.put(\"MAT2\", 35);\n"
+                "        cupos.put(\"INF1\", 45);\n"
+                "        int actual = cupos.get(\"INF1\");\n"
+                "    }\n"
+                "}"
+            )
+            subgoals = [
+                {"id": "sg1", "label": "1. Inicialización de tabla de buckets"},
+                {"id": "sg2", "label": "2. Inserción por función hash (put)"},
+                {"id": "sg3", "label": "3. Reemplazo de clave existente y consulta O(1)"},
+            ]
+            raw_steps = [
+                {
+                    "subgoal_id": "sg1",
+                    "active_lines": [4],
+                    "caption": "Reserva arreglo interno de 4 buckets inicialmente vacíos.",
+                    "checkpoint": _disabled_checkpoint(),
+                    "state": {
+                        "structure_type": "hashmap",
+                        "label": "cupos (HashMap<String, Integer>)",
+                        "size": 0,
+                        "capacity": 4,
+                        "cells": [],
+                        "pointers": [],
+                        "buckets": [
+                            {"bucket": 0, "entries": []},
+                            {"bucket": 1, "entries": []},
+                            {"bucket": 2, "entries": []},
+                            {"bucket": 3, "entries": []},
+                        ],
+                        "operation": "new HashMap<>(4)",
+                    },
+                },
+                {
+                    "subgoal_id": "sg2",
+                    "active_lines": [5],
+                    "caption": "Calcula hash de INF1 y guarda 40 en bucket 1.",
+                    "checkpoint": _disabled_checkpoint(),
+                    "state": {
+                        "structure_type": "hashmap",
+                        "label": "cupos (HashMap<String, Integer>)",
+                        "size": 1,
+                        "capacity": 4,
+                        "cells": [],
+                        "pointers": [{"name": "bucket", "index": 1}],
+                        "buckets": [
+                            {"bucket": 0, "entries": []},
+                            {
+                                "bucket": 1,
+                                "entries": [
+                                    {"key": "\"INF1\"", "value": "40", "hash_formula": "hash(\"INF1\") % 4 = 1", "active": True}
+                                ],
+                            },
+                            {"bucket": 2, "entries": []},
+                            {"bucket": 3, "entries": []},
+                        ],
+                        "operation": "put(\"INF1\", 40)",
+                    },
+                },
+                {
+                    "subgoal_id": "sg2",
+                    "active_lines": [6],
+                    "caption": "Calcula hash de MAT2 e inserta 35 en bucket 3.",
+                    "checkpoint": _default_checkpoint_for_variant("data_structure"),
+                    "state": {
+                        "structure_type": "hashmap",
+                        "label": "cupos (HashMap<String, Integer>)",
+                        "size": 2,
+                        "capacity": 4,
+                        "cells": [],
+                        "pointers": [{"name": "bucket", "index": 3}],
+                        "buckets": [
+                            {"bucket": 0, "entries": []},
+                            {
+                                "bucket": 1,
+                                "entries": [
+                                    {"key": "\"INF1\"", "value": "40", "hash_formula": "hash(\"INF1\") % 4 = 1", "active": False}
+                                ],
+                            },
+                            {"bucket": 2, "entries": []},
+                            {
+                                "bucket": 3,
+                                "entries": [
+                                    {"key": "\"MAT2\"", "value": "35", "hash_formula": "hash(\"MAT2\") % 4 = 3", "active": True}
+                                ],
+                            },
+                        ],
+                        "operation": "put(\"MAT2\", 35)",
+                    },
+                },
+                {
+                    "subgoal_id": "sg3",
+                    "active_lines": [7],
+                    "caption": "Clave INF1 coincide con equals(): sobrescribe valor 40 por 45.",
+                    "checkpoint": _disabled_checkpoint(),
+                    "state": {
+                        "structure_type": "hashmap",
+                        "label": "cupos (HashMap<String, Integer>)",
+                        "size": 2,
+                        "capacity": 4,
+                        "cells": [],
+                        "pointers": [{"name": "bucket", "index": 1}],
+                        "buckets": [
+                            {"bucket": 0, "entries": []},
+                            {
+                                "bucket": 1,
+                                "entries": [
+                                    {"key": "\"INF1\"", "value": "45", "hash_formula": "equals(\"INF1\") -> update", "active": True}
+                                ],
+                            },
+                            {"bucket": 2, "entries": []},
+                            {
+                                "bucket": 3,
+                                "entries": [
+                                    {"key": "\"MAT2\"", "value": "35", "hash_formula": "hash(\"MAT2\") % 4 = 3", "active": False}
+                                ],
+                            },
+                        ],
+                        "operation": "put(\"INF1\", 45) -> actualiza sin duplicar clave",
+                    },
+                },
+                {
+                    "subgoal_id": "sg3",
+                    "active_lines": [8],
+                    "caption": "get(\"INF1\") salta directo al bucket 1 en tiempo O(1).",
+                    "checkpoint": _disabled_checkpoint(),
+                    "state": {
+                        "structure_type": "hashmap",
+                        "label": "cupos (HashMap<String, Integer>)",
+                        "size": 2,
+                        "capacity": 4,
+                        "cells": [],
+                        "pointers": [{"name": "lookup", "index": 1}],
+                        "buckets": [
+                            {"bucket": 0, "entries": []},
+                            {
+                                "bucket": 1,
+                                "entries": [
+                                    {"key": "\"INF1\"", "value": "45", "hash_formula": "bucket 1 -> retorna 45", "active": True}
+                                ],
+                            },
+                            {"bucket": 2, "entries": []},
+                            {
+                                "bucket": 3,
+                                "entries": [
+                                    {"key": "\"MAT2\"", "value": "35", "hash_formula": "hash(\"MAT2\") % 4 = 3", "active": False}
+                                ],
+                            },
+                        ],
+                        "operation": "get(\"INF1\") -> 45",
+                    },
+                },
+                {
+                    "subgoal_id": "sg3",
+                    "active_lines": [8, 9],
+                    "caption": "La consulta finaliza conservando tamaño 2 y claves únicas.",
+                    "checkpoint": _disabled_checkpoint(),
+                    "state": {
+                        "structure_type": "hashmap",
+                        "label": "cupos (HashMap<String, Integer>)",
+                        "size": 2,
+                        "capacity": 4,
+                        "cells": [],
+                        "pointers": [],
+                        "buckets": [
+                            {"bucket": 0, "entries": []},
+                            {
+                                "bucket": 1,
+                                "entries": [
+                                    {"key": "\"INF1\"", "value": "45", "hash_formula": "hash % 4 = 1", "active": False}
+                                ],
+                            },
+                            {"bucket": 2, "entries": []},
+                            {
+                                "bucket": 3,
+                                "entries": [
+                                    {"key": "\"MAT2\"", "value": "35", "hash_formula": "hash % 4 = 3", "active": False}
+                                ],
+                            },
+                        ],
+                        "operation": "actual = 45 (invariante intacto)",
+                    },
+                },
+            ]
+        else:
+            source_code = (
+                "import java.util.ArrayList;\n"
+                "public class ColaTareas {\n"
+                "    public static void main(String[] args) {\n"
+                "        ArrayList<String> tareas = new ArrayList<>(4);\n"
+                "        tareas.add(\"Diseño\");\n"
+                "        tareas.add(\"Código\");\n"
+                "        tareas.add(\"Tests\");\n"
+                "        tareas.set(1, \"Refactor\");\n"
+                "        tareas.remove(0);\n"
+                "    }\n"
+                "}"
+            )
+            subgoals = [
+                {"id": "sg1", "label": "1. Reserva contigua e inserción al final (add)"},
+                {"id": "sg2", "label": "2. Acceso y mutación directa por índice (set)"},
+                {"id": "sg3", "label": "3. Eliminación y desplazamiento a la izquierda (remove)"},
+            ]
+            raw_steps = [
+                {
+                    "subgoal_id": "sg1",
+                    "active_lines": [4],
+                    "caption": "Crea ArrayList con capacidad inicial para cuatro referencias contiguas.",
+                    "checkpoint": _disabled_checkpoint(),
+                    "state": {
+                        "structure_type": "arraylist",
+                        "label": "tareas (ArrayList<String>)",
+                        "size": 0,
+                        "capacity": 4,
+                        "cells": [
+                            {"index": 0, "value": "", "state": "empty", "next_index": None},
+                            {"index": 1, "value": "", "state": "empty", "next_index": None},
+                            {"index": 2, "value": "", "state": "empty", "next_index": None},
+                            {"index": 3, "value": "", "state": "empty", "next_index": None},
+                        ],
+                        "pointers": [{"name": "size", "index": 0}],
+                        "buckets": [],
+                        "operation": "new ArrayList<>(4)",
+                    },
+                },
+                {
+                    "subgoal_id": "sg1",
+                    "active_lines": [5, 6],
+                    "caption": "Inserta Diseño en índice 0 y Código en índice 1.",
+                    "checkpoint": _disabled_checkpoint(),
+                    "state": {
+                        "structure_type": "arraylist",
+                        "label": "tareas (ArrayList<String>)",
+                        "size": 2,
+                        "capacity": 4,
+                        "cells": [
+                            {"index": 0, "value": "\"Diseño\"", "state": "normal", "next_index": None},
+                            {"index": 1, "value": "\"Código\"", "state": "changed", "next_index": None},
+                            {"index": 2, "value": "", "state": "empty", "next_index": None},
+                            {"index": 3, "value": "", "state": "empty", "next_index": None},
+                        ],
+                        "pointers": [{"name": "size", "index": 2}],
+                        "buckets": [],
+                        "operation": "add(\"Diseño\"), add(\"Código\")",
+                    },
+                },
+                {
+                    "subgoal_id": "sg1",
+                    "active_lines": [7],
+                    "caption": "Agrega Tests al final ocupando el índice 2 en O(1).",
+                    "checkpoint": _default_checkpoint_for_variant("data_structure"),
+                    "state": {
+                        "structure_type": "arraylist",
+                        "label": "tareas (ArrayList<String>)",
+                        "size": 3,
+                        "capacity": 4,
+                        "cells": [
+                            {"index": 0, "value": "\"Diseño\"", "state": "normal", "next_index": None},
+                            {"index": 1, "value": "\"Código\"", "state": "normal", "next_index": None},
+                            {"index": 2, "value": "\"Tests\"", "state": "changed", "next_index": None},
+                            {"index": 3, "value": "", "state": "empty", "next_index": None},
+                        ],
+                        "pointers": [{"name": "size", "index": 3}],
+                        "buckets": [],
+                        "operation": "add(\"Tests\")",
+                    },
+                },
+                {
+                    "subgoal_id": "sg2",
+                    "active_lines": [8],
+                    "caption": "set(1, \"Refactor\") reemplaza directo la celda 1 en O(1).",
+                    "checkpoint": _disabled_checkpoint(),
+                    "state": {
+                        "structure_type": "arraylist",
+                        "label": "tareas (ArrayList<String>)",
+                        "size": 3,
+                        "capacity": 4,
+                        "cells": [
+                            {"index": 0, "value": "\"Diseño\"", "state": "normal", "next_index": None},
+                            {"index": 1, "value": "\"Refactor\"", "state": "changed", "next_index": None},
+                            {"index": 2, "value": "\"Tests\"", "state": "normal", "next_index": None},
+                            {"index": 3, "value": "", "state": "empty", "next_index": None},
+                        ],
+                        "pointers": [{"name": "idx", "index": 1}],
+                        "buckets": [],
+                        "operation": "set(1, \"Refactor\")",
+                    },
+                },
+                {
+                    "subgoal_id": "sg3",
+                    "active_lines": [9],
+                    "caption": "remove(0) elimina Diseño y desplaza elementos restantes hacia izquierda.",
+                    "checkpoint": _disabled_checkpoint(),
+                    "state": {
+                        "structure_type": "arraylist",
+                        "label": "tareas (ArrayList<String>)",
+                        "size": 2,
+                        "capacity": 4,
+                        "cells": [
+                            {"index": 0, "value": "\"Refactor\"", "state": "changed", "next_index": None},
+                            {"index": 1, "value": "\"Tests\"", "state": "changed", "next_index": None},
+                            {"index": 2, "value": "", "state": "empty", "next_index": None},
+                            {"index": 3, "value": "", "state": "empty", "next_index": None},
+                        ],
+                        "pointers": [{"name": "shift", "index": 0}, {"name": "size", "index": 2}],
+                        "buckets": [],
+                        "operation": "remove(0) -> desplazamiento O(n)",
+                    },
+                },
+                {
+                    "subgoal_id": "sg3",
+                    "active_lines": [10],
+                    "caption": "La lista queda compacta con tamaño 2 y capacidad 4.",
+                    "checkpoint": _disabled_checkpoint(),
+                    "state": {
+                        "structure_type": "arraylist",
+                        "label": "tareas (ArrayList<String>)",
+                        "size": 2,
+                        "capacity": 4,
+                        "cells": [
+                            {"index": 0, "value": "\"Refactor\"", "state": "active", "next_index": None},
+                            {"index": 1, "value": "\"Tests\"", "state": "active", "next_index": None},
+                            {"index": 2, "value": "", "state": "empty", "next_index": None},
+                            {"index": 3, "value": "", "state": "empty", "next_index": None},
+                        ],
+                        "pointers": [{"name": "size", "index": 2}],
+                        "buckets": [],
+                        "operation": "Estado final consistente",
+                    },
+                },
+            ]
+        s_idx = _compute_sentence_indices([None] * len(raw_steps), story_script, len(raw_steps))
+        for i, st in enumerate(raw_steps):
+            st["index"] = i
+            st["sentence_index"] = s_idx[i]
+        return {
+            "variant": "data_structure",
+            "language": language if language in ("java", "python", "c") else "java",
+            "title": clean_title,
+            "source_code": source_code,
+            "fixed_code": None,
+            "subgoals": subgoals,
+            "steps": raw_steps,
+        }
+
+    # 5. execution_trace (por defecto)
+    source_code = (
+        "public class CuentaEstudio {\n"
+        "    private int saldo;\n"
+        "    public CuentaEstudio(int inicial) {\n"
+        "        this.saldo = inicial;\n"
+        "    }\n"
+        "    public void abonar(int monto) {\n"
+        "        if (monto > 0) {\n"
+        "            this.saldo += monto;\n"
+        "        }\n"
+        "    }\n"
+        "    public static void main(String[] args) {\n"
+        "        CuentaEstudio c = new CuentaEstudio(1000);\n"
+        "        c.abonar(500);\n"
+        "        System.out.println(c.saldo);\n"
+        "    }\n"
+        "}"
+    )
+    subgoals = [
+        {"id": "sg1", "label": "1. Creación de instancia en el heap (new)"},
+        {"id": "sg2", "label": "2. Llamada a método y marco en el stack"},
+        {"id": "sg3", "label": "3. Mutación de estado y salida por consola"},
+    ]
+    raw_steps = [
+        {
+            "subgoal_id": "sg1",
+            "active_lines": [11, 12],
+            "caption": "main inicia y solicita crear un objeto CuentaEstudio(1000).",
+            "checkpoint": _disabled_checkpoint(),
+            "state": {
+                "frames": [{"name": "main", "active": True, "vars": []}],
+                "heap": [],
+                "stdout": [],
+                "delta": "Arranca el marco main en el stack",
+            },
+        },
+        {
+            "subgoal_id": "sg1",
+            "active_lines": [3, 4],
+            "caption": "El constructor reserva @0x1A en el heap e inicializa saldo.",
+            "checkpoint": _disabled_checkpoint(),
+            "state": {
+                "frames": [
+                    {"name": "main", "active": False, "vars": []},
+                    {
+                        "name": "CuentaEstudio(1000)",
+                        "active": True,
+                        "vars": [
+                            {"name": "this", "value": "@0x1A", "type": "CuentaEstudio", "changed": True, "ref_id": "obj1"},
+                            {"name": "inicial", "value": "1000", "type": "int", "changed": True, "ref_id": None},
+                        ],
+                    },
+                ],
+                "heap": [
+                    {
+                        "id": "obj1",
+                        "class_name": "CuentaEstudio",
+                        "address": "@0x1A",
+                        "fields": [{"name": "saldo", "value": "1000", "changed": True}],
+                    }
+                ],
+                "stdout": [],
+                "delta": "Instancia obj1 creada con saldo = 1000",
+            },
+        },
+        {
+            "subgoal_id": "sg1",
+            "active_lines": [12],
+            "caption": "La variable local c guarda la referencia @0x1A en main.",
+            "checkpoint": _default_checkpoint_for_variant("execution_trace"),
+            "state": {
+                "frames": [
+                    {
+                        "name": "main",
+                        "active": True,
+                        "vars": [
+                            {"name": "c", "value": "@0x1A", "type": "CuentaEstudio", "changed": True, "ref_id": "obj1"}
+                        ],
+                    }
+                ],
+                "heap": [
+                    {
+                        "id": "obj1",
+                        "class_name": "CuentaEstudio",
+                        "address": "@0x1A",
+                        "fields": [{"name": "saldo", "value": "1000", "changed": False}],
+                    }
+                ],
+                "stdout": [],
+                "delta": "c apunta a obj1 (@0x1A)",
+            },
+        },
+        {
+            "subgoal_id": "sg2",
+            "active_lines": [6, 7, 13],
+            "caption": "c.abonar(500) apila un nuevo marco con this = @0x1A.",
+            "checkpoint": _disabled_checkpoint(),
+            "state": {
+                "frames": [
+                    {
+                        "name": "main",
+                        "active": False,
+                        "vars": [
+                            {"name": "c", "value": "@0x1A", "type": "CuentaEstudio", "changed": False, "ref_id": "obj1"}
+                        ],
+                    },
+                    {
+                        "name": "abonar(500)",
+                        "active": True,
+                        "vars": [
+                            {"name": "this", "value": "@0x1A", "type": "CuentaEstudio", "changed": True, "ref_id": "obj1"},
+                            {"name": "monto", "value": "500", "type": "int", "changed": True, "ref_id": None},
+                        ],
+                    },
+                ],
+                "heap": [
+                    {
+                        "id": "obj1",
+                        "class_name": "CuentaEstudio",
+                        "address": "@0x1A",
+                        "fields": [{"name": "saldo", "value": "1000", "changed": False}],
+                    }
+                ],
+                "stdout": [],
+                "delta": "Entra a abonar(500); valida monto > 0",
+            },
+        },
+        {
+            "subgoal_id": "sg3",
+            "active_lines": [8],
+            "caption": "this.saldo suma 500 mutando directamente el objeto @0x1A.",
+            "checkpoint": _disabled_checkpoint(),
+            "state": {
+                "frames": [
+                    {
+                        "name": "main",
+                        "active": False,
+                        "vars": [
+                            {"name": "c", "value": "@0x1A", "type": "CuentaEstudio", "changed": False, "ref_id": "obj1"}
+                        ],
+                    },
+                    {
+                        "name": "abonar(500)",
+                        "active": True,
+                        "vars": [
+                            {"name": "this", "value": "@0x1A", "type": "CuentaEstudio", "changed": False, "ref_id": "obj1"},
+                            {"name": "monto", "value": "500", "type": "int", "changed": False, "ref_id": None},
+                        ],
+                    },
+                ],
+                "heap": [
+                    {
+                        "id": "obj1",
+                        "class_name": "CuentaEstudio",
+                        "address": "@0x1A",
+                        "fields": [{"name": "saldo", "value": "1500", "changed": True}],
+                    }
+                ],
+                "stdout": [],
+                "delta": "obj1.saldo cambia de 1000 a 1500",
+            },
+        },
+        {
+            "subgoal_id": "sg3",
+            "active_lines": [14],
+            "caption": "Se desapila abonar e imprime 1500 desde main.",
+            "checkpoint": _disabled_checkpoint(),
+            "state": {
+                "frames": [
+                    {
+                        "name": "main",
+                        "active": True,
+                        "vars": [
+                            {"name": "c", "value": "@0x1A", "type": "CuentaEstudio", "changed": False, "ref_id": "obj1"}
+                        ],
+                    }
+                ],
+                "heap": [
+                    {
+                        "id": "obj1",
+                        "class_name": "CuentaEstudio",
+                        "address": "@0x1A",
+                        "fields": [{"name": "saldo", "value": "1500", "changed": False}],
+                    }
+                ],
+                "stdout": ["1500"],
+                "delta": "Consola emite 1500 tras desapilar abonar()",
+            },
+        },
+    ]
+    s_idx = _compute_sentence_indices([None] * len(raw_steps), story_script, len(raw_steps))
+    for i, st in enumerate(raw_steps):
+        st["index"] = i
+        st["sentence_index"] = s_idx[i]
+    return {
+        "variant": "execution_trace",
+        "language": language if language in _STORYBOARD_LANGUAGES else "java",
+        "title": clean_title,
+        "source_code": source_code,
+        "fixed_code": None,
+        "subgoals": subgoals,
+        "steps": raw_steps,
+    }
+
+
+def _sanitize_storyboard_payload(
+    parsed: dict[str, Any],
+    *,
+    heuristic_lang: str,
+    heuristic_variant: str,
+    node_title: str,
+    node_summary: str,
+    story_script: str,
+) -> dict[str, Any]:
+    raw_variant = str(parsed.get("variant") or heuristic_variant).strip().lower()
+    if heuristic_lang == "sql" or heuristic_variant == "sql_pipeline":
+        variant = "sql_pipeline"
+    elif raw_variant in _STORYBOARD_VARIANTS:
+        variant = raw_variant
+    else:
+        variant = heuristic_variant
+
+    raw_lang = str(parsed.get("language") or heuristic_lang).strip().lower()
+    if variant == "sql_pipeline":
+        language = "sql"
+    elif raw_lang in _STORYBOARD_LANGUAGES:
+        language = raw_lang
+    else:
+        language = heuristic_lang if heuristic_lang in _STORYBOARD_LANGUAGES else "java"
+
+    fallback_bundle = _build_fallback_code_storyboard(
+        variant=variant,
+        language=language,
+        node_title=node_title,
+        node_summary=node_summary,
+        story_script=story_script,
+    )
+
+    title = str(parsed.get("title") or node_title or fallback_bundle["title"]).strip()[:100]
+    if not title:
+        title = fallback_bundle["title"]
+
+    source_code = _clean_storyboard_code(parsed.get("source_code"), language, max_lines=22)
+    if len(source_code.splitlines()) < 4:
+        story_code = _extract_story_code_block(story_script, language)
+        if story_code:
+            source_code = story_code
+        else:
+            raise ValueError("source_code demasiado corto o ausente")
+
+    fixed_code: str | None = None
+    if variant == "error_contrast":
+        cleaned_fixed = _clean_storyboard_code(parsed.get("fixed_code"), language, max_lines=22)
+        if len(cleaned_fixed.splitlines()) >= 4:
+            fixed_code = cleaned_fixed
+        else:
+            fixed_code = fallback_bundle["fixed_code"]
+    elif parsed.get("fixed_code"):
+        cleaned_opt = _clean_storyboard_code(parsed.get("fixed_code"), language, max_lines=22)
+        fixed_code = cleaned_opt or None
+
+    raw_subgoals = parsed.get("subgoals")
+    subgoals: list[dict[str, str]] = []
+    if isinstance(raw_subgoals, list):
+        seen_ids: set[str] = set()
+        for idx, sg in enumerate(raw_subgoals[:4]):
+            if not isinstance(sg, dict):
+                continue
+            sg_id = str(sg.get("id") or f"sg{idx + 1}").strip()
+            sg_label = str(sg.get("label") or f"Etapa {idx + 1}").strip()
+            if sg_id and sg_label and sg_id not in seen_ids:
+                seen_ids.add(sg_id)
+                subgoals.append({"id": sg_id, "label": sg_label[:90]})
+    if len(subgoals) < 2:
+        subgoals = list(fallback_bundle["subgoals"])
+
+    valid_sg_ids = {sg["id"] for sg in subgoals}
+
+    raw_steps = parsed.get("steps")
+    if not isinstance(raw_steps, list) or len(raw_steps) < 4:
+        raise ValueError("Se requieren al menos 4 pasos válidos en el storyboard")
+
+    trimmed_steps = [st for st in raw_steps if isinstance(st, dict)][:9]
+    if len(trimmed_steps) < 4:
+        raise ValueError("Se requieren al menos 4 pasos tipo objeto en el storyboard")
+
+    src_max_line = max(1, len(source_code.splitlines()))
+    fix_max_line = max(1, len((fixed_code or source_code).splitlines()))
+
+    raw_sent_indices: list[int | None] = []
+    for st in trimmed_steps:
+        si = st.get("sentence_index")
+        if isinstance(si, int):
+            raw_sent_indices.append(si)
+        else:
+            try:
+                raw_sent_indices.append(int(si) if si is not None else None)
+            except (TypeError, ValueError):
+                raw_sent_indices.append(None)
+
+    computed_sent_indices = _compute_sentence_indices(raw_sent_indices, story_script, len(trimmed_steps))
+
+    clean_steps: list[dict[str, Any]] = []
+    enabled_checkpoints = 0
+
+    for idx, st in enumerate(trimmed_steps):
+        raw_sg = str(st.get("subgoal_id") or "").strip()
+        if raw_sg not in valid_sg_ids:
+            raw_sg = subgoals[min(len(subgoals) - 1, (idx * len(subgoals)) // max(1, len(trimmed_steps)))]["id"]
+
+        caption = _clean_micro_caption(st.get("caption"), f"Paso {idx + 1} de la traza.")
+        sanitized_state = _sanitize_state_for_variant(variant, st.get("state"), idx, caption, src_max_line)
+
+        step_max_line = (
+            fix_max_line
+            if variant == "error_contrast" and sanitized_state.get("code_view") == "fixed"
+            else src_max_line
+        )
+        raw_lines = st.get("active_lines")
+        active_lines: list[int] = []
+        if isinstance(raw_lines, list):
+            for ln in raw_lines[:8]:
+                try:
+                    ln_int = int(ln)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= ln_int <= step_max_line and ln_int not in active_lines:
+                    active_lines.append(ln_int)
+        if not active_lines:
+            active_lines = [min(step_max_line, idx + 1)]
+
+        checkpoint_out = _disabled_checkpoint()
+        raw_cp = st.get("checkpoint")
+        if isinstance(raw_cp, dict) and bool(raw_cp.get("enabled")) and enabled_checkpoints < 2:
+            cp_q = str(raw_cp.get("question") or "").strip()
+            raw_opts = raw_cp.get("options")
+            cp_opts = (
+                [str(o).strip() for o in raw_opts[:4] if str(o).strip()]
+                if isinstance(raw_opts, list)
+                else []
+            )
+            if cp_q and len(cp_opts) >= 2:
+                try:
+                    c_idx = int(raw_cp.get("correct_index") or 0)
+                except (TypeError, ValueError):
+                    c_idx = 0
+                c_idx = max(0, min(len(cp_opts) - 1, c_idx))
+                cp_exp = str(raw_cp.get("explanation") or "Revisa el estado actual de la traza.").strip()
+                checkpoint_out = {
+                    "enabled": True,
+                    "question": cp_q,
+                    "options": cp_opts,
+                    "correct_index": c_idx,
+                    "explanation": cp_exp,
+                }
+                enabled_checkpoints += 1
+
+        clean_steps.append(
+            {
+                "index": idx,
+                "subgoal_id": raw_sg,
+                "active_lines": active_lines,
+                "caption": caption,
+                "sentence_index": computed_sent_indices[idx],
+                "checkpoint": checkpoint_out,
+                "state": sanitized_state,
+            }
+        )
+
+    if enabled_checkpoints == 0 and clean_steps:
+        mid_idx = min(len(clean_steps) - 1, max(1, len(clean_steps) // 2))
+        clean_steps[mid_idx]["checkpoint"] = _default_checkpoint_for_variant(variant)
+
+    return {
+        "variant": variant,
+        "language": language,
+        "title": title,
+        "source_code": source_code,
+        "fixed_code": fixed_code,
+        "subgoals": subgoals,
+        "steps": clean_steps,
+    }
+
+
+def generate_code_storyboard_with_ai(
+    *,
+    course_title: str,
+    node_title: str,
+    node_summary: str,
+    story_script: str,
+    engine_type: str = "code_lab",
+    preferred_provider: str = "auto",
+) -> tuple[dict[str, Any], str]:
+    """Genera un storyboard interactivo auto-adaptativo (5 variantes) con IA o fallback determinista."""
+    heuristic_lang, heuristic_variant = _detect_storyboard_language_and_variant(
+        course_title=course_title,
+        node_title=node_title,
+        node_summary=node_summary,
+        story_script=story_script,
+    )
+    sentences = split_story_sentences(story_script or "")
+    story_code_hint = _extract_story_code_block(story_script, heuristic_lang)
+
+    system_prompt = (
+        "Eres el motor de visualizaciones algorítmicas y trazas de memoria de Brotal (v1.2.2).\n"
+        "Debes generar un storyboard interactivo paso a paso en JSON válido para acompañar la explicación del nodo.\n"
+        "REGLAS ESTRICTAS:\n"
+        "1. Elige `variant` entre: 'execution_trace' | 'oop_dispatch' | 'error_contrast' | 'data_structure' | 'sql_pipeline'. "
+        f"Variante sugerida por heurística: '{heuristic_variant}' (si el lenguaje es SQL DEBE ser 'sql_pipeline').\n"
+        "2. `language`: 'java' | 'c' | 'python' | 'sql'.\n"
+        "3. `source_code`: código limpio, indentado y pedagógico de 6 a 22 líneas.\n"
+        "4. `fixed_code`: obligatorio (no vacío, 6 a 22 líneas) cuando `variant == 'error_contrast'`; `null` en las demás.\n"
+        "5. `subgoals`: de 2 a 4 sub-objetivos `{id, label}`.\n"
+        "6. `steps`: de 5 a 9 pasos ordenados (`index: 0..N-1`), cada uno con:\n"
+        "   - `subgoal_id` existente en `subgoals`,\n"
+        "   - `active_lines`: lista de líneas 1-based activas en ese paso,\n"
+        "   - `caption`: micro-explicación en español de MÁXIMO 12 PALABRAS,\n"
+        "   - `sentence_index`: entero `0..num_sentences-1` monótono creciente alineado a las oraciones de `story_script`,\n"
+        "   - `checkpoint`: incluye entre 1 y 2 pasos (hacia la mitad/clímax) con `enabled: true`, `question` de predicción, "
+        "`options` (2 a 4), `correct_index` y `explanation` breve; en los demás pasos usa `enabled: false`.\n"
+        "   - `state`: objeto que DEBE respetar exactamente las claves de la variante elegida:\n"
+        "     * execution_trace: {frames:[{name,active,vars:[{name,value,type,changed,ref_id}]}], "
+        "heap:[{id,class_name,address,fields:[{name,value,changed}]}], stdout:[str], delta:str}\n"
+        "     * oop_dispatch: {classes:[{name,parent,methods:[str],active}], "
+        "references:[{var_name,static_type,dynamic_type,heap_id}], "
+        "heap_objects:[{id,class_name,fields:[{name,value}]}], "
+        "dispatch:{call_expr,static_check,lookup_path:[str],resolved_class,resolved_method,via_super}}\n"
+        "     * error_contrast: {phase:'running'|'exception_thrown'|'stack_unwinding'|'caught'|'contrast_fix', "
+        "code_view:'broken'|'fixed', exception:{type,message,line}|null, "
+        "call_stack:[{frame,status:'active'|'crashed'|'unwinding'|'catching'|'ok',line}], "
+        "contrast:{bug_cause,broken_line,fixed_line,fix_explanation}}\n"
+        "     * data_structure: {structure_type:'array'|'arraylist'|'hashmap'|'linkedlist', label, size, capacity, "
+        "cells:[{index,value,state:'normal'|'active'|'changed'|'empty',next_index}], pointers:[{name,index}], "
+        "buckets:[{bucket,entries:[{key,value,hash_formula,active}]}], operation}\n"
+        "     * sql_pipeline: {active_clause:'FROM'|'JOIN'|'WHERE'|'GROUP BY'|'HAVING'|'SELECT'|'ORDER BY', "
+        "pipeline_stages:['FROM/JOIN','WHERE','GROUP BY','HAVING','SELECT','ORDER BY'], clause_sql, "
+        "columns:[str], rows:[{values:[str],status:'kept'|'filtered_out'|'grouped'|'projected',group_key}], note}\n"
+        "Responde ÚNICAMENTE un objeto JSON válido."
+    )
+
+    user_payload = {
+        "course_title": course_title,
+        "engine_type": engine_type,
+        "node_title": node_title,
+        "node_summary": node_summary,
+        "suggested_language": heuristic_lang,
+        "suggested_variant": heuristic_variant,
+        "num_sentences": len(sentences),
+        "story_sentences": sentences[:16],
+        "extracted_code_block": story_code_hint,
+    }
+
+    try:
+        comp = complete_chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            preferred_provider=preferred_provider,
+            json_mode=True,
+            temperature=0.3,
+            max_tokens=3600,
+        )
+        parsed = extract_json_object(comp.text)
+        sanitized = _sanitize_storyboard_payload(
+            parsed,
+            heuristic_lang=heuristic_lang,
+            heuristic_variant=heuristic_variant,
+            node_title=node_title,
+            node_summary=node_summary,
+            story_script=story_script,
+        )
+        return (sanitized, comp.provider)
+    except (AiProviderError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        fallback = _build_fallback_code_storyboard(
+            variant=heuristic_variant,
+            language=heuristic_lang,
+            node_title=node_title,
+            node_summary=node_summary,
+            story_script=story_script,
+        )
+        return (fallback, "local_fallback")

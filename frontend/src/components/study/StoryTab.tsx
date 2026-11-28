@@ -3,6 +3,9 @@ import CodeMirror from '@uiw/react-codemirror'
 import { oneDark } from '@codemirror/theme-one-dark'
 import {
   Check,
+  ChevronDown,
+  ChevronUp,
+  Clapperboard,
   Code2,
   Copy,
   FastForward,
@@ -24,13 +27,18 @@ import {
   fetchNodeTtsBlob,
   fetchNodeTtsTimingsData,
   fetchPhraseTtsBlob,
+  getNodeStoryboard,
+  streamNodeStoryboard,
+  type NodeStoryboardResponse,
   type PackNode,
+  type StoryboardStreamProgress,
   type TtsSentenceTiming,
   type TtsWordTiming,
 } from '../../api/study'
 import { useAppStore } from '../../store/useAppStore'
 import { useStudyStore } from '../../store/useStudyStore'
 import { getLanguageExtension } from './CodeChallengeInput'
+import CodeScenePlayer, { STORYBOARD_VARIANT_META } from './CodeScenePlayer'
 import {
   splitStoryParagraphSentences,
   useSpeech,
@@ -40,6 +48,7 @@ import {
 
 interface Props {
   courseId: string
+  engineType?: string
   node: PackNode
   worldMetaphor: string | null
   onEvaluate: () => void
@@ -164,12 +173,14 @@ function buildWordWindows(
 
 export default function StoryTab({
   courseId,
+  engineType,
   node,
   worldMetaphor,
   onEvaluate,
   onRegenerateStory,
   onAskTutor,
 }: Props) {
+  const isCodeLab = engineType === 'code_lab'
   const explanationStyle = useStudyStore((s) => s.explanationStyle)
   const setExplanationStyle = useStudyStore((s) => s.setExplanationStyle)
   const speech = useSpeech(node.story_script)
@@ -177,6 +188,7 @@ export default function StoryTab({
   const blobUrlRef = useRef<string | null>(null)
   const ttsAbortRef = useRef<AbortController | null>(null)
   const ttsRequestTokenRef = useRef(0)
+  const storyboardAbortRef = useRef<AbortController | null>(null)
   const sentenceRefs = useRef<Record<number, HTMLSpanElement | null>>({})
   const wordRefs = useRef<Record<number, HTMLSpanElement | null>>({})
   const lastManualScrollRef = useRef<number>(0)
@@ -192,6 +204,14 @@ export default function StoryTab({
   const [serverWords, setServerWords] = useState<TtsWordTiming[]>([])
   const [regenerating, setRegenerating] = useState(false)
   const [quickQuestion, setQuickQuestion] = useState('')
+
+  const [storyboard, setStoryboard] = useState<NodeStoryboardResponse | null>(null)
+  const [playerOpen, setPlayerOpen] = useState(false)
+  const [generatingStoryboard, setGeneratingStoryboard] = useState(false)
+  const [storyboardProgress, setStoryboardProgress] = useState<StoryboardStreamProgress | null>(
+    null,
+  )
+  const [storyboardError, setStoryboardError] = useState<string | null>(null)
 
   const {
     blocks: storyBlocks,
@@ -438,8 +458,89 @@ export default function StoryTab({
     }
   }
 
+  // Precarga silenciosa del storyboard guardado en SQLite (exclusivo para code_lab)
+  useEffect(() => {
+    storyboardAbortRef.current?.abort()
+    storyboardAbortRef.current = null
+    setGeneratingStoryboard(false)
+    setStoryboardProgress(null)
+    setStoryboardError(null)
+    setStoryboard(null)
+    setPlayerOpen(false)
+
+    if (!isCodeLab) return
+
+    const controller = new AbortController()
+    getNodeStoryboard(courseId, node.id, controller.signal)
+      .then((saved) => {
+        if (controller.signal.aborted) return
+        setStoryboard(saved)
+        setPlayerOpen(false)
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return
+        setStoryboard(null)
+        setPlayerOpen(false)
+      })
+
+    return () => {
+      controller.abort()
+      storyboardAbortRef.current?.abort()
+      storyboardAbortRef.current = null
+    }
+  }, [courseId, node.id, isCodeLab])
+
+  const runStoryboardGeneration = async (force: boolean) => {
+    if (!isCodeLab) return
+    storyboardAbortRef.current?.abort()
+    const ctrl = new AbortController()
+    storyboardAbortRef.current = ctrl
+    setPlayerOpen(true)
+    setGeneratingStoryboard(true)
+    setStoryboardError(null)
+    setStoryboardProgress({
+      stage: 'analyzing',
+      pct: 8,
+      label: 'Analizando explicación y eligiendo visualización...',
+    })
+
+    try {
+      const generated = await streamNodeStoryboard(courseId, node.id, {
+        force,
+        onProgress: (p) => {
+          if (!ctrl.signal.aborted) setStoryboardProgress(p)
+        },
+        signal: ctrl.signal,
+      })
+      if (ctrl.signal.aborted) return
+      setStoryboard(generated)
+      setStoryboardProgress({
+        stage: 'done',
+        pct: 100,
+        label: 'Animación lista',
+      })
+    } catch (err) {
+      if (ctrl.signal.aborted) return
+      setStoryboardError(
+        err instanceof Error ? err.message : 'No se pudo generar la animación paso a paso.',
+      )
+    } finally {
+      if (storyboardAbortRef.current === ctrl) {
+        storyboardAbortRef.current = null
+        setGeneratingStoryboard(false)
+      }
+    }
+  }
+
   const handleRegenerate = async () => {
     stopAudio()
+    storyboardAbortRef.current?.abort()
+    storyboardAbortRef.current = null
+    setGeneratingStoryboard(false)
+    setStoryboardProgress(null)
+    setStoryboardError(null)
+    setStoryboard(null)
+    setPlayerOpen(false)
     setRegenerating(true)
     try {
       await onRegenerateStory()
@@ -656,6 +757,57 @@ export default function StoryTab({
             : 'Fallback offline: síntesis de voz local del navegador · Haz clic en cualquier palabra u oración para escucharla.'}
         </span>
       </div>
+
+      {isCodeLab && (
+        <div className="flex min-w-0 flex-col gap-2">
+          {!generatingStoryboard && (
+            <div className="flex flex-wrap items-center gap-2">
+              {storyboard === null ? (
+                <button
+                  type="button"
+                  disabled={regenerating}
+                  onClick={() => void runStoryboardGeneration(false)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-indigo-300 bg-indigo-50/80 px-3 py-1.5 text-xs font-semibold text-indigo-900 transition-colors hover:bg-indigo-100 disabled:opacity-50 dark:border-indigo-700/80 dark:bg-indigo-950/50 dark:text-indigo-200 dark:hover:bg-indigo-900/50"
+                >
+                  <Clapperboard size={14} className="text-indigo-600 dark:text-indigo-400" />
+                  Animar explicación paso a paso
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setPlayerOpen((v) => !v)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+                >
+                  <Clapperboard size={14} className="text-indigo-600 dark:text-indigo-400" />
+                  <span>{playerOpen ? 'Ocultar animación' : 'Ver animación paso a paso'}</span>
+                  <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-800 dark:bg-indigo-950/80 dark:text-indigo-300">
+                    {(STORYBOARD_VARIANT_META[storyboard.variant] ??
+                      STORYBOARD_VARIANT_META.execution_trace
+                    ).label}
+                  </span>
+                  {playerOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                </button>
+              )}
+            </div>
+          )}
+
+          {(playerOpen || generatingStoryboard) && (
+            <CodeScenePlayer
+              courseId={courseId}
+              nodeId={node.id}
+              initialStoryboard={storyboard}
+              generating={generatingStoryboard}
+              progress={storyboardProgress}
+              error={storyboardError}
+              activeSentenceIndex={activeSentenceIndex}
+              totalSentences={flatSentences.length}
+              isAudioPlaying={isPlaying}
+              onRegenerate={() => void runStoryboardGeneration(true)}
+              onClose={() => setPlayerOpen(false)}
+            />
+          )}
+        </div>
+      )}
 
       <article className="flex min-w-0 flex-col gap-3 break-words text-[15px] leading-relaxed">
         {storyBlocks.map((block, bIdx) => {

@@ -177,6 +177,56 @@ export interface ExamRouteResponse {
   updated_at: string
 }
 
+export type StoryboardVariant =
+  | 'execution_trace'
+  | 'oop_dispatch'
+  | 'error_contrast'
+  | 'data_structure'
+  | 'sql_pipeline'
+
+export interface StoryboardSubgoal {
+  id: string
+  label: string
+}
+
+export interface StoryboardCheckpoint {
+  enabled: boolean
+  question: string
+  options: string[]
+  correct_index: number
+  explanation: string
+}
+
+export interface StoryboardStep {
+  index: number
+  subgoal_id: string
+  active_lines: number[]
+  caption: string
+  sentence_index?: number | null
+  checkpoint?: StoryboardCheckpoint | null
+  state: Record<string, unknown>
+}
+
+export interface NodeStoryboardResponse {
+  course_id: string
+  node_id: string
+  variant: StoryboardVariant
+  language: string
+  title: string
+  source_code: string
+  fixed_code?: string | null
+  subgoals: StoryboardSubgoal[]
+  steps: StoryboardStep[]
+  provider: string
+  updated_at: string
+}
+
+export interface StoryboardStreamProgress {
+  stage: 'analyzing' | 'generating' | 'validating' | 'done' | 'error'
+  pct: number
+  label: string
+}
+
 export const PASS_SCORE = 7.0
 export const MAX_MASTERY = 3
 export const COOLDOWN_MS: Record<CooldownMode, number> = {
@@ -374,6 +424,137 @@ export async function clearChatHistory(courseId: string): Promise<void> {
     `/api/v1/chat/${encodeURIComponent(courseId)}`,
     { method: 'DELETE' },
   )
+}
+
+/** GET /api/v1/study/{course_id}/{node_id}/storyboard -> storyboard guardado o null si 404. */
+export async function getNodeStoryboard(
+  courseId: string,
+  nodeId: string,
+  signal?: AbortSignal,
+): Promise<NodeStoryboardResponse | null> {
+  const res = await fetch(
+    `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/storyboard`,
+    { signal },
+  )
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return (await res.json()) as NodeStoryboardResponse
+}
+
+/** POST /api/v1/study/{course_id}/{node_id}/storyboard?force=... */
+export async function generateNodeStoryboard(
+  courseId: string,
+  nodeId: string,
+  force = false,
+  signal?: AbortSignal,
+): Promise<NodeStoryboardResponse> {
+  return api<NodeStoryboardResponse>(
+    `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/storyboard?force=${force ? 'true' : 'false'}`,
+    { method: 'POST', signal },
+  )
+}
+
+function isAbortError(err: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true
+  return err instanceof DOMException && err.name === 'AbortError'
+}
+
+/** GET /api/v1/study/{course_id}/{node_id}/storyboard/stream?force=... (SSE con fallback POST). */
+export async function streamNodeStoryboard(
+  courseId: string,
+  nodeId: string,
+  opts?: {
+    force?: boolean
+    onProgress?: (p: StoryboardStreamProgress) => void
+    signal?: AbortSignal
+  },
+): Promise<NodeStoryboardResponse> {
+  const force = Boolean(opts?.force)
+  const onProgress = opts?.onProgress
+  const signal = opts?.signal
+
+  const parseSseDataLine = (rawLine: string): NodeStoryboardResponse | null => {
+    const trimmed = rawLine.trim()
+    if (!trimmed.startsWith('data:')) return null
+    const jsonStr = trimmed.slice(5).trim()
+    if (!jsonStr) return null
+    const payload = JSON.parse(jsonStr) as {
+      stage?: StoryboardStreamProgress['stage']
+      pct?: number
+      label?: string
+      detail?: string
+      storyboard?: NodeStoryboardResponse
+    }
+    if (payload.stage && typeof payload.pct === 'number') {
+      onProgress?.({
+        stage: payload.stage,
+        pct: payload.pct,
+        label: payload.label ?? '',
+      })
+    }
+    if (payload.stage === 'error') {
+      throw new Error(payload.label || payload.detail || 'Error en stream de storyboard')
+    }
+    if (payload.stage === 'done' && payload.storyboard) {
+      return payload.storyboard
+    }
+    return null
+  }
+
+  try {
+    const res = await fetch(
+      `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/storyboard/stream?force=${force ? 'true' : 'false'}`,
+      {
+        headers: { Accept: 'text/event-stream' },
+        signal,
+      },
+    )
+    if (!res.ok || !res.body) {
+      throw new Error(`${res.status} ${res.statusText}`)
+    }
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        const result = parseSseDataLine(line)
+        if (result) return result
+      }
+    }
+
+    buffer += decoder.decode()
+    if (buffer.trim()) {
+      for (const line of buffer.split('\n')) {
+        const result = parseSseDataLine(line)
+        if (result) return result
+      }
+    }
+
+    throw new Error('Stream finalizado sin storyboard')
+  } catch (err) {
+    if (isAbortError(err, signal)) {
+      throw err
+    }
+    onProgress?.({
+      stage: 'generating',
+      pct: 52,
+      label: 'Construyendo pasos y estado en memoria...',
+    })
+    const storyboard = await generateNodeStoryboard(courseId, nodeId, force, signal)
+    onProgress?.({
+      stage: 'done',
+      pct: 100,
+      label: 'Animación lista',
+    })
+    return storyboard
+  }
 }
 
 /** Nota 1.0..10.0 proporcional a puntos cubiertos (promedio simple sobre todos los puntos). */
