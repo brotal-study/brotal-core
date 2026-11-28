@@ -7,9 +7,11 @@ Contrato:
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
+import uuid
 from pathlib import Path
 from typing import Any, Literal
 
@@ -407,3 +409,59 @@ async def synthesize_phrase_tts(
             continue
 
     raise TtsSynthesisError(f"No se pudo sintetizar frase edge-tts: {last_err}") from last_err
+
+
+def cinema_act_audio_path(course_id: str, text: str, voice: str | None = None) -> Path:
+    """Ruta determinista en cache (~/.brotal/tts_cache/{course_id}/cinema_{hash}.mp3) para un acto de Modo Cine."""
+    primary_voice = voice or DEFAULT_VOICES[0]
+    cleaned = strip_code_blocks_and_markdown_for_tts(text).strip() or (text or "").strip()
+    safe_course = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in course_id) or "default"
+    course_dir = tts_cache_dir() / safe_course
+    course_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(f"cinema::{primary_voice}::{cleaned}".encode()).hexdigest()[:24]
+    return course_dir / f"cinema_{digest}.mp3"
+
+
+async def _synthesize_single_cinema_act(
+    course_id: str,
+    text: str,
+    voice: str | None = None,
+) -> Path | None:
+    cleaned = strip_code_blocks_and_markdown_for_tts(text).strip() or (text or "").strip()
+    if not cleaned:
+        return None
+
+    voices_to_try = [voice] if voice else list(DEFAULT_VOICES)
+    primary_voice = voices_to_try[0]
+    target_path = cinema_act_audio_path(course_id, cleaned, primary_voice)
+    if target_path.is_file() and target_path.stat().st_size > 0:
+        return target_path
+
+    tmp_path = target_path.with_name(f"{target_path.stem}.{uuid.uuid4().hex[:8]}.tmp.mp3")
+    for candidate_voice in voices_to_try:
+        try:
+            await _run_edge_tts(cleaned, candidate_voice, tmp_path)
+            if tmp_path.is_file() and tmp_path.stat().st_size > 0:
+                tmp_path.replace(target_path)
+                return target_path
+            tmp_path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 - degradacion silenciosa por acto si falla red/edge-tts
+            tmp_path.unlink(missing_ok=True)
+            continue
+
+    return None
+
+
+async def synthesize_cinema_act_audios(
+    course_id: str,
+    texts: list[str],
+    voice: str | None = None,
+) -> list[Path | None]:
+    """Sintetiza en paralelo los mini-MP3 de cada acto de Modo Cine, devolviendo None por acto fallido."""
+    if not texts:
+        return []
+    raw_results = await asyncio.gather(
+        *(_synthesize_single_cinema_act(course_id, text, voice=voice) for text in texts),
+        return_exceptions=True,
+    )
+    return [res if isinstance(res, Path) else None for res in raw_results]

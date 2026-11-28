@@ -121,3 +121,14 @@ CREATE TABLE IF NOT EXISTS node_storyboards (
   PRIMARY KEY (course_id, node_id),
   FOREIGN KEY (course_id, node_id) REFERENCES course_nodes(course_id, id) ON DELETE CASCADE
 );
+
+-- 11. Mini-video narrado en Modo Cine de 5 actos por nodo (v1.2.4)
+CREATE TABLE IF NOT EXISTS node_cinema_reels (
+    course_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    reel_json TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'local_fallback',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (course_id, node_id),
+    FOREIGN KEY (course_id, node_id) REFERENCES course_nodes(course_id, id) ON DELETE CASCADE
+);

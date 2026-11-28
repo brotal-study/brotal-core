@@ -5,7 +5,6 @@ import {
   ArrowRight,
   CheckCircle2,
   ChevronLeft,
-  ChevronRight,
   Code2,
   Cpu,
   Database,
@@ -13,12 +12,8 @@ import {
   HelpCircle,
   Layers,
   Loader2,
-  Pause,
-  Play,
   RefreshCw,
-  SkipBack,
   Terminal,
-  Volume2,
   X,
   XCircle,
   type LucideIcon,
@@ -48,9 +43,6 @@ export interface CodeScenePlayerProps {
   generating: boolean
   progress: StoryboardStreamProgress | null
   error: string | null
-  activeSentenceIndex: number | null
-  totalSentences: number
-  isAudioPlaying: boolean
   onRegenerate: () => void
   onClose?: () => void
 }
@@ -112,7 +104,7 @@ function defaultStageLabel(stage?: StoryboardStreamProgress['stage']): string {
     case 'validating':
       return 'Validando traza y checkpoints...'
     case 'done':
-      return 'Animación lista'
+      return 'Ejemplo paso a paso listo'
     default:
       return 'Analizando explicación y eligiendo visualización...'
   }
@@ -133,15 +125,6 @@ function stageCeiling(stage?: StoryboardStreamProgress['stage']): number {
   }
 }
 
-function isUnresolvedCheckpoint(
-  step: StoryboardStep | undefined,
-  answers: Record<number, CheckpointAnswerState>,
-): boolean {
-  if (!step?.checkpoint?.enabled) return false
-  if (!Array.isArray(step.checkpoint.options) || step.checkpoint.options.length < 2) return false
-  return !answers[step.index]
-}
-
 export default function CodeScenePlayer({
   courseId,
   nodeId,
@@ -149,15 +132,10 @@ export default function CodeScenePlayer({
   generating,
   progress,
   error,
-  activeSentenceIndex,
-  totalSentences,
-  isAudioPlaying,
   onRegenerate,
   onClose,
 }: CodeScenePlayerProps) {
   const [stepIdx, setStepIdx] = useState(0)
-  const [autoPlay, setAutoPlay] = useState(false)
-  const [syncWithAudio, setSyncWithAudio] = useState(true)
   const [codeViewTab, setCodeViewTab] = useState<'broken' | 'fixed'>('broken')
   const [checkpointAnswers, setCheckpointAnswers] = useState<
     Record<number, CheckpointAnswerState>
@@ -172,7 +150,6 @@ export default function CodeScenePlayer({
   // Resetear estado local al cambiar nodo o recibir nuevo storyboard
   useEffect(() => {
     setStepIdx(0)
-    setAutoPlay(false)
     setCheckpointAnswers({})
     setCodeViewTab('broken')
   }, [courseId, nodeId, storyboard?.updated_at])
@@ -183,8 +160,10 @@ export default function CodeScenePlayer({
       setCodeViewTab('broken')
       return
     }
-    const view = asStr(asRecord(currentStep?.state).code_view).toLowerCase()
-    if (view === 'fixed' && storyboard.fixed_code) {
+    const stepState = asRecord(currentStep?.state)
+    const view = asStr(stepState.code_view).toLowerCase()
+    const phase = asStr(stepState.phase).toLowerCase()
+    if ((view === 'fixed' || phase === 'fixed_diff') && storyboard.fixed_code) {
       setCodeViewTab('fixed')
     } else {
       setCodeViewTab('broken')
@@ -216,51 +195,6 @@ export default function CodeScenePlayer({
     }, 420)
     return () => window.clearInterval(id)
   }, [generating, progress?.stage, progress?.pct])
-
-  // Auto-play paso a paso (~2.8s), pausando si hay checkpoint activo sin responder/saltar
-  useEffect(() => {
-    if (!autoPlay || generating || steps.length === 0) return
-    if (isUnresolvedCheckpoint(currentStep, checkpointAnswers)) {
-      setAutoPlay(false)
-      return
-    }
-    if (safeStepIdx >= steps.length - 1) {
-      setAutoPlay(false)
-      return
-    }
-    const timer = window.setTimeout(() => {
-      setStepIdx((prev) => Math.min(steps.length - 1, prev + 1))
-    }, 2800)
-    return () => window.clearTimeout(timer)
-  }, [autoPlay, generating, steps.length, safeStepIdx, currentStep, checkpointAnswers])
-
-  // Sincronizacion con audio neural / fallback de StoryTab cuando isAudioPlaying esta activo
-  useEffect(() => {
-    if (!syncWithAudio || !isAudioPlaying || activeSentenceIndex === null || steps.length === 0) {
-      return
-    }
-    const hasSentenceMapping = steps.some(
-      (s) => typeof s.sentence_index === 'number' && Number.isFinite(s.sentence_index),
-    )
-    let targetIdx = 0
-    if (hasSentenceMapping) {
-      let matched = -1
-      for (let i = 0; i < steps.length; i++) {
-        const sIdx = steps[i].sentence_index
-        if (typeof sIdx === 'number' && sIdx <= activeSentenceIndex) {
-          matched = i
-        }
-      }
-      targetIdx = matched >= 0 ? matched : 0
-    } else {
-      const denom = Math.max(1, totalSentences)
-      targetIdx = Math.min(
-        steps.length - 1,
-        Math.max(0, Math.floor((activeSentenceIndex / denom) * steps.length)),
-      )
-    }
-    setStepIdx(targetIdx)
-  }, [syncWithAudio, isAudioPlaying, activeSentenceIndex, totalSentences, steps])
 
   const hasFixedCode = Boolean(storyboard?.fixed_code && storyboard.fixed_code.trim().length > 0)
   const displayedCode = useMemo(() => {
@@ -381,38 +315,13 @@ export default function CodeScenePlayer({
   const variantMeta =
     STORYBOARD_VARIANT_META[storyboard.variant] ?? STORYBOARD_VARIANT_META.execution_trace
   const VariantIcon = variantMeta.Icon
-  const providerNorm = (storyboard.provider || '').toLowerCase()
-  const isLocalProvider =
-    providerNorm.includes('local') ||
-    providerNorm.includes('fallback') ||
-    providerNorm.includes('heuristic') ||
-    providerNorm.includes('deterministic')
-
-  const jumpToSubgoal = (subgoalId: string) => {
-    setAutoPlay(false)
-    const idx = steps.findIndex((s) => s.subgoal_id === subgoalId)
-    if (idx >= 0) setStepIdx(idx)
-  }
 
   const goPrev = () => {
-    setAutoPlay(false)
     setStepIdx((prev) => Math.max(0, prev - 1))
   }
 
   const goNext = () => {
-    setAutoPlay(false)
     setStepIdx((prev) => Math.min(steps.length - 1, prev + 1))
-  }
-
-  const toggleAutoPlay = () => {
-    if (autoPlay) {
-      setAutoPlay(false)
-      return
-    }
-    if (safeStepIdx >= steps.length - 1) {
-      setStepIdx(0)
-    }
-    setAutoPlay(true)
   }
 
   const checkpoint = currentStep.checkpoint
@@ -424,205 +333,99 @@ export default function CodeScenePlayer({
 
   return (
     <section
-      aria-label="Reproductor de animación de código paso a paso"
+      aria-label="Ejemplo paso a paso"
       className="overflow-hidden rounded-lg border border-slate-300 bg-white shadow-xs dark:border-slate-700 dark:bg-slate-900"
     >
-      {/* Header compacto del reproductor */}
-      <header className="flex flex-col gap-2 border-b border-slate-200 bg-slate-50/90 px-3 py-2.5 dark:border-slate-800 dark:bg-slate-800/60">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-800 dark:border-indigo-700/80 dark:bg-indigo-950/70 dark:text-indigo-200">
-              <VariantIcon size={12} />
-              {variantMeta.label}
-            </span>
-            <h3 className="truncate text-xs font-semibold text-slate-900 dark:text-slate-100">
-              {storyboard.title}
-            </h3>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-1.5">
-            {/* Toggle Sincronizar con audio */}
-            <button
-              type="button"
-              aria-pressed={syncWithAudio}
-              onClick={() => setSyncWithAudio((v) => !v)}
-              title="Vincula el paso activo con la narración de voz cuando el audio se está reproduciendo"
-              className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-medium transition-colors ${
-                syncWithAudio
-                  ? 'border-indigo-300 bg-indigo-50 text-indigo-800 dark:border-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-200'
-                  : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
-              }`}
-            >
-              <Volume2 size={12} />
-              Sincronizar con audio
-            </button>
-
-            <button
-              type="button"
-              onClick={onRegenerate}
-              title="Regenerar animación paso a paso"
-              className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              <RefreshCw size={12} />
-              Regenerar
-            </button>
-
-            {onClose && (
-              <button
-                type="button"
-                onClick={onClose}
-                title="Ocultar animación"
-                className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
-              >
-                <X size={12} />
-              </button>
-            )}
-          </div>
+      {/* 1 barra superior mínima */}
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50/90 px-3 py-2 dark:border-slate-800 dark:bg-slate-800/60">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-800 dark:border-indigo-700/80 dark:bg-indigo-950/70 dark:text-indigo-200">
+            <VariantIcon size={12} />
+            Ejemplo paso a paso
+          </span>
+          <span className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+            <Code2 size={11} className="text-indigo-600 dark:text-indigo-400" />
+            {(storyboard.language || 'code').toUpperCase()}
+          </span>
+          <h3 className="truncate text-xs font-semibold text-slate-900 dark:text-slate-100">
+            {storyboard.title}
+          </h3>
         </div>
 
-        {error && (
-          <div className="flex items-center gap-1.5 rounded border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
-            <AlertTriangle size={12} className="shrink-0" />
-            <span className="truncate">{error}</span>
-          </div>
-        )}
-
-        {/* Subgoals clicables + Controles paso a paso */}
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          {storyboard.subgoals.length > 0 ? (
-            <div
-              role="navigation"
-              aria-label="Submetas de la escena"
-              className="flex min-w-0 flex-1 flex-wrap items-center gap-1"
-            >
-              {storyboard.subgoals.map((sg, idx) => {
-                const isCurrent = currentStep.subgoal_id === sg.id
-                return (
-                  <button
-                    key={sg.id}
-                    type="button"
-                    onClick={() => jumpToSubgoal(sg.id)}
-                    className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                      isCurrent
-                        ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
-                        : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
-                    }`}
-                  >
-                    <span className="font-mono text-[10px] opacity-75">{idx + 1}.</span>
-                    <span>{sg.label}</span>
-                  </button>
-                )
-              })}
+        <div className="flex shrink-0 items-center gap-1.5">
+          {storyboard.variant === 'error_contrast' && hasFixedCode && (
+            <div className="inline-flex rounded border border-slate-300 bg-white p-0.5 text-[10px] font-semibold dark:border-slate-700 dark:bg-slate-900">
+              <button
+                type="button"
+                onClick={() => setCodeViewTab('broken')}
+                className={`rounded px-1.5 py-0.5 transition-colors ${
+                  codeViewTab === 'broken'
+                    ? 'bg-rose-600 text-white'
+                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'
+                }`}
+              >
+                Con fallo
+              </button>
+              <button
+                type="button"
+                onClick={() => setCodeViewTab('fixed')}
+                className={`rounded px-1.5 py-0.5 transition-colors ${
+                  codeViewTab === 'fixed'
+                    ? 'bg-emerald-600 text-white'
+                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'
+                }`}
+              >
+                Corregido
+              </button>
             </div>
-          ) : (
-            <div className="flex-1" />
           )}
 
-          {/* Controles discretos paso a paso */}
-          <div className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            onClick={onRegenerate}
+            title="Regenerar ejemplo paso a paso"
+            className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            <RefreshCw size={12} />
+            Regenerar
+          </button>
+
+          {onClose && (
             <button
               type="button"
-              onClick={() => {
-                setAutoPlay(false)
-                setStepIdx(0)
-              }}
-              disabled={safeStepIdx === 0}
-              title="Ir al primer paso"
-              aria-label="Ir al primer paso"
-              className="inline-flex items-center justify-center rounded border border-slate-300 bg-white p-1 text-slate-700 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              onClick={onClose}
+              title="Colapsar ejemplo paso a paso"
+              aria-label="Colapsar ejemplo paso a paso"
+              className="inline-flex items-center justify-center rounded border border-slate-300 bg-white p-1 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
             >
-              <SkipBack size={13} />
+              <X size={13} />
             </button>
-            <button
-              type="button"
-              onClick={goPrev}
-              disabled={safeStepIdx === 0}
-              title="Paso anterior"
-              className="inline-flex items-center gap-0.5 rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              <ChevronLeft size={13} /> Anterior
-            </button>
-            <button
-              type="button"
-              onClick={toggleAutoPlay}
-              disabled={isUnresolvedCheckpoint(currentStep, checkpointAnswers)}
-              title={
-                isUnresolvedCheckpoint(currentStep, checkpointAnswers)
-                  ? 'Responde o salta la micro-predicción para continuar en automático'
-                  : autoPlay
-                    ? 'Pausar avance automático'
-                    : 'Reproducir pasos automáticamente'
-              }
-              className="inline-flex items-center gap-1 rounded border border-indigo-300 bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-500 disabled:opacity-45 dark:border-indigo-500 dark:bg-indigo-500 dark:hover:bg-indigo-400"
-            >
-              {autoPlay ? <Pause size={12} /> : <Play size={12} />}
-              {autoPlay ? 'Pausa' : 'Play'}
-            </button>
-            <button
-              type="button"
-              onClick={goNext}
-              disabled={safeStepIdx >= steps.length - 1}
-              title="Paso siguiente"
-              className="inline-flex items-center gap-0.5 rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              Siguiente <ChevronRight size={13} />
-            </button>
-            <span className="ml-1 rounded bg-slate-200/80 px-2 py-0.5 font-mono text-[11px] font-semibold tabular-nums text-slate-800 dark:bg-slate-800 dark:text-slate-200">
-              Paso {safeStepIdx + 1} / {steps.length}
-            </span>
-          </div>
+          )}
         </div>
       </header>
 
-      {/* Layout estricto de 2 paneles adyacentes (sin split-attention) */}
-      <div className="grid grid-cols-1 divide-y divide-slate-200 lg:grid-cols-12 lg:divide-x lg:divide-y-0 dark:divide-slate-800">
-        {/* Panel Izquierdo: Codigo numerado */}
-        <div className="flex min-w-0 flex-col bg-slate-50/50 lg:col-span-5 dark:bg-slate-950/40">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-1.5 dark:border-slate-800">
-            <span className="inline-flex items-center gap-1.5 font-mono text-[11px] font-semibold uppercase text-slate-700 dark:text-slate-300">
-              <Code2 size={13} className="text-indigo-600 dark:text-indigo-400" />
-              {(storyboard.language || 'code').toUpperCase()}
-            </span>
+      {error && (
+        <div className="flex items-center gap-1.5 border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+          <AlertTriangle size={12} className="shrink-0" />
+          <span className="truncate">{error}</span>
+        </div>
+      )}
 
-            {storyboard.variant === 'error_contrast' && hasFixedCode && (
-              <div className="inline-flex rounded border border-slate-300 bg-white p-0.5 text-[10px] font-semibold dark:border-slate-700 dark:bg-slate-900">
-                <button
-                  type="button"
-                  onClick={() => setCodeViewTab('broken')}
-                  className={`rounded px-2 py-0.5 transition-colors ${
-                    codeViewTab === 'broken'
-                      ? 'bg-rose-600 text-white'
-                      : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'
-                  }`}
-                >
-                  Código con fallo
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setCodeViewTab('fixed')}
-                  className={`rounded px-2 py-0.5 transition-colors ${
-                    codeViewTab === 'fixed'
-                      ? 'bg-emerald-600 text-white'
-                      : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'
-                  }`}
-                >
-                  Código corregido
-                </button>
-              </div>
-            )}
-          </div>
-
-          <div className="max-h-80 overflow-x-auto overflow-y-auto py-1.5 font-mono text-xs leading-relaxed lg:max-h-[26rem]">
+      {/* Layout vertical apilado: Código arriba (ancho completo), Estado abajo */}
+      <div className="flex flex-col divide-y divide-slate-200 dark:divide-slate-800">
+        {/* Bloque superior: Código numerado a ancho completo */}
+        <div className="w-full bg-slate-50/50 dark:bg-slate-950/40">
+          <div className="max-h-96 overflow-x-auto overflow-y-auto py-2 font-mono text-xs leading-relaxed">
             {codeLines.map((lineText, idx) => {
               const lineNo = idx + 1
               const isActive = activeLinesSet.has(lineNo)
               return (
                 <div
                   key={lineNo}
-                  className={`flex items-center px-2 py-0.5 transition-colors ${
+                  className={`flex items-center px-3 py-0.5 transition-colors ${
                     isActive
                       ? 'border-l-2 border-indigo-500 bg-indigo-50/90 font-medium text-slate-950 opacity-100 dark:bg-indigo-950/50 dark:text-white'
-                      : 'border-l-2 border-transparent text-slate-700 opacity-50 dark:text-slate-300'
+                      : 'border-l-2 border-transparent text-slate-700 opacity-55 dark:text-slate-300'
                   }`}
                 >
                   <span className="inline-flex w-4 shrink-0 items-center justify-center text-indigo-600 dark:text-indigo-400">
@@ -638,11 +441,17 @@ export default function CodeScenePlayer({
           </div>
         </div>
 
-        {/* Panel Derecho: Renderizador visual dedicado segun variant */}
-        <div className="flex min-w-0 flex-col gap-3 p-3 lg:col-span-7">
+        {/* Bloque inferior: Explicación del paso + Estado/Traza + Checkpoint */}
+        <div className="flex min-w-0 flex-col gap-3 p-3.5">
+          {currentStep.caption && (
+            <p className="rounded-md border border-indigo-200/80 bg-indigo-50/50 px-3 py-2 text-xs font-medium leading-relaxed text-slate-900 dark:border-indigo-800/70 dark:bg-indigo-950/30 dark:text-slate-100">
+              {currentStep.caption}
+            </p>
+          )}
+
           <VariantSceneRenderer variant={storyboard.variant} state={currentStep.state} />
 
-          {/* Micro-checkpoint interactivo de prediccion */}
+          {/* Micro-checkpoint interactivo de predicción */}
           {showCheckpoint && checkpoint && (
             <div className="rounded-md border border-amber-300 bg-amber-50/70 p-3 text-xs dark:border-amber-700/80 dark:bg-amber-950/25">
               <div className="flex items-center justify-between gap-2">
@@ -762,14 +571,50 @@ export default function CodeScenePlayer({
         </div>
       </div>
 
-      {/* Pie fijo del reproductor */}
-      <footer className="flex items-center justify-between gap-3 border-t border-slate-200 bg-slate-50/90 px-3 py-2 text-xs dark:border-slate-800 dark:bg-slate-800/60">
-        <p className="min-w-0 flex-1 truncate font-medium text-slate-800 dark:text-slate-200" title={currentStep.caption}>
-          {currentStep.caption}
-        </p>
-        <span className="shrink-0 rounded border border-slate-300 bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
-          {isLocalProvider ? 'Local' : 'IA'}
-        </span>
+      {/* 1 barra inferior fija de navegación manual */}
+      <footer className="flex items-center justify-between gap-2 border-t border-slate-200 bg-slate-50/90 px-3 py-2 text-xs dark:border-slate-800 dark:bg-slate-800/60">
+        <button
+          type="button"
+          onClick={goPrev}
+          disabled={safeStepIdx === 0}
+          className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+        >
+          <ChevronLeft size={14} />
+          Anterior
+        </button>
+
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-xs font-semibold tabular-nums text-slate-800 dark:text-slate-200">
+            Paso {safeStepIdx + 1} / {steps.length}
+          </span>
+          {steps.length > 1 && steps.length <= 12 && (
+            <div className="hidden items-center gap-1 sm:flex" aria-label="Selector de pasos">
+              {steps.map((st, idx) => (
+                <button
+                  key={st.index}
+                  type="button"
+                  onClick={() => setStepIdx(idx)}
+                  aria-label={`Ir al paso ${idx + 1}`}
+                  className={`h-1.5 rounded-full transition-all ${
+                    idx === safeStepIdx
+                      ? 'w-4 bg-indigo-600 dark:bg-indigo-400'
+                      : 'w-1.5 bg-slate-300 hover:bg-slate-400 dark:bg-slate-700 dark:hover:bg-slate-500'
+                  }`}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+        <button
+          type="button"
+          onClick={goNext}
+          disabled={safeStepIdx >= steps.length - 1}
+          className="inline-flex items-center gap-1 rounded-md bg-indigo-600 px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-indigo-500 disabled:opacity-40 dark:bg-indigo-500 dark:hover:bg-indigo-400"
+        >
+          Siguiente
+          <ArrowRight size={13} />
+        </button>
       </footer>
     </section>
   )
@@ -1203,11 +1048,13 @@ function OopDispatchView({ state }: { state: Record<string, unknown> }) {
 
 // 3. error_contrast
 function ErrorContrastView({ state }: { state: Record<string, unknown> }) {
-  const rawPhase = asStr(state.phase).toLowerCase()
-  const codeView = asStr(state.code_view).toLowerCase()
+  const rawPhase = asStr(state.phase).toLowerCase().trim()
+  const codeView = asStr(state.code_view).toLowerCase().trim()
   const exception = state.exception ? asRecord(state.exception) : null
   const callStack = asArray(state.call_stack).map((f) => asRecord(f))
   const contrast = state.contrast ? asRecord(state.contrast) : null
+
+  const isFixedDiffPhase = rawPhase === 'fixed_diff' || rawPhase === 'contrast_fix'
 
   let activePhase = 1
   if (
@@ -1217,6 +1064,7 @@ function ErrorContrastView({ state }: { state: Record<string, unknown> }) {
   ) {
     activePhase = 2
   } else if (
+    isFixedDiffPhase ||
     rawPhase.includes('contrast') ||
     rawPhase.includes('fix') ||
     rawPhase.includes('after') ||
@@ -1230,10 +1078,11 @@ function ErrorContrastView({ state }: { state: Record<string, unknown> }) {
   const exMessage = exception ? asStr(exception.message) : ''
   const exLine = exception ? asNum(exception.line) : null
 
-  const bugCause = contrast ? asStr(contrast.bug_cause) : ''
-  const brokenLine = contrast ? asStr(contrast.broken_line) : ''
-  const fixedLine = contrast ? asStr(contrast.fixed_line) : ''
-  const fixExplanation = contrast ? asStr(contrast.fix_explanation) : ''
+  const bugCause = contrast ? asStr(contrast.bug_cause).trim() : ''
+  const beforeCode = contrast ? asStr(contrast.before ?? contrast.broken_line).trim() : ''
+  const afterCode = contrast ? asStr(contrast.after ?? contrast.fixed_line).trim() : ''
+  const fixExplanation = contrast ? asStr(contrast.fix_explanation).trim() : ''
+  const showContrast = isFixedDiffPhase && Boolean(beforeCode || afterCode)
 
   return (
     <div className="flex flex-col gap-2.5 text-xs">
@@ -1323,8 +1172,8 @@ function ErrorContrastView({ state }: { state: Record<string, unknown> }) {
         </div>
       )}
 
-      {/* Vista de contraste Antes -> Despues */}
-      {(bugCause || brokenLine || fixedLine || fixExplanation) && (
+      {/* Vista de contraste Antes -> Despues (SOLO en fase fixed_diff y con contenido) */}
+      {showContrast && (
         <div className="flex flex-col gap-2 rounded-md border border-slate-200 bg-slate-50/80 p-2.5 dark:border-slate-800 dark:bg-slate-900/60">
           {bugCause && (
             <p className="text-[11px] font-medium text-slate-800 dark:text-slate-200">
@@ -1333,23 +1182,23 @@ function ErrorContrastView({ state }: { state: Record<string, unknown> }) {
             </p>
           )}
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {brokenLine && (
+            {beforeCode && (
               <div className="rounded border border-rose-300 bg-rose-50/90 p-2 dark:border-rose-800 dark:bg-rose-950/35">
                 <div className="text-[10px] font-semibold uppercase text-rose-800 dark:text-rose-300">
                   Antes (con fallo)
                 </div>
                 <pre className="mt-1 overflow-x-auto font-mono text-[11px] text-rose-950 dark:text-rose-200">
-                  {brokenLine}
+                  {beforeCode}
                 </pre>
               </div>
             )}
-            {fixedLine && (
+            {afterCode && (
               <div className="rounded border border-emerald-300 bg-emerald-50/90 p-2 dark:border-emerald-800 dark:bg-emerald-950/35">
                 <div className="text-[10px] font-semibold uppercase text-emerald-800 dark:text-emerald-300">
                   Después (corregido)
                 </div>
                 <pre className="mt-1 overflow-x-auto font-mono text-[11px] text-emerald-950 dark:text-emerald-200">
-                  {fixedLine}
+                  {afterCode}
                 </pre>
               </div>
             )}

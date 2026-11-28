@@ -9,6 +9,7 @@ import {
   Code2,
   Copy,
   FastForward,
+  Film,
   Gauge,
   Languages,
   Loader2,
@@ -39,6 +40,7 @@ import {
 import { useAppStore } from '../../store/useAppStore'
 import { useStudyStore } from '../../store/useStudyStore'
 import { getLanguageExtension } from './CodeChallengeInput'
+import CinemaReelModal from './CinemaReelModal'
 import CodeScenePlayer, { STORYBOARD_VARIANT_META } from './CodeScenePlayer'
 import {
   splitStoryParagraphSentences,
@@ -181,7 +183,9 @@ export default function StoryTab({
   onRegenerateStory,
   onAskTutor,
 }: Props) {
-  const isCodeLab = engineType === 'code_lab'
+  const resolvedEngine = engineType || 'concept_tree'
+  const isCodeLab = resolvedEngine === 'code_lab'
+  const supportsCinemaReel = resolvedEngine === 'code_lab' || resolvedEngine === 'concept_tree'
   const explanationStyle = useStudyStore((s) => s.explanationStyle)
   const setExplanationStyle = useStudyStore((s) => s.setExplanationStyle)
   const speech = useSpeech(node.story_script)
@@ -224,6 +228,7 @@ export default function StoryTab({
     }
   }
 
+  const [cinemaOpen, setCinemaOpen] = useState(false)
   const [storyboard, setStoryboard] = useState<NodeStoryboardResponse | null>(null)
   const [playerOpen, setPlayerOpen] = useState(false)
   const [generatingStoryboard, setGeneratingStoryboard] = useState(false)
@@ -231,6 +236,11 @@ export default function StoryTab({
     null,
   )
   const [storyboardError, setStoryboardError] = useState<string | null>(null)
+
+  // Cerrar Modo Cine automáticamente al cambiar de nodo o curso
+  useEffect(() => {
+    setCinemaOpen(false)
+  }, [courseId, node.id])
 
   const {
     blocks: storyBlocks,
@@ -536,12 +546,12 @@ export default function StoryTab({
       setStoryboardProgress({
         stage: 'done',
         pct: 100,
-        label: 'Animación lista',
+        label: 'Ejemplo paso a paso listo',
       })
     } catch (err) {
       if (ctrl.signal.aborted) return
       setStoryboardError(
-        err instanceof Error ? err.message : 'No se pudo generar la animación paso a paso.',
+        err instanceof Error ? err.message : 'No se pudo generar el ejemplo paso a paso.',
       )
     } finally {
       if (storyboardAbortRef.current === ctrl) {
@@ -683,6 +693,36 @@ export default function StoryTab({
         </div>
       )}
 
+      {supportsCinemaReel && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-indigo-200 bg-gradient-to-r from-indigo-50/90 via-white to-slate-50 px-3.5 py-2.5 dark:border-indigo-800/70 dark:from-indigo-950/50 dark:via-slate-900 dark:to-slate-900">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-indigo-600 text-white shadow-xs dark:bg-indigo-500">
+              <Film size={16} />
+            </span>
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                Explicación visual en 5 actos (~1 min)
+              </div>
+              <p className="truncate text-[11px] text-slate-600 dark:text-slate-400">
+                Narración neural con escenas cinéticas y subtítulos palabra por palabra.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={regenerating}
+            onClick={() => {
+              stopAudio()
+              setCinemaOpen(true)
+            }}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs transition-colors hover:bg-indigo-500 disabled:opacity-50 dark:bg-indigo-500 dark:hover:bg-indigo-400"
+          >
+            <Film size={14} />
+            Ver mini-video (Modo Cine)
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-col gap-2 rounded-md border border-slate-200 p-2.5 dark:border-slate-700">
         <div className="flex flex-wrap items-center gap-2">
           <Volume2 size={16} className="text-slate-500" />
@@ -786,10 +826,10 @@ export default function StoryTab({
                   type="button"
                   disabled={regenerating}
                   onClick={() => void runStoryboardGeneration(false)}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-indigo-300 bg-indigo-50/80 px-3 py-1.5 text-xs font-semibold text-indigo-900 transition-colors hover:bg-indigo-100 disabled:opacity-50 dark:border-indigo-700/80 dark:bg-indigo-950/50 dark:text-indigo-200 dark:hover:bg-indigo-900/50"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 transition-colors hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                 >
                   <Clapperboard size={14} className="text-indigo-600 dark:text-indigo-400" />
-                  Animar explicación paso a paso
+                  Ejemplo paso a paso
                 </button>
               ) : (
                 <button
@@ -798,7 +838,7 @@ export default function StoryTab({
                   className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                 >
                   <Clapperboard size={14} className="text-indigo-600 dark:text-indigo-400" />
-                  <span>{playerOpen ? 'Ocultar animación' : 'Ver animación paso a paso'}</span>
+                  <span>{playerOpen ? 'Ocultar ejemplo paso a paso' : 'Ejemplo paso a paso'}</span>
                   <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-800 dark:bg-indigo-950/80 dark:text-indigo-300">
                     {(STORYBOARD_VARIANT_META[storyboard.variant] ??
                       STORYBOARD_VARIANT_META.execution_trace
@@ -818,9 +858,6 @@ export default function StoryTab({
               generating={generatingStoryboard}
               progress={storyboardProgress}
               error={storyboardError}
-              activeSentenceIndex={activeSentenceIndex}
-              totalSentences={flatSentences.length}
-              isAudioPlaying={isPlaying}
               onRegenerate={() => void runStoryboardGeneration(true)}
               onClose={() => setPlayerOpen(false)}
             />
@@ -948,6 +985,16 @@ export default function StoryTab({
           </button>
         </form>
       </div>
+
+      {supportsCinemaReel && (
+        <CinemaReelModal
+          courseId={courseId}
+          nodeId={node.id}
+          nodeTitle={node.title}
+          open={cinemaOpen}
+          onClose={() => setCinemaOpen(false)}
+        />
+      )}
     </div>
   )
 }

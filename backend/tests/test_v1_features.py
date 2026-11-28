@@ -1562,7 +1562,7 @@ def test_storyboard_404_then_autodetects_and_persists_variants(client: TestClien
 
     expected = {
         "OOP": ("oop_dispatch", {"classes", "references", "heap_objects", "dispatch"}),
-        "ERR": ("error_contrast", {"phase", "code_view", "exception", "call_stack", "contrast"}),
+        "ERR": ("error_contrast", {"phase", "code_view", "exception", "call_stack"}),
         "SQL": ("sql_pipeline", {"active_clause", "pipeline_stages", "clause_sql", "columns", "rows", "note"}),
         "DS": ("data_structure", {"structure_type", "size", "capacity", "cells", "pointers", "buckets"}),
     }
@@ -1576,6 +1576,8 @@ def test_storyboard_404_then_autodetects_and_persists_variants(client: TestClien
         assert state_keys <= set(body["steps"][0]["state"].keys())
         if variant == "error_contrast":
             assert body["fixed_code"]
+            assert "contrast" not in body["steps"][0]["state"]
+            assert "contrast" in body["steps"][-1]["state"]
         if variant == "sql_pipeline":
             assert body["language"] == "sql"
 
@@ -2157,3 +2159,339 @@ def test_language_practice_chat_full_flow_start_turn_finish_and_404(client: Test
         assert {"said", "better", "why"} <= set(item.keys())
         assert item["said"].strip() and item["better"].strip() and item["why"].strip()
     assert any("doesn't" in it["better"].lower() for it in summary["items"])
+
+
+# ---------------- v1.2.4: Fix error_contrast + Mini-Video Modo Cine (node_cinema_reels) ----------------
+
+
+def test_error_contrast_sanitizer_never_injects_npe_fallback_and_hides_contrast_in_buggy_run(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import ai_router
+
+    _install_storyboard_pack(client)
+    calc_source = (
+        "public class Calculadora {\n"
+        "    static int dividir(int a, int b) {\n"
+        "        return a / b;\n"
+        "    }\n"
+        "    public static void main(String[] args) {\n"
+        "        System.out.println(dividir(10, 0));\n"
+        "    }\n"
+        "}"
+    )
+    calc_fixed = (
+        "public class Calculadora {\n"
+        "    static int dividir(int a, int b) {\n"
+        "        if (b == 0) throw new IllegalArgumentException(\"Divisor cero\");\n"
+        "        return a / b;\n"
+        "    }\n"
+        "    public static void main(String[] args) {\n"
+        "        System.out.println(dividir(10, 2));\n"
+        "    }\n"
+        "}"
+    )
+
+    # Caso 1: IA genera codigo propio (Calculadora.dividir / ArithmeticException), mete contrast indebido
+    # en buggy_run y omite contrast en fixed_diff.
+    def fake_calc_with_fix(_messages: list[dict[str, str]], **_kwargs: Any) -> AiCompletion:
+        payload = {
+            "variant": "error_contrast",
+            "language": "java",
+            "title": "División por cero en Calculadora",
+            "source_code": calc_source,
+            "fixed_code": calc_fixed,
+            "subgoals": [
+                {"id": "s1", "label": "Ejecución con fallo"},
+                {"id": "s2", "label": "Corrección defensiva"},
+            ],
+            "steps": [
+                {
+                    "index": 0,
+                    "subgoal_id": "s1",
+                    "active_lines": [6],
+                    "caption": "main invoca dividir(10, 0).",
+                    "checkpoint": {"enabled": False},
+                    "state": {
+                        "phase": "buggy_run",
+                        "code_view": "broken",
+                        "exception": None,
+                        "call_stack": [{"frame": "main()", "status": "active", "line": 6}],
+                        "contrast": {
+                            "bug_cause": "Spoiler indebido en buggy_run",
+                            "broken_line": "return a / b;",
+                            "fixed_line": "if (b == 0) ...",
+                        },
+                    },
+                },
+                {
+                    "index": 1,
+                    "subgoal_id": "s1",
+                    "active_lines": [3],
+                    "caption": "dividir intenta calcular 10 / 0.",
+                    "checkpoint": {
+                        "enabled": True,
+                        "question": "¿Qué excepción lanza 10 / 0 en Java?",
+                        "options": ["ArithmeticException", "IndexOutOfBoundsException"],
+                        "correct_index": 0,
+                        "explanation": "La división entera por cero lanza ArithmeticException.",
+                    },
+                    "state": {
+                        "phase": "buggy_run",
+                        "code_view": "broken",
+                        "exception": {
+                            "type": "ArithmeticException",
+                            "message": "/ by zero",
+                            "line": 3,
+                        },
+                        "call_stack": [
+                            {"frame": "main()", "status": "active", "line": 6},
+                            {"frame": "Calculadora.dividir(10, 0)", "status": "crashed", "line": 3},
+                        ],
+                    },
+                },
+                {
+                    "index": 2,
+                    "subgoal_id": "s1",
+                    "active_lines": [3],
+                    "caption": "ArithmeticException desenrolla la pila.",
+                    "checkpoint": {"enabled": False},
+                    "state": {
+                        "phase": "stack_unwinding",
+                        "code_view": "broken",
+                        "exception": {
+                            "type": "ArithmeticException",
+                            "message": "/ by zero",
+                            "line": 3,
+                        },
+                        "call_stack": [{"frame": "Calculadora.dividir(10, 0)", "status": "unwinding", "line": 3}],
+                    },
+                },
+                {
+                    "index": 3,
+                    "subgoal_id": "s2",
+                    "active_lines": [3],
+                    "caption": "Validar b == 0 evita la excepción inesperada.",
+                    "checkpoint": {"enabled": False},
+                    "state": {
+                        "phase": "fixed_diff",
+                        "code_view": "fixed",
+                        "exception": None,
+                        "call_stack": [{"frame": "Calculadora.dividir(10, 2)", "status": "ok", "line": 4}],
+                        # contrast deliberadamente ausente para probar derivacion desde source_code/fixed_code
+                    },
+                },
+                {
+                    "index": 4,
+                    "subgoal_id": "s2",
+                    "active_lines": [7],
+                    "caption": "main imprime el resultado válido 5.",
+                    "checkpoint": {"enabled": False},
+                    "state": {
+                        "phase": "fixed_diff",
+                        "code_view": "fixed",
+                        "exception": None,
+                        "call_stack": [{"frame": "main()", "status": "ok", "line": 7}],
+                    },
+                },
+            ],
+        }
+        return AiCompletion(text=json.dumps(payload), provider="groq", model="llama-3.3-70b-versatile")
+
+    monkeypatch.setattr(ai_router, "complete_chat", fake_calc_with_fix)
+
+    res = client.post(f"/api/v1/study/{_STORYBOARD_COURSE}/ERR/storyboard?force=true")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["provider"] == "groq"
+    assert body["variant"] == "error_contrast"
+
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert "texto.trim()" not in serialized
+    assert "NullPointerException" not in serialized
+    assert "ValidadorCodigo" not in serialized
+    assert body["fixed_code"] is not None
+    assert "Calculadora" in body["fixed_code"]
+
+    for step in body["steps"]:
+        st = step["state"]
+        if st["phase"] in ("buggy_run", "running", "exception_thrown", "stack_unwinding", "caught"):
+            assert "contrast" not in st
+        elif st["phase"] == "fixed_diff":
+            assert "contrast" in st
+            assert "b == 0" in st["contrast"]["fixed_line"]
+            assert "texto.trim()" not in st["contrast"]["broken_line"]
+
+    # Caso 2: IA omite fixed_code -> NO se sustituye por fallback NullPointerException y contrast queda ausente
+    def fake_calc_without_fixed(_messages: list[dict[str, str]], **_kwargs: Any) -> AiCompletion:
+        payload = {
+            "variant": "error_contrast",
+            "language": "java",
+            "title": "División por cero sin fixed_code",
+            "source_code": calc_source,
+            "fixed_code": None,
+            "subgoals": [{"id": "s1", "label": "Fallo"}, {"id": "s2", "label": "Cierre"}],
+            "steps": [
+                {
+                    "index": i,
+                    "subgoal_id": "s1" if i < 3 else "s2",
+                    "active_lines": [3],
+                    "caption": f"Paso {i} de Calculadora.",
+                    "checkpoint": {"enabled": False},
+                    "state": {
+                        "phase": "buggy_run" if i < 3 else "fixed_diff",
+                        "code_view": "broken" if i < 3 else "fixed",
+                        "exception": (
+                            {"type": "ArithmeticException", "message": "/ by zero", "line": 3}
+                            if i == 1
+                            else None
+                        ),
+                        "call_stack": [{"frame": "Calculadora.dividir()", "status": "active", "line": 3}],
+                    },
+                }
+                for i in range(5)
+            ],
+        }
+        return AiCompletion(text=json.dumps(payload), provider="groq", model="llama-3.3-70b-versatile")
+
+    monkeypatch.setattr(ai_router, "complete_chat", fake_calc_without_fixed)
+    res2 = client.post(f"/api/v1/study/{_STORYBOARD_COURSE}/ERR/storyboard?force=true")
+    assert res2.status_code == 200, res2.text
+    body2 = res2.json()
+    assert body2["fixed_code"] is None
+    serialized2 = json.dumps(body2, ensure_ascii=False)
+    assert "texto.trim()" not in serialized2
+    assert "NullPointerException" not in serialized2
+    assert all("contrast" not in s["state"] for s in body2["steps"])
+
+
+def test_cinema_reel_end_to_end_audio_stream_and_story_regeneration_preservation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routers import study as study_router
+    from app.services.tts import cinema_act_audio_path
+
+    _install_storyboard_pack(client)
+    base = f"/api/v1/study/{_STORYBOARD_COURSE}/OOP"
+
+    # 1. GET /cinema-reel devuelve 404 antes de generarse (y para nodos/cursos inexistentes)
+    assert client.get(f"{base}/cinema-reel").status_code == 404
+    assert client.get(f"/api/v1/study/{_STORYBOARD_COURSE}/NOPE/cinema-reel").status_code == 404
+    assert client.get(f"{base}/cinema-reel/audio/0").status_code == 404
+    assert client.get(f"/api/v1/study/{_STORYBOARD_COURSE}/NOPE/cinema-reel/stream").status_code == 404
+
+    # Mock de synthesize_cinema_act_audios para no depender de red y escribir MP3 dummy en cache
+    synth_calls: list[list[str]] = []
+
+    async def fake_synthesize_cinema_act_audios(
+        course_id: str,
+        texts: list[str],
+        voice: str | None = None,
+    ) -> list[Path | None]:
+        synth_calls.append(list(texts))
+        out: list[Path | None] = []
+        for idx, txt in enumerate(texts):
+            p = cinema_act_audio_path(course_id, txt, voice)
+            p.write_bytes(f"ID3-CINEMA-ACT-{idx}".encode())
+            out.append(p)
+        return out
+
+    monkeypatch.setattr(study_router, "synthesize_cinema_act_audios", fake_synthesize_cinema_act_audios)
+
+    # 2. POST /cinema-reel genera 5 actos en orden estricto, persiste y devuelve audio_url
+    created = client.post(f"{base}/cinema-reel")
+    assert created.status_code == 200, created.text
+    reel = created.json()
+    assert reel["course_id"] == _STORYBOARD_COURSE
+    assert reel["node_id"] == "OOP"
+    assert reel["provider"] == "local_fallback"
+    assert len(reel["acts"]) == 5
+    assert [a["index"] for a in reel["acts"]] == [0, 1, 2, 3, 4]
+    assert [a["kind"] for a in reel["acts"]] == ["hook", "analogy", "mechanism", "payoff", "takeaway"]
+    assert len(reel["acts"][4]["pills"]) == 3
+    for i, act in enumerate(reel["acts"]):
+        assert act["audio_url"] == f"/api/v1/study/{_STORYBOARD_COURSE}/OOP/cinema-reel/audio/{i}"
+        assert 5.0 <= act["estimated_sec"] <= 25.0
+    assert len(synth_calls) == 1
+
+    # GET /cinema-reel devuelve exactamente lo persistido con audio_url activo
+    fetched = client.get(f"{base}/cinema-reel")
+    assert fetched.status_code == 200
+    assert fetched.json() == reel
+
+    # Segundo POST sin force usa cache sin volver a sintetizar
+    cached_post = client.post(f"{base}/cinema-reel")
+    assert cached_post.status_code == 200
+    assert cached_post.json()["updated_at"] == reel["updated_at"]
+    assert len(synth_calls) == 1
+
+    # 3. GET /cinema-reel/audio/{act_index} devuelve 200 audio/mpeg con bytes esperados; invalido -> 404
+    audio0 = client.get(f"{base}/cinema-reel/audio/0")
+    assert audio0.status_code == 200
+    assert audio0.headers["content-type"].startswith("audio/mpeg")
+    assert audio0.content == b"ID3-CINEMA-ACT-0"
+
+    assert client.get(f"{base}/cinema-reel/audio/5").status_code == 404
+    assert client.get(f"{base}/cinema-reel/audio/-1").status_code == 404
+
+    # 4. GET /cinema-reel/stream en nodo nuevo emite hitos 15 -> 55 -> 88 -> 100 sin database is locked
+    stream_res = client.get(f"/api/v1/study/{_STORYBOARD_COURSE}/DS/cinema-reel/stream")
+    assert stream_res.status_code == 200
+    assert stream_res.headers["content-type"].startswith("text/event-stream")
+    events = _parse_sse(stream_res.text)
+    assert [e["stage"] for e in events] == ["analyzing", "scripting", "synthesizing_audio", "done"]
+    assert [e["pct"] for e in events] == [15, 55, 88, 100]
+    streamed_reel = events[-1]["reel"]
+    assert [a["kind"] for a in streamed_reel["acts"]] == ["hook", "analogy", "mechanism", "payoff", "takeaway"]
+    assert all(a["audio_url"] for a in streamed_reel["acts"])
+
+    # Confirmar persistencia en SQLite desde la conexion dedicada del stream
+    stored_ds = client.get(f"/api/v1/study/{_STORYBOARD_COURSE}/DS/cinema-reel")
+    assert stored_ds.status_code == 200
+    assert stored_ds.json()["updated_at"] == streamed_reel["updated_at"]
+
+    # 5. Tras POST /regenerate-story, GET /cinema-reel sigue intacto (preservacion)
+    regen = client.post(f"{base}/regenerate-story")
+    assert regen.status_code == 200
+    still_there = client.get(f"{base}/cinema-reel")
+    assert still_there.status_code == 200
+    assert still_there.json()["updated_at"] == reel["updated_at"]
+    assert still_there.json()["acts"] == reel["acts"]
+
+
+def test_synthesize_cinema_act_audios_parallel_cache_and_partial_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    from app.services import tts
+
+    monkeypatch.setenv("BROTAL_HOME", str(tmp_path))
+    edge_calls: list[tuple[str, str]] = []
+
+    async def fake_edge(text: str, voice: str, out_path: Path) -> dict[str, Any]:
+        edge_calls.append((text, voice))
+        if "FALLAR" in text:
+            raise RuntimeError("offline")
+        out_path.write_bytes(f"MP3::{text}".encode())
+        return {"sentences": [], "words": []}
+
+    monkeypatch.setattr(tts, "_run_edge_tts", fake_edge)
+
+    texts = ["Acto uno narrado", "Acto dos FALLAR", "Acto tres narrado"]
+    paths = asyncio.run(tts.synthesize_cinema_act_audios("curso-test", texts))
+    assert len(paths) == 3
+    assert paths[0] is not None and paths[0].is_file()
+    assert paths[1] is None
+    assert paths[2] is not None and paths[2].is_file()
+
+    # Segunda ejecucion usa cache para los actos exitosos sin volver a llamar edge-tts en ellos
+    prev_ok_calls = sum(1 for t, _v in edge_calls if "FALLAR" not in t)
+    paths2 = asyncio.run(tts.synthesize_cinema_act_audios("curso-test", [texts[0], texts[2]]))
+    after_ok_calls = sum(1 for t, _v in edge_calls if "FALLAR" not in t)
+    assert paths2[0] == paths[0]
+    assert paths2[1] == paths[2]
+    assert after_ok_calls == prev_ok_calls

@@ -271,6 +271,48 @@ export interface StoryboardStreamProgress {
   label: string
 }
 
+export type CinemaActKind = 'hook' | 'analogy' | 'mechanism' | 'payoff' | 'takeaway'
+export type CinemaVisualMode = 'kinetic_blocks' | 'code_morph'
+
+export interface CinemaVisualNode {
+  id: string
+  label: string
+  sublabel: string
+  tone: string // 'indigo' | 'emerald' | 'amber' | 'rose' | 'sky' | 'slate'
+  status: string // 'active' | 'problem' | 'solved' | 'new' | 'core'
+}
+
+export interface CinemaAct {
+  index: number
+  kind: CinemaActKind
+  title: string
+  narration_es: string
+  estimated_sec: number
+  visual_mode: CinemaVisualMode
+  headline: string
+  nodes: CinemaVisualNode[]
+  flow_label: string
+  code_before?: string | null
+  code_after?: string | null
+  pills: string[]
+  audio_url?: string | null
+}
+
+export interface NodeCinemaReelResponse {
+  course_id: string
+  node_id: string
+  title: string
+  acts: CinemaAct[]
+  provider: string
+  updated_at: string
+}
+
+export interface CinemaReelStreamProgress {
+  stage: 'analyzing' | 'scripting' | 'synthesizing_audio' | 'done' | 'error'
+  pct: number
+  label: string
+}
+
 export const PASS_SCORE = 7.0
 export const MAX_MASTERY = 3
 export const COOLDOWN_MS: Record<CooldownMode, number> = {
@@ -615,6 +657,132 @@ export async function streamNodeStoryboard(
       label: 'Animación lista',
     })
     return storyboard
+  }
+}
+
+/** GET /api/v1/study/{course_id}/{node_id}/cinema-reel -> reel guardado o null si 404. */
+export async function getNodeCinemaReel(
+  courseId: string,
+  nodeId: string,
+  signal?: AbortSignal,
+): Promise<NodeCinemaReelResponse | null> {
+  const res = await fetch(
+    `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/cinema-reel`,
+    { signal },
+  )
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return (await res.json()) as NodeCinemaReelResponse
+}
+
+/** POST /api/v1/study/{course_id}/{node_id}/cinema-reel?force=... */
+export async function generateNodeCinemaReel(
+  courseId: string,
+  nodeId: string,
+  force = false,
+  signal?: AbortSignal,
+): Promise<NodeCinemaReelResponse> {
+  return api<NodeCinemaReelResponse>(
+    `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/cinema-reel?force=${force ? 'true' : 'false'}`,
+    { method: 'POST', signal },
+  )
+}
+
+/** GET /api/v1/study/{course_id}/{node_id}/cinema-reel/stream?force=... (SSE con fallback POST). */
+export async function streamNodeCinemaReel(
+  courseId: string,
+  nodeId: string,
+  opts?: {
+    force?: boolean
+    signal?: AbortSignal
+    onProgress?: (p: CinemaReelStreamProgress) => void
+  },
+): Promise<NodeCinemaReelResponse> {
+  const force = Boolean(opts?.force)
+  const onProgress = opts?.onProgress
+  const signal = opts?.signal
+
+  const parseSseDataLine = (rawLine: string): NodeCinemaReelResponse | null => {
+    const trimmed = rawLine.trim()
+    if (!trimmed.startsWith('data:')) return null
+    const jsonStr = trimmed.slice(5).trim()
+    if (!jsonStr) return null
+    const payload = JSON.parse(jsonStr) as {
+      stage?: CinemaReelStreamProgress['stage']
+      pct?: number
+      label?: string
+      detail?: string
+      reel?: NodeCinemaReelResponse
+    }
+    if (payload.stage && typeof payload.pct === 'number') {
+      onProgress?.({
+        stage: payload.stage,
+        pct: payload.pct,
+        label: payload.label ?? '',
+      })
+    }
+    if (payload.stage === 'error') {
+      throw new Error(payload.label || payload.detail || 'Error en stream de Modo Cine')
+    }
+    if (payload.stage === 'done' && payload.reel) {
+      return payload.reel
+    }
+    return null
+  }
+
+  try {
+    const res = await fetch(
+      `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/cinema-reel/stream?force=${force ? 'true' : 'false'}`,
+      {
+        headers: { Accept: 'text/event-stream' },
+        signal,
+      },
+    )
+    if (!res.ok || !res.body) {
+      throw new Error(`${res.status} ${res.statusText}`)
+    }
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        const result = parseSseDataLine(line)
+        if (result) return result
+      }
+    }
+
+    buffer += decoder.decode()
+    if (buffer.trim()) {
+      for (const line of buffer.split('\n')) {
+        const result = parseSseDataLine(line)
+        if (result) return result
+      }
+    }
+
+    throw new Error('Stream finalizado sin Cinema Reel')
+  } catch (err) {
+    if (isAbortError(err, signal)) {
+      throw err
+    }
+    onProgress?.({
+      stage: 'scripting',
+      pct: 55,
+      label: 'Escribiendo guion y sintetizando narración...',
+    })
+    const reel = await generateNodeCinemaReel(courseId, nodeId, force, signal)
+    onProgress?.({
+      stage: 'done',
+      pct: 100,
+      label: 'Mini-video listo',
+    })
+    return reel
   }
 }
 

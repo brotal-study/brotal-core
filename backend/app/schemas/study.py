@@ -205,6 +205,43 @@ class NodeStoryboardResponse(BaseModel):
     updated_at: str
 
 
+CinemaActKind = Literal["hook", "analogy", "mechanism", "payoff", "takeaway"]
+CinemaVisualMode = Literal["kinetic_blocks", "code_morph"]
+
+
+class CinemaVisualNode(BaseModel):
+    id: str
+    label: str
+    sublabel: str = ""
+    tone: str = "indigo"
+    status: str = "active"
+
+
+class CinemaAct(BaseModel):
+    index: int
+    kind: CinemaActKind
+    title: str
+    narration_es: str
+    estimated_sec: float = 10.0
+    visual_mode: CinemaVisualMode = "kinetic_blocks"
+    headline: str = ""
+    nodes: list[CinemaVisualNode] = Field(default_factory=list)
+    flow_label: str = ""
+    code_before: str | None = None
+    code_after: str | None = None
+    pills: list[str] = Field(default_factory=list)
+    audio_url: str | None = None
+
+
+class NodeCinemaReelResponse(BaseModel):
+    course_id: str
+    node_id: str
+    title: str
+    acts: list[CinemaAct]
+    provider: str = "local_fallback"
+    updated_at: str
+
+
 def normalize_answers(
     raw_answers: list[AnswerItem] | list[str] | dict[str, str] | Any,
     eval_prompts: list[dict[str, Any]],
