@@ -1456,3 +1456,300 @@ def test_phrase_tts_endpoint_validation_and_english_mp3_cache(
     assert ok_gb.status_code == 200
     assert ok_gb.headers["content-type"].startswith("audio/mpeg")
     assert calls[-1][1] == "en-GB-SoniaNeural"
+
+
+# ---------------- v1.2.2: Animaciones explicativas auto-adaptativas (node_storyboards) ----------------
+
+_STORYBOARD_COURSE = "local-inf2236-anim"
+
+
+def _storyboard_node(node_id: str, title: str, summary: str, story: str) -> dict[str, Any]:
+    return {
+        "id": node_id,
+        "parent_ids": [],
+        "branch": "theory",
+        "block": "Bloque 1 · Animaciones",
+        "title": title,
+        "summary": summary,
+        "story_script": story,
+        "eval_prompts": [
+            {
+                "id": "q1",
+                "question": f"Explica {title}.",
+                "rubric_points": ["Punto clave"],
+                "challenge_type": "concept",
+                "language": "java",
+                "starter_code": None,
+            }
+        ],
+    }
+
+
+def _install_storyboard_pack(client: TestClient) -> None:
+    pack = {
+        "schema_version": "1.0",
+        "id": _STORYBOARD_COURSE,
+        "course_code": "INF2236",
+        "title": "Programacion Avanzada en Java y SQL",
+        "language": "es",
+        "engine_type": "code_lab",
+        "metadata": {
+            "university_id": "local",
+            "career_ids": ["cl-pucv-inf-2022"],
+            "created_year": 2026,
+            "updated_year": 2026,
+            "version": "1.0.0",
+            "authors": ["Test"],
+            "license": "CC-BY-SA-4.0",
+            "world_metaphor": "Fabrica Modular JVM",
+        },
+        "nodes": [
+            _storyboard_node(
+                "OOP",
+                "Herencia, Polimorfismo y @Override",
+                "Despacho dinamico con extends y super()",
+                "La clase Perro extends Animal y aplica @Override sobre hablar(). "
+                "Con polimorfismo, la JVM resuelve el tipo dinamico en el heap. "
+                "Con super.hablar() se invoca la version de la superclase.",
+            ),
+            _storyboard_node(
+                "ERR",
+                "Excepciones con try / catch",
+                "NullPointerException y stack unwinding",
+                "Cuando un objeto es null, invocar un metodo lanza NullPointerException. "
+                "La excepcion recorre la pila hasta encontrar un bloque try / catch. "
+                "Corregir el bug implica validar antes de usar la referencia.",
+            ),
+            _storyboard_node(
+                "SQL",
+                "Consultas con SELECT y GROUP BY",
+                "Orden logico FROM, WHERE, GROUP BY, HAVING y SELECT",
+                "La consulta SELECT carrera, COUNT(*) FROM alumnos WHERE edad > 20 "
+                "GROUP BY carrera HAVING COUNT(*) > 1 se evalua primero por FROM. "
+                "Luego WHERE filtra filas y GROUP BY agrupa antes de proyectar.",
+            ),
+            _storyboard_node(
+                "DS",
+                "ArrayList y HashMap",
+                "Capacidad, size y buckets",
+                "Un ArrayList guarda elementos en un arreglo interno con capacidad. "
+                "Un HashMap ubica cada clave en buckets usando hash(k) % N.",
+            ),
+        ],
+    }
+    res = client.post("/api/v1/courses/install-pack", json=pack)
+    assert res.status_code == 200, res.text
+
+
+def _assert_storyboard_contract(body: dict[str, Any]) -> None:
+    assert 6 <= len(body["source_code"].splitlines()) <= 22
+    assert 2 <= len(body["subgoals"]) <= 4
+    assert 5 <= len(body["steps"]) <= 9
+    subgoal_ids = {g["id"] for g in body["subgoals"]}
+    assert all(s["subgoal_id"] in subgoal_ids for s in body["steps"])
+    assert all(len(s["caption"].split()) <= 12 for s in body["steps"])
+    assert any((s.get("checkpoint") or {}).get("enabled") for s in body["steps"])
+    assert [s["index"] for s in body["steps"]] == list(range(len(body["steps"])))
+
+
+def test_storyboard_404_then_autodetects_and_persists_variants(client: TestClient) -> None:
+    _install_storyboard_pack(client)
+    base = f"/api/v1/study/{_STORYBOARD_COURSE}"
+
+    assert client.get(f"{base}/OOP/storyboard").status_code == 404
+    assert client.get(f"{base}/NOPE/storyboard").status_code == 404
+    assert client.post(f"{base}/NOPE/storyboard").status_code == 404
+
+    expected = {
+        "OOP": ("oop_dispatch", {"classes", "references", "heap_objects", "dispatch"}),
+        "ERR": ("error_contrast", {"phase", "code_view", "exception", "call_stack", "contrast"}),
+        "SQL": ("sql_pipeline", {"active_clause", "pipeline_stages", "clause_sql", "columns", "rows", "note"}),
+        "DS": ("data_structure", {"structure_type", "size", "capacity", "cells", "pointers", "buckets"}),
+    }
+    for node_id, (variant, state_keys) in expected.items():
+        res = client.post(f"{base}/{node_id}/storyboard")
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["variant"] == variant, (node_id, body["variant"])
+        assert body["provider"] == "local_fallback"
+        _assert_storyboard_contract(body)
+        assert state_keys <= set(body["steps"][0]["state"].keys())
+        if variant == "error_contrast":
+            assert body["fixed_code"]
+        if variant == "sql_pipeline":
+            assert body["language"] == "sql"
+
+        fetched = client.get(f"{base}/{node_id}/storyboard")
+        assert fetched.status_code == 200
+        assert fetched.json() == body
+
+    # La columna legada storyboard_json / PackNode.storyboard_ref no se toca
+    tree = client.get(f"/api/v1/courses/{_STORYBOARD_COURSE}/tree").json()
+    assert all(n["storyboard_ref"] is None for n in tree["nodes"])
+
+
+def test_storyboard_cache_vs_force_and_llm_sanitization(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import ai_router
+
+    _install_storyboard_pack(client)
+    base = f"/api/v1/study/{_STORYBOARD_COURSE}/OOP/storyboard"
+    first = client.post(base)
+    assert first.status_code == 200
+    assert first.json()["provider"] == "local_fallback"
+
+    calls: list[int] = []
+
+    def fake_complete_chat(_messages: list[dict[str, str]], **_kwargs: Any) -> AiCompletion:
+        calls.append(1)
+        payload = {
+            "variant": "oop_dispatch",
+            "language": "java",
+            "title": "Despacho de hablar()",
+            "source_code": (
+                "class Animal {\n"
+                '  void hablar() { System.out.println("..."); }\n'
+                "}\n"
+                "class Perro extends Animal {\n"
+                '  @Override void hablar() { System.out.println("Guau"); }\n'
+                "}\n"
+                "Animal a = new Perro();\n"
+                "a.hablar();"
+            ),
+            "fixed_code": None,
+            "subgoals": [{"id": "s1", "label": "Jerarquia"}, {"id": "s2", "label": "Despacho"}],
+            "steps": [
+                {
+                    "index": i,
+                    "subgoal_id": "s1" if i < 3 else "s2",
+                    "active_lines": [min(8, i + 1)],
+                    "caption": (
+                        "Este caption es deliberadamente demasiado largo y debe quedar recortado "
+                        "a doce palabras como maximo por el sanitizador"
+                        if i == 0
+                        else f"Paso {i} del despacho dinamico"
+                    ),
+                    "checkpoint": {
+                        "enabled": i == 3,
+                        "question": "Que metodo se ejecuta?",
+                        "options": ["Animal.hablar", "Perro.hablar"],
+                        "correct_index": 1,
+                        "explanation": "El tipo dinamico manda.",
+                    },
+                    "state": {
+                        "classes": [{"name": "Animal", "parent": None, "methods": ["hablar()"], "active": False}],
+                        "references": [
+                            {"var_name": "a", "static_type": "Animal", "dynamic_type": "Perro", "heap_id": "o1"}
+                        ],
+                        "heap_objects": [{"id": "o1", "class_name": "Perro", "fields": []}],
+                        "dispatch": {
+                            "call_expr": "a.hablar()",
+                            "static_check": "Animal declara hablar()",
+                            "lookup_path": ["Perro", "Animal"],
+                            "resolved_class": "Perro",
+                            "resolved_method": "Perro.hablar()",
+                            "via_super": False,
+                        },
+                    },
+                }
+                for i in range(6)
+            ],
+        }
+        return AiCompletion(text=json.dumps(payload), provider="groq", model="llama-3.3-70b-versatile")
+
+    monkeypatch.setattr(ai_router, "complete_chat", fake_complete_chat)
+
+    cached = client.post(base)
+    assert cached.status_code == 200
+    assert cached.json() == first.json()
+    assert calls == []
+
+    forced = client.post(f"{base}?force=true")
+    assert forced.status_code == 200
+    body = forced.json()
+    assert calls == [1]
+    assert body["provider"] == "groq"
+    assert body["variant"] == "oop_dispatch"
+    _assert_storyboard_contract(body)
+    assert client.get(base).json()["provider"] == "groq"
+
+
+def _parse_sse(text: str) -> list[dict[str, Any]]:
+    return [
+        json.loads(line[len("data: ") :])
+        for line in text.splitlines()
+        if line.startswith("data: ")
+    ]
+
+
+def test_storyboard_stream_emits_weighted_progress_until_100(client: TestClient) -> None:
+    _install_storyboard_pack(client)
+    url = f"/api/v1/study/{_STORYBOARD_COURSE}/SQL/storyboard/stream"
+
+    assert client.get(f"/api/v1/study/{_STORYBOARD_COURSE}/NOPE/storyboard/stream").status_code == 404
+
+    res = client.get(url)
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/event-stream")
+    events = _parse_sse(res.text)
+    assert [e["stage"] for e in events] == ["analyzing", "generating", "validating", "done"]
+    assert [e["pct"] for e in events] == [18, 52, 86, 100]
+    done = events[-1]["storyboard"]
+    assert done["variant"] == "sql_pipeline"
+    _assert_storyboard_contract(done)
+
+    # Persistido en SQLite por la conexion dedicada del stream
+    stored = client.get(f"/api/v1/study/{_STORYBOARD_COURSE}/SQL/storyboard")
+    assert stored.status_code == 200
+    assert stored.json()["updated_at"] == done["updated_at"]
+
+    # Segunda llamada sin force usa cache (sin etapa generating)
+    cached_events = _parse_sse(client.get(url).text)
+    assert [e["pct"] for e in cached_events] == [18, 86, 100]
+    assert cached_events[-1]["storyboard"]["updated_at"] == done["updated_at"]
+
+    forced_events = _parse_sse(client.get(f"{url}?force=true").text)
+    assert [e["pct"] for e in forced_events] == [18, 52, 86, 100]
+
+
+def test_storyboard_stream_reports_clean_error_event(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routers import study as study_router
+
+    _install_storyboard_pack(client)
+
+    def broken_generator(**_kwargs: Any) -> tuple[dict[str, Any], str]:
+        raise RuntimeError("motor caido")
+
+    monkeypatch.setattr(study_router, "generate_code_storyboard_with_ai", broken_generator)
+    res = client.get(f"/api/v1/study/{_STORYBOARD_COURSE}/OOP/storyboard/stream")
+    assert res.status_code == 200
+    events = _parse_sse(res.text)
+    assert events[-1]["stage"] == "error"
+    assert "motor caido" in events[-1]["detail"]
+    assert client.get(f"/api/v1/study/{_STORYBOARD_COURSE}/OOP/storyboard").status_code == 404
+
+
+def test_regenerate_story_preserves_canonical_node_storyboard(client: TestClient) -> None:
+    _install_storyboard_pack(client)
+    base = f"/api/v1/study/{_STORYBOARD_COURSE}"
+    created = client.post(f"{base}/ERR/storyboard")
+    assert created.status_code == 200
+    assert client.post(f"{base}/OOP/storyboard").status_code == 200
+
+    # Cambiar el estilo de explicacion ("Otra explicacion") conserva la escena canonica del nodo;
+    # solo se regenera cuando el usuario solicita ?force=true explicitamente.
+    regen = client.post(f"{base}/ERR/regenerate-story")
+    assert regen.status_code == 200
+
+    preserved = client.get(f"{base}/ERR/storyboard")
+    assert preserved.status_code == 200
+    assert preserved.json()["updated_at"] == created.json()["updated_at"]
+    assert client.get(f"{base}/OOP/storyboard").status_code == 200
+    tree = client.get(f"/api/v1/courses/{_STORYBOARD_COURSE}/tree")
+    assert tree.status_code == 200
+    assert all(n["storyboard_ref"] is None for n in tree.json()["nodes"])

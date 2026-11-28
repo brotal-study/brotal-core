@@ -109,3 +109,15 @@ CREATE TABLE IF NOT EXISTS exam_routes (
   provider          TEXT NOT NULL DEFAULT 'local_fallback',
   updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 10. Animaciones explicativas auto-adaptativas por nodo (v1.2.2)
+CREATE TABLE IF NOT EXISTS node_storyboards (
+  course_id         TEXT NOT NULL,
+  node_id           TEXT NOT NULL,
+  variant           TEXT NOT NULL,
+  storyboard_json   TEXT NOT NULL,
+  provider          TEXT NOT NULL DEFAULT 'local_fallback',
+  updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (course_id, node_id),
+  FOREIGN KEY (course_id, node_id) REFERENCES course_nodes(course_id, id) ON DELETE CASCADE
+);

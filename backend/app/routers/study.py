@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
-from app.db.database import get_conn
+from app.db.database import _connect, get_conn
 from app.schemas.pack import EvalPrompt, PackNode
 from app.schemas.study import (
     CourseTreeResponse,
@@ -18,6 +19,7 @@ from app.schemas.study import (
     ExamRouteRequest,
     ExamRouteResponse,
     NodeProgress,
+    NodeStoryboardResponse,
     PhraseTtsRequest,
     PointFeedback,
     PromptReviewItem,
@@ -29,6 +31,7 @@ from app.services.ai_router import (
     AiProviderError,
     build_prompt_reviews_and_routing,
     evaluate_with_ai,
+    generate_code_storyboard_with_ai,
     generate_exam_route_with_ai,
     regenerate_questions_with_ai,
     regenerate_story_with_ai,
@@ -474,6 +477,202 @@ def post_regenerate_questions(
         node_id=node_id,
         eval_prompts=validated_prompts,
         provider=provider,
+    )
+
+
+# ---------------- Animaciones explicativas auto-adaptativas (v1.2.2) ----------------
+
+
+def _load_course_and_node(
+    conn: sqlite3.Connection, course_id: str, node_id: str
+) -> tuple[sqlite3.Row, sqlite3.Row]:
+    course_row = resolve_course_row(conn, course_id)
+    if course_row is None:
+        raise HTTPException(status_code=404, detail=f"Course '{course_id}' not found")
+    node_row = conn.execute(
+        "SELECT * FROM course_nodes WHERE course_id = ? AND id = ?;",
+        (course_row["id"], node_id),
+    ).fetchone()
+    if node_row is None:
+        raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found in course '{course_id}'")
+    return course_row, node_row
+
+
+def _storyboard_from_row(row: sqlite3.Row) -> NodeStoryboardResponse | None:
+    """Reconstruye la respuesta desde node_storyboards; None si la fila esta corrupta."""
+    try:
+        payload = json.loads(row["storyboard_json"] or "{}")
+        if not isinstance(payload, dict):
+            return None
+        return NodeStoryboardResponse.model_validate(
+            {
+                **payload,
+                "course_id": row["course_id"],
+                "node_id": row["node_id"],
+                "variant": row["variant"],
+                "provider": row["provider"] or "local_fallback",
+                "updated_at": row["updated_at"],
+            }
+        )
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _read_cached_storyboard(
+    conn: sqlite3.Connection, course_id: str, node_id: str
+) -> NodeStoryboardResponse | None:
+    row = conn.execute(
+        "SELECT * FROM node_storyboards WHERE course_id = ? AND node_id = ?;",
+        (course_id, node_id),
+    ).fetchone()
+    return _storyboard_from_row(row) if row is not None else None
+
+
+def _profile_ai_provider(conn: sqlite3.Connection) -> str:
+    conn.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1);")
+    prof_row = conn.execute("SELECT ai_provider FROM user_profile WHERE id = 1;").fetchone()
+    return prof_row["ai_provider"] if prof_row else "auto"
+
+
+def _build_and_persist_storyboard(
+    conn: sqlite3.Connection,
+    *,
+    course_id: str,
+    node_id: str,
+    data: dict[str, Any],
+    provider: str,
+) -> NodeStoryboardResponse:
+    now_iso = _format_iso(datetime.now(UTC)) or datetime.now(UTC).isoformat()
+    response = NodeStoryboardResponse.model_validate(
+        {
+            **data,
+            "course_id": course_id,
+            "node_id": node_id,
+            "provider": provider,
+            "updated_at": now_iso,
+        }
+    )
+    stored = response.model_dump(exclude={"course_id", "node_id", "provider", "updated_at"})
+    conn.execute(
+        """
+        INSERT INTO node_storyboards (course_id, node_id, variant, storyboard_json, provider, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(course_id, node_id) DO UPDATE SET
+            variant = excluded.variant,
+            storyboard_json = excluded.storyboard_json,
+            provider = excluded.provider,
+            updated_at = excluded.updated_at;
+        """,
+        (
+            course_id,
+            node_id,
+            response.variant,
+            json.dumps(stored, ensure_ascii=False),
+            provider,
+            now_iso,
+        ),
+    )
+    conn.commit()
+    return response
+
+
+@router.get("/study/{course_id}/{node_id}/storyboard", response_model=NodeStoryboardResponse)
+def get_node_storyboard(
+    course_id: str,
+    node_id: str,
+    conn: DbConn,
+) -> NodeStoryboardResponse:
+    course_row, _node_row = _load_course_and_node(conn, course_id, node_id)
+    cached = _read_cached_storyboard(conn, course_row["id"], node_id)
+    if cached is None:
+        raise HTTPException(status_code=404, detail="Storyboard not generated yet")
+    return cached
+
+
+@router.post("/study/{course_id}/{node_id}/storyboard", response_model=NodeStoryboardResponse)
+def post_node_storyboard(
+    course_id: str,
+    node_id: str,
+    conn: DbConn,
+    force: bool = False,
+) -> NodeStoryboardResponse:
+    course_row, node_row = _load_course_and_node(conn, course_id, node_id)
+    real_course_id = course_row["id"]
+    if not force:
+        cached = _read_cached_storyboard(conn, real_course_id, node_id)
+        if cached is not None:
+            return cached
+
+    data, provider = generate_code_storyboard_with_ai(
+        course_title=course_row["title"],
+        node_title=node_row["title"],
+        node_summary=node_row["summary"] or "",
+        story_script=node_row["story_script"] or "",
+        engine_type=course_row["engine_type"] or "code_lab",
+        preferred_provider=_profile_ai_provider(conn),
+    )
+    return _build_and_persist_storyboard(
+        conn, course_id=real_course_id, node_id=node_id, data=data, provider=provider
+    )
+
+
+def _sse(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@router.get("/study/{course_id}/{node_id}/storyboard/stream")
+def stream_node_storyboard(
+    course_id: str,
+    node_id: str,
+    conn: DbConn,
+    force: bool = False,
+) -> StreamingResponse:
+    # Validacion y lectura sincronas: 404 limpio antes de abrir el stream.
+    course_row, node_row = _load_course_and_node(conn, course_id, node_id)
+    real_course_id = str(course_row["id"])
+    gen_kwargs: dict[str, Any] = {
+        "course_title": course_row["title"],
+        "node_title": node_row["title"],
+        "node_summary": node_row["summary"] or "",
+        "story_script": node_row["story_script"] or "",
+        "engine_type": course_row["engine_type"] or "code_lab",
+        "preferred_provider": _profile_ai_provider(conn),
+    }
+    cached = None if force else _read_cached_storyboard(conn, real_course_id, node_id)
+    # Libera cualquier transaccion implicita (INSERT OR IGNORE en user_profile) antes de que
+    # el generador escriba con su propia conexion; si no, SQLite responde "database is locked".
+    conn.commit()
+    def event_generator() -> Iterator[str]:
+        try:
+            yield _sse({"stage": "analyzing", "pct": 18, "label": "Analizando explicación y eligiendo visualización..."})
+            if cached is not None:
+                yield _sse({"stage": "validating", "pct": 86, "label": "Validando traza y checkpoints..."})
+                yield _sse({"stage": "done", "pct": 100, "label": "Animación lista", "storyboard": cached.model_dump()})
+                return
+
+            yield _sse({"stage": "generating", "pct": 52, "label": "Construyendo pasos y estado en memoria..."})
+            data, provider = generate_code_storyboard_with_ai(**gen_kwargs)
+            yield _sse({"stage": "validating", "pct": 86, "label": "Validando traza y checkpoints..."})
+            # Conexion dedicada: la inyectada por Depends puede cerrarse antes de terminar el stream.
+            write_conn = _connect()
+            try:
+                response = _build_and_persist_storyboard(
+                    write_conn,
+                    course_id=real_course_id,
+                    node_id=node_id,
+                    data=data,
+                    provider=provider,
+                )
+            finally:
+                write_conn.close()
+            yield _sse({"stage": "done", "pct": 100, "label": "Animación lista", "storyboard": response.model_dump()})
+        except Exception as exc:  # noqa: BLE001 - el stream debe cerrar con un evento de error limpio
+            yield _sse({"stage": "error", "pct": 0, "label": "No se pudo generar la animación", "detail": str(exc)})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
