@@ -228,6 +228,12 @@ export interface IngestLocalResponse {
   skipped_files?: { filename: string; reason: string }[]
   provider: string
   world_metaphor: string
+  total_chunks?: number
+  sampled_chunks?: number
+  total_chars?: number
+  sampled_chars?: number
+  coverage_pct?: number
+  coverage_warning?: string | null
 }
 
 /** POST /api/v1/courses/ingest-local (multipart/form-data) */

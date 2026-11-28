@@ -755,6 +755,74 @@ def _clean_text(raw: str) -> str:
     return text.strip()
 
 
+def _split_oversized_block(text: str, max_chunk_chars: int = 3200) -> list[str]:
+    """Divide sin perdida un bloque largo (> max_chunk_chars) por parrafos, lineas o palabras."""
+    cleaned = text.strip()
+    if len(cleaned) <= max_chunk_chars:
+        return [cleaned] if cleaned else []
+
+    def _break_unit(unit: str) -> list[str]:
+        if len(unit) <= max_chunk_chars:
+            return [unit]
+        lines = [ln.strip() for ln in unit.splitlines() if ln.strip()]
+        if len(lines) > 1:
+            grouped: list[str] = []
+            cur_lines: list[str] = []
+            cur_len = 0
+            for ln in lines:
+                if len(ln) > max_chunk_chars:
+                    if cur_lines:
+                        grouped.append("\n".join(cur_lines))
+                        cur_lines = []
+                        cur_len = 0
+                    grouped.extend(_break_unit(ln))
+                elif cur_lines and cur_len + 1 + len(ln) > max_chunk_chars:
+                    grouped.append("\n".join(cur_lines))
+                    cur_lines = [ln]
+                    cur_len = len(ln)
+                else:
+                    cur_len = cur_len + (1 if cur_lines else 0) + len(ln)
+                    cur_lines.append(ln)
+            if cur_lines:
+                grouped.append("\n".join(cur_lines))
+            return grouped
+
+        pieces: list[str] = []
+        remaining = unit
+        while len(remaining) > max_chunk_chars:
+            cut = remaining.rfind(" ", 0, max_chunk_chars)
+            if cut < max_chunk_chars // 2:
+                cut = max_chunk_chars
+            head = remaining[:cut].strip()
+            if head:
+                pieces.append(head)
+            remaining = remaining[cut:].strip()
+        if remaining:
+            pieces.append(remaining)
+        return pieces
+
+    paragraphs = [p.strip() for p in re.split(r"\n{2,}", cleaned) if p.strip()]
+    atomic_units: list[str] = []
+    for para in paragraphs:
+        atomic_units.extend(_break_unit(para))
+
+    chunks_out: list[str] = []
+    buf: list[str] = []
+    buf_len = 0
+    for unit in atomic_units:
+        added_len = len(unit) + (2 if buf else 0)
+        if buf and buf_len + added_len > max_chunk_chars:
+            chunks_out.append("\n\n".join(buf))
+            buf = [unit]
+            buf_len = len(unit)
+        else:
+            buf.append(unit)
+            buf_len += added_len
+    if buf:
+        chunks_out.append("\n\n".join(buf))
+    return chunks_out
+
+
 def extract_chunks_from_bytes(filename: str, data: bytes) -> list[ExtractedChunk]:
     """Extrae secciones de texto desde .pdf, .pptx, .docx, .md o .txt."""
     safe_name = Path(filename).name
@@ -863,35 +931,38 @@ def extract_chunks_from_bytes(filename: str, data: bytes) -> list[ExtractedChunk
         raw_text = _SEPARATOR_LINE_RE.sub("", raw_text)
         parts = re.split(r"(?m)^(?=#{1,3}\s+)", raw_text)
         parts = [p.strip() for p in parts if p.strip()]
-        if len(parts) <= 1:
-            # Dividir por bloques de parrafos
+        has_headings = len(parts) > 1 or (
+            len(parts) == 1 and bool(re.match(r"^#{1,3}\s+", parts[0]))
+        )
+        if not has_headings:
+            # Dividir por bloques de parrafos sin truncado silencioso
             paras = [p.strip() for p in re.split(r"\n{2,}", raw_text) if p.strip() and _is_valid_title(p)]
             buf: list[str] = []
             sec_idx = 1
-            for p in paras:
-                buf.append(p)
-                if sum(len(x) for x in buf) >= 1200:
-                    body_txt = _clean_text("\n\n".join(buf))[:4000]
-                    if sum(1 for c in body_txt if c.isalnum()) >= 3:
+
+            def _flush_plain_buf(raw_buf: list[str]) -> None:
+                nonlocal sec_idx
+                body_txt = _clean_text("\n\n".join(raw_buf))
+                if sum(1 for c in body_txt if c.isalnum()) < 3:
+                    return
+                for sub_body in _split_oversized_block(body_txt, max_chunk_chars=3200):
+                    if sum(1 for c in sub_body if c.isalnum()) >= 3:
                         chunks.append(
                             ExtractedChunk(
                                 source_file=safe_name,
                                 section_title=f"Seccion {sec_idx}",
-                                content=body_txt,
+                                content=sub_body,
                             )
                         )
+                        sec_idx += 1
+
+            for p in paras:
+                buf.append(p)
+                if sum(len(x) for x in buf) >= 1200:
+                    _flush_plain_buf(buf)
                     buf = []
-                    sec_idx += 1
             if buf:
-                body_txt = _clean_text("\n\n".join(buf))[:4000]
-                if sum(1 for c in body_txt if c.isalnum()) >= 3:
-                    chunks.append(
-                        ExtractedChunk(
-                            source_file=safe_name,
-                            section_title=f"Seccion {sec_idx}",
-                            content=body_txt,
-                        )
-                    )
+                _flush_plain_buf(buf)
         else:
             for idx, part in enumerate(parts, start=1):
                 first_line, _, rest = part.partition("\n")
@@ -904,13 +975,27 @@ def extract_chunks_from_bytes(filename: str, data: bytes) -> list[ExtractedChunk
                     heading = _sanitize_title(first_body_line[:65], f"Seccion {idx}")
                 else:
                     heading = _sanitize_title(raw_heading, f"Seccion {idx}")
-                chunks.append(
-                    ExtractedChunk(
-                        source_file=safe_name,
-                        section_title=heading,
-                        content=body[:4000],
+                if len(body) <= 3200:
+                    chunks.append(
+                        ExtractedChunk(
+                            source_file=safe_name,
+                            section_title=heading,
+                            content=body,
+                        )
                     )
-                )
+                else:
+                    sub_bodies = _split_oversized_block(body, max_chunk_chars=3200)
+                    for sub_idx, sub_body in enumerate(sub_bodies, start=1):
+                        if sum(1 for c in sub_body if c.isalnum()) < 3:
+                            continue
+                        sub_title = heading if len(sub_bodies) == 1 else f"{heading} (parte {sub_idx})"
+                        chunks.append(
+                            ExtractedChunk(
+                                source_file=safe_name,
+                                section_title=sub_title,
+                                content=sub_body,
+                            )
+                        )
 
     if not chunks:
         raise ValueError(f"El archivo '{safe_name}' no contiene texto extraible.")
@@ -1185,26 +1270,75 @@ def _fallback_nodes_from_chunks(
     return nodes
 
 
-def _sample_chunks_balanced(
+def _uniform_sample_indices(n: int, k: int) -> list[int]:
+    """Devuelve k indices distribuidos uniformemente en [0, n-1], incluyendo siempre 0 y n-1."""
+    if n <= 0 or k <= 0:
+        return []
+    if k >= n:
+        return list(range(n))
+    if k == 1:
+        return [0]
+    raw = [round(i * (n - 1) / (k - 1)) for i in range(k)]
+    return list(dict.fromkeys(raw))
+
+
+def _sample_chunks_with_stats(
     chunks: list[ExtractedChunk],
     *,
-    max_chunks: int = 36,
-    max_chars: int = 26000,
-) -> str:
-    """Muestrea equitativamente todos los archivos subidos (round-robin por archivo) sin cortar los ultimos."""
+    max_chunks: int = 48,
+    max_chars: int = 36000,
+) -> tuple[str, dict[str, Any]]:
+    """Muestrea uniformemente todos los archivos con cuota dinamica y reporta cobertura exacta."""
+    total_chunks = len(chunks)
+    total_chars = sum(len(c.content) for c in chunks)
+    if total_chunks == 0:
+        return (
+            "",
+            {
+                "total_chunks": 0,
+                "sampled_chunks": 0,
+                "total_chars": 0,
+                "sampled_chars": 0,
+                "coverage_pct": 100,
+                "coverage_warning": None,
+            },
+        )
+
     by_file: dict[str, list[ExtractedChunk]] = {}
     for ch in chunks:
         by_file.setdefault(ch.source_file, []).append(ch)
 
+    file_list = list(by_file.values())
     file_queues: list[list[ExtractedChunk]] = []
-    for file_chunks in by_file.values():
-        if len(file_chunks) <= 8:
+
+    if total_chunks <= max_chunks:
+        # Todos los chunks caben en el presupuesto: incluir 100% sin descartar ninguno
+        for file_chunks in file_list:
             file_queues.append(list(file_chunks))
-        else:
-            # Distribuye indices a lo largo de todo el archivo (inicio, medio y fin)
-            step = max(1, len(file_chunks) // 8)
-            sampled = [file_chunks[i] for i in range(0, len(file_chunks), step)][:8]
-            file_queues.append(sampled)
+    else:
+        per_file_cap = min(max_chunks, max(8, max_chunks // max(1, len(file_list))))
+        for file_chunks in file_list:
+            if len(file_chunks) <= per_file_cap:
+                file_queues.append(list(file_chunks))
+            else:
+                indices = _uniform_sample_indices(len(file_chunks), per_file_cap)
+                file_queues.append([file_chunks[i] for i in indices])
+
+        # Si hay muchos archivos y la suma de colas supera max_chunks, re-muestrear
+        # proporcionalmente conservando inicio (0) y fin (n-1) en cada archivo
+        if sum(len(q) for q in file_queues) > max_chunks:
+            num_files = len(file_list)
+            base_budget = max(1, max_chunks // num_files)
+            rem = max(0, max_chunks - base_budget * num_files)
+            rebalanced: list[list[ExtractedChunk]] = []
+            for idx, file_chunks in enumerate(file_list):
+                target_k = base_budget + (1 if idx < rem else 0)
+                if len(file_chunks) <= target_k:
+                    rebalanced.append(list(file_chunks))
+                else:
+                    indices = _uniform_sample_indices(len(file_chunks), target_k)
+                    rebalanced.append([file_chunks[i] for i in indices])
+            file_queues = rebalanced
 
     selected: list[ExtractedChunk] = []
     while file_queues and len(selected) < max_chunks:
@@ -1216,12 +1350,86 @@ def _sample_chunks_balanced(
                 next_queues.append(q)
         file_queues = next_queues
 
-    per_chunk_limit = max(450, max_chars // max(1, len(selected)))
-    items = [
-        f"[{c.source_file} - {c.section_title}]: {c.content[:per_chunk_limit]}"
-        for c in selected
-    ]
-    return "\n\n".join(items)[:max_chars]
+    prefixes = [f"[{c.source_file} - {c.section_title}]: " for c in selected]
+    full_items = [f"{p}{c.content}" for p, c in zip(prefixes, selected, strict=True)]
+    full_joined = "\n\n".join(full_items)
+
+    if len(full_joined) <= max_chars:
+        digest_text = full_joined
+        sampled_chunks = len(selected)
+        sampled_chars = sum(len(c.content) for c in selected)
+    else:
+        overhead = sum(len(p) for p in prefixes) + 2 * max(0, len(selected) - 1)
+        avail_content = max(0, max_chars - overhead)
+        allocations = [0] * len(selected)
+        remaining_indices = list(range(len(selected)))
+        remaining_budget = avail_content
+        while remaining_indices and remaining_budget > 0:
+            share = max(1, remaining_budget // len(remaining_indices))
+            next_remaining: list[int] = []
+            used_round = 0
+            for idx in remaining_indices:
+                c_len = len(selected[idx].content)
+                give = min(c_len - allocations[idx], share)
+                allocations[idx] += give
+                used_round += give
+                if allocations[idx] < c_len:
+                    next_remaining.append(idx)
+            remaining_budget -= used_round
+            if used_round == 0:
+                break
+            remaining_indices = next_remaining
+
+        parts_out: list[str] = []
+        used_total = 0
+        sampled_chunks = 0
+        sampled_chars = 0
+        for idx, (prefix, c) in enumerate(zip(prefixes, selected, strict=True)):
+            sep_len = 2 if parts_out else 0
+            if used_total + sep_len + len(prefix) >= max_chars:
+                break
+            remaining_for_item = max_chars - used_total - sep_len - len(prefix)
+            cap = allocations[idx] if allocations[idx] > 0 else remaining_for_item
+            snippet = c.content[: min(cap, remaining_for_item)]
+            if not snippet and c.content:
+                break
+            item = f"{prefix}{snippet}"
+            parts_out.append(item)
+            used_total += sep_len + len(item)
+            sampled_chunks += 1
+            sampled_chars += len(snippet)
+        digest_text = "\n\n".join(parts_out)
+
+    coverage_pct = min(100, round(sampled_chars * 100 / max(1, total_chars)))
+    coverage_warning: str | None = None
+    if coverage_pct < 85:
+        coverage_warning = (
+            f"Todo el texto ({total_chunks} secciones) quedó indexado en el buscador y Chat Tutor, "
+            f"pero el árbol se sintetizó desde una muestra del {coverage_pct}% del material. "
+            "Para máxima profundidad por unidad (o antes de publicar como Pack), divide el material "
+            "extenso en tandas usando Agregar al árbol."
+        )
+
+    stats = {
+        "total_chunks": total_chunks,
+        "sampled_chunks": sampled_chunks,
+        "total_chars": total_chars,
+        "sampled_chars": sampled_chars,
+        "coverage_pct": coverage_pct,
+        "coverage_warning": coverage_warning,
+    }
+    return digest_text, stats
+
+
+def _sample_chunks_balanced(
+    chunks: list[ExtractedChunk],
+    *,
+    max_chunks: int = 48,
+    max_chars: int = 36000,
+) -> str:
+    """Wrapper retrocompatible que devuelve solo el texto muestreado balanceado."""
+    digest_text, _ = _sample_chunks_with_stats(chunks, max_chunks=max_chunks, max_chars=max_chars)
+    return digest_text
 
 
 def _code_lab_architect_rules(default_language: str) -> str:
@@ -1294,9 +1502,11 @@ def _generate_nodes_with_ai(
     question_style: str = "direct",
     engine_type: str = "concept_tree",
     default_language: str = "text",
+    digest_text: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Usa ai_router para sintetizar un arbol profundo de 8..16 nodos (copa theory + raices practice/examenes)."""
-    digest_text = _sample_chunks_balanced(chunks)
+    if digest_text is None:
+        digest_text = _sample_chunks_balanced(chunks)
     files_list = sorted({c.source_file for c in chunks})
     exp_rule = explanation_style_instruction(explanation_style, world_metaphor)
     q_rule = question_style_instruction(question_style, world_metaphor)
@@ -1659,9 +1869,11 @@ def _generate_append_nodes_with_ai(
     question_style: str = "direct",
     engine_type: str = "concept_tree",
     default_language: str = "text",
+    digest_text: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Genera entre 2 y 6 nodos nuevos conectados al arbol existente sin tocar los nodos previos."""
-    digest_text = _sample_chunks_balanced(chunks)
+    if digest_text is None:
+        digest_text = _sample_chunks_balanced(chunks)
     files_list = sorted({c.source_file for c in chunks})
     existing_ids = {str(n["id"]) for n in existing_nodes}
     theory_anchors = [str(n["id"]) for n in existing_nodes if n.get("branch") == "theory"]
@@ -1908,6 +2120,8 @@ def ingest_local_files(
             (existing_row["id"],),
         ).fetchall()
 
+    digest_text, coverage_stats = _sample_chunks_with_stats(all_chunks)
+
     if mode == "append" and existing_row is not None and len(existing_node_rows) > 0:
         real_course_id = str(existing_row["id"])
         if engine_type == "auto":
@@ -1949,6 +2163,7 @@ def ingest_local_files(
             question_style=question_style,
             engine_type=effective_engine,
             default_language=effective_lang,
+            digest_text=digest_text,
         )
         added_count = append_nodes_to_course(conn, real_course_id, new_nodes)
         conn.execute(
@@ -1956,7 +2171,7 @@ def ingest_local_files(
             (effective_engine, real_course_id),
         )
         conn.commit()
-        total_chunks = append_chunks_in_fts(conn, real_course_id, all_chunks)
+        chunks_indexed = append_chunks_in_fts(conn, real_course_id, all_chunks)
         total_nodes_row = conn.execute(
             "SELECT COUNT(*) AS cnt FROM course_nodes WHERE course_id = ?;",
             (real_course_id,),
@@ -1973,11 +2188,17 @@ def ingest_local_files(
             "mode": "append",
             "added_nodes": added_count,
             "node_count": total_node_count,
-            "chunks_indexed": total_chunks,
+            "chunks_indexed": chunks_indexed,
             "processed_files": processed_files,
             "skipped_files": skipped_files,
             "provider": provider_used,
             "world_metaphor": metaphor,
+            "total_chunks": coverage_stats["total_chunks"],
+            "sampled_chunks": coverage_stats["sampled_chunks"],
+            "total_chars": coverage_stats["total_chars"],
+            "sampled_chars": coverage_stats["sampled_chars"],
+            "coverage_pct": coverage_stats["coverage_pct"],
+            "coverage_warning": coverage_stats["coverage_warning"],
         }
 
     metaphor = (world_metaphor or "").strip() or f"Laboratorio central de {clean_title}"
@@ -1992,6 +2213,7 @@ def ingest_local_files(
         question_style=question_style,
         engine_type=effective_engine,
         default_language=effective_lang,
+        digest_text=digest_text,
     )
 
     year_now = datetime.now(UTC).year
@@ -2021,7 +2243,7 @@ def ingest_local_files(
         "UPDATE courses SET source_type = 'local', status = 'active', engine_type = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
         (effective_engine, installed_id),
     )
-    total_chunks = index_chunks_in_fts(conn, installed_id, all_chunks)
+    chunks_indexed = index_chunks_in_fts(conn, installed_id, all_chunks)
 
     return {
         "course_id": installed_id,
@@ -2033,11 +2255,17 @@ def ingest_local_files(
         "mode": "replace",
         "added_nodes": len(pack_obj.nodes),
         "node_count": len(pack_obj.nodes),
-        "chunks_indexed": total_chunks,
+        "chunks_indexed": chunks_indexed,
         "processed_files": processed_files,
         "skipped_files": skipped_files,
         "provider": provider_used,
         "world_metaphor": metaphor,
+        "total_chunks": coverage_stats["total_chunks"],
+        "sampled_chunks": coverage_stats["sampled_chunks"],
+        "total_chars": coverage_stats["total_chars"],
+        "sampled_chars": coverage_stats["sampled_chars"],
+        "coverage_pct": coverage_stats["coverage_pct"],
+        "coverage_warning": coverage_stats["coverage_warning"],
     }
 
 

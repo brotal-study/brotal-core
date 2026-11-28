@@ -9,6 +9,7 @@ import {
   FilePlus2,
   FileText,
   GitBranch,
+  Info,
   Languages,
   Layers,
   Loader2,
@@ -117,6 +118,9 @@ export default function IngestModal({
 
   const activeStep = elapsedSec < 2 ? 1 : elapsedSec < 4 ? 2 : 3
   const effectiveMode: IngestMode = hasExistingContent ? mode : 'replace'
+  const totalSelectedBytes = files.reduce((acc, f) => acc + f.size, 0)
+  const showLargeBatchTip =
+    effectiveMode === 'replace' && (files.length >= 6 || totalSelectedBytes > 4 * 1024 * 1024)
 
   const onFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = Array.from(e.target.files ?? [])
@@ -415,6 +419,24 @@ export default function IngestModal({
                   ))}
                 </ul>
               )}
+
+              {showLargeBatchTip && (
+                <div
+                  role="note"
+                  className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50/80 px-3 py-2 text-[11px] text-sky-900 dark:border-sky-800/80 dark:bg-sky-950/40 dark:text-sky-200"
+                >
+                  <Info size={14} className="mt-0.5 shrink-0 text-sky-600 dark:text-sky-400" />
+                  <span>
+                    Sugerencia: seleccionaste {files.length} archivo(s) (
+                    {totalSelectedBytes >= 1024 * 1024
+                      ? `${(totalSelectedBytes / (1024 * 1024)).toFixed(1)} MB`
+                      : `${Math.max(1, Math.round(totalSelectedBytes / 1024))} KB`}
+                    ). Todo el texto se indexará completo en el buscador y Chat Tutor, pero para máxima profundidad por
+                    unidad (especialmente antes de publicar como Pack) conviene subir en tandas usando{' '}
+                    <strong>Agregar al árbol</strong>.
+                  </span>
+                </div>
+              )}
             </div>
 
             {busy && (
@@ -492,9 +514,61 @@ export default function IngestModal({
                   </strong>{' '}
                   · IA: <code className="font-mono">{result.provider}</code> · Modo:{' '}
                   <strong>{result.mode === 'append' ? 'Incremental (progreso conservado)' : 'Árbol completo'}</strong>
+                  {typeof result.coverage_pct === 'number' && (
+                    <>
+                      {' '}
+                      · Cobertura en árbol:{' '}
+                      <strong
+                        className={
+                          result.coverage_pct < 85
+                            ? 'text-amber-700 dark:text-amber-300'
+                            : 'text-emerald-800 dark:text-emerald-200'
+                        }
+                      >
+                        {result.coverage_pct}%
+                      </strong>
+                      {typeof result.sampled_chunks === 'number' && typeof result.total_chunks === 'number' && (
+                        <span className="text-[11px] opacity-80">
+                          {' '}
+                          ({result.sampled_chunks}/{result.total_chunks} secc.)
+                        </span>
+                      )}
+                    </>
+                  )}
                 </p>
               </div>
             </div>
+
+            {result.coverage_warning && (
+              <div
+                role="status"
+                className="flex items-start gap-2.5 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+              >
+                <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                <div>
+                  <div className="font-semibold">
+                    Cobertura parcial en el árbol ({result.coverage_pct ?? 0}%)
+                  </div>
+                  <p className="mt-0.5 leading-relaxed">{result.coverage_warning}</p>
+                </div>
+              </div>
+            )}
+
+            {result.skipped_files && result.skipped_files.length > 0 && (
+              <div className="rounded-md border border-amber-300 bg-amber-50/70 p-3 text-xs text-amber-950 dark:border-amber-800/80 dark:bg-amber-950/30 dark:text-amber-200">
+                <div className="mb-1 flex items-center gap-1.5 font-semibold">
+                  <AlertTriangle size={14} className="shrink-0 text-amber-600 dark:text-amber-400" />
+                  <span>Archivos omitidos ({result.skipped_files.length})</span>
+                </div>
+                <ul className="space-y-1 text-[11px]">
+                  {result.skipped_files.map((sf, idx) => (
+                    <li key={`${sf.filename}-${idx}`}>
+                      <strong className="font-mono">{sf.filename}</strong>: {sf.reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             <div>
               <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">
