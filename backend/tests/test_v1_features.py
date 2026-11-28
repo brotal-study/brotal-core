@@ -2495,3 +2495,151 @@ def test_synthesize_cinema_act_audios_parallel_cache_and_partial_failure(
     assert paths2[0] == paths[0]
     assert paths2[1] == paths[2]
     assert after_ok_calls == prev_ok_calls
+
+
+def test_sample_chunks_balanced_15_sections_keeps_first_and_last_with_full_coverage() -> None:
+    from app.services.ingest import (
+        _sample_chunks_balanced,
+        _sample_chunks_with_stats,
+        extract_chunks_from_bytes,
+    )
+
+    sections = [
+        f"## Tema {i:02d}: Fundamento numero {i}\n"
+        f"Contenido tecnico detallado de la seccion {i:02d} con marcador SECCION_MARCA_{i:02d} "
+        f"para verificar que ningun tramo del documento sea omitido en el muestreo.\n"
+        for i in range(1, 16)
+    ]
+    md_bytes = "\n\n".join(sections).encode("utf-8")
+    chunks = extract_chunks_from_bytes("guia_15_temas.md", md_bytes)
+    assert len(chunks) == 15
+
+    digest = _sample_chunks_balanced(chunks)
+    assert "SECCION_MARCA_01" in digest
+    assert "SECCION_MARCA_08" in digest
+    assert "SECCION_MARCA_15" in digest
+
+    digest_stats, stats = _sample_chunks_with_stats(chunks)
+    assert digest_stats == digest
+    assert stats["total_chunks"] == 15
+    assert stats["sampled_chunks"] == 15
+    assert stats["total_chars"] == stats["sampled_chars"]
+    assert stats["coverage_pct"] == 100
+    assert stats["coverage_warning"] is None
+
+
+def test_extract_chunks_subdivides_long_single_heading_markdown_without_truncation() -> None:
+    from app.services.ingest import extract_chunks_from_bytes
+
+    # ~9500 caracteres bajo un unico encabezado '#'
+    paragraphs = [
+        f"Parrafo {i:02d}: " + ("Explicacion detallada de arquitectura de computadores y memoria cache. " * 7)
+        for i in range(1, 19)
+    ]
+    final_marker = "PARRAFO_FINAL_VERIFICABLE: cierre completo de la guia sin perdida de contenido."
+    paragraphs.append(final_marker)
+    raw_body = "\n\n".join(paragraphs)
+    assert len(raw_body) > 9000
+
+    long_md = f"# Guia Unica de Arquitectura\n\n{raw_body}\n".encode()
+    chunks = extract_chunks_from_bytes("guia_unica.md", long_md)
+
+    assert len(chunks) >= 3
+    assert chunks[0].section_title == "Guia Unica de Arquitectura (parte 1)"
+    assert chunks[1].section_title == "Guia Unica de Arquitectura (parte 2)"
+    assert chunks[-1].section_title == f"Guia Unica de Arquitectura (parte {len(chunks)})"
+    assert all(len(c.content) <= 3500 for c in chunks)
+    assert final_marker in chunks[-1].content
+    assert "Parrafo 01:" in chunks[0].content
+
+    # Una seccion corta (<= 3200 chars) mantiene comportamiento normal (1 chunk con el heading exacto)
+    short_md = b"# Seccion Corta\n\nResumen conciso de memoria virtual y paginacion en sistemas operativos.\n"
+    short_chunks = extract_chunks_from_bytes("corta.md", short_md)
+    assert len(short_chunks) == 1
+    assert short_chunks[0].section_title == "Seccion Corta"
+
+
+def test_sample_chunks_uniform_40_chunks_with_max_chunks_10_includes_start_middle_and_end() -> None:
+    from app.services.ingest import (
+        ExtractedChunk,
+        _sample_chunks_balanced,
+        _sample_chunks_with_stats,
+    )
+
+    chunks = [
+        ExtractedChunk(
+            source_file="curso_extenso.md",
+            section_title=f"Unidad {i}",
+            content=f"Contenido de la unidad {i} con token UNIDAD_TOKEN_{i:02d}. " + ("Detalle tecnico. " * 12),
+        )
+        for i in range(40)
+    ]
+
+    digest_text, stats = _sample_chunks_with_stats(chunks, max_chunks=10, max_chars=36000)
+    assert digest_text == _sample_chunks_balanced(chunks, max_chunks=10, max_chars=36000)
+    assert stats["total_chunks"] == 40
+    assert stats["sampled_chunks"] == 10
+    assert stats["coverage_pct"] < 85
+    assert stats["coverage_warning"] is not None
+    assert f"{stats['coverage_pct']}%" in stats["coverage_warning"]
+    assert "Agregar al árbol" in stats["coverage_warning"]
+
+    # Indice 0, zona intermedia (17/22) e indice 39 (ultimo) deben estar presentes
+    assert "UNIDAD_TOKEN_00" in digest_text
+    assert any(f"UNIDAD_TOKEN_{mid:02d}" in digest_text for mid in range(15, 25))
+    assert "UNIDAD_TOKEN_39" in digest_text
+
+
+def test_ingest_local_endpoint_returns_coverage_metrics_in_replace_and_append(client: TestClient) -> None:
+    # 1. Mode replace con material normal -> coverage_pct == 100 y coverage_warning == None
+    normal_md = (
+        b"# Unidad 1: Procesos e Hilos\n"
+        b"Un proceso posee espacio de direcciones aislado mientras los hilos comparten heap y codigo.\n\n"
+        b"# Unidad 2: Planificacion de CPU\n"
+        b"Los planificadores Round Robin y MLFQ equilibran latencia de respuesta y rendimiento total.\n"
+    )
+    res_replace = client.post(
+        "/api/v1/courses/ingest-local",
+        data={
+            "course_code": "INF2440",
+            "title": "Sistemas Operativos",
+            "mode": "replace",
+        },
+        files=[("files", ("so_unidad1.md", normal_md, "text/markdown"))],
+    )
+    assert res_replace.status_code == 200, res_replace.text
+    d_rep = res_replace.json()
+    assert d_rep["mode"] == "replace"
+    assert d_rep["total_chunks"] == 2
+    assert d_rep["sampled_chunks"] == 2
+    assert d_rep["total_chars"] > 0
+    assert d_rep["sampled_chars"] == d_rep["total_chars"]
+    assert d_rep["coverage_pct"] == 100
+    assert d_rep["coverage_warning"] is None
+
+    # 2. Mode append con material extenso (> 36000 chars) -> coverage_pct < 85 y coverage_warning no vacio
+    big_sections = [
+        f"## Capitulo {i:02d}: Memoria Virtual y Sistemas de Archivos\n"
+        + (f"Explicacion tecnica profunda del capitulo {i:02d} sobre paginacion, TLB e inodos. " * 22)
+        for i in range(1, 36)
+    ]
+    big_md = "\n\n".join(big_sections).encode("utf-8")
+    res_append = client.post(
+        "/api/v1/courses/ingest-local",
+        data={
+            "course_code": "INF2440",
+            "title": "Sistemas Operativos",
+            "mode": "append",
+        },
+        files=[("files", ("so_extenso.md", big_md, "text/markdown"))],
+    )
+    assert res_append.status_code == 200, res_append.text
+    d_app = res_append.json()
+    assert d_app["mode"] == "append"
+    assert d_app["total_chunks"] == 35
+    assert d_app["total_chars"] > 45000
+    assert 0 < d_app["sampled_chars"] < d_app["total_chars"]
+    assert 0 <= d_app["coverage_pct"] < 85
+    assert isinstance(d_app["coverage_warning"], str)
+    assert f"{d_app['coverage_pct']}%" in d_app["coverage_warning"]
+    assert "Chat Tutor" in d_app["coverage_warning"]
