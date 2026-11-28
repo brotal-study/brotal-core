@@ -1,8 +1,17 @@
 import { useCallback, useState } from 'react'
-import { BookOpen, ClipboardCheck, Clock, Dumbbell, FlaskConical, Trophy } from 'lucide-react'
+import {
+  BookOpen,
+  ClipboardCheck,
+  Clock,
+  Dumbbell,
+  FlaskConical,
+  MessagesSquare,
+  Trophy,
+} from 'lucide-react'
 import { inCooldown, type EvaluateResponse, type NodeProgress, type PackNode } from '../../api/study'
 import ConfirmDialog from './ConfirmDialog'
 import EvalTab from './EvalTab'
+import LanguageChatTab from './LanguageChatTab'
 import StoryTab from './StoryTab'
 import { formatRemaining, LEVEL_STYLE } from './studyUtils'
 
@@ -25,7 +34,7 @@ interface Props {
   onInProgressChange: (v: boolean) => void
 }
 
-type Tab = 'story' | 'eval'
+type Tab = 'story' | 'eval' | 'chat'
 
 /** Se monta con `key={node.id}`: al cambiar de nodo el estado local se reinicia. */
 export default function StudyStation({
@@ -44,9 +53,10 @@ export default function StudyStation({
   onInProgressChange,
 }: Props) {
   const isPractice = node.branch === 'practice'
+  const isLanguageStudio = engineType === 'language_studio'
   const [tab, setTab] = useState<Tab>(isPractice ? 'eval' : 'story')
   const [inProgress, setInProgress] = useState(false)
-  const [askLeave, setAskLeave] = useState(false)
+  const [pendingTab, setPendingTab] = useState<Tab | null>(null)
   const lvl = LEVEL_STYLE[progress.mastery_level] ?? LEVEL_STYLE[0]
   const cooling = inCooldown(progress, now)
   const remaining = cooling ? new Date(progress.next_review_at!).getTime() - now : 0
@@ -59,7 +69,14 @@ export default function StudyStation({
     [onInProgressChange],
   )
 
-  const goStory = () => (inProgress ? setAskLeave(true) : setTab('story'))
+  const requestTabChange = (nextTab: Tab) => {
+    if (nextTab === tab) return
+    if (tab === 'eval' && inProgress) {
+      setPendingTab(nextTab)
+      return
+    }
+    setTab(nextTab)
+  }
 
   const tabCls = (active: boolean) =>
     `inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium ${
@@ -104,7 +121,7 @@ export default function StudyStation({
             type="button"
             role="tab"
             aria-selected={tab === 'story'}
-            onClick={goStory}
+            onClick={() => requestTabChange('story')}
             className={tabCls(tab === 'story')}
           >
             <BookOpen size={15} /> {isPractice ? 'Caso / Enunciado' : 'Historia'}
@@ -113,16 +130,27 @@ export default function StudyStation({
             type="button"
             role="tab"
             aria-selected={tab === 'eval'}
-            onClick={() => setTab('eval')}
+            onClick={() => requestTabChange('eval')}
             className={tabCls(tab === 'eval')}
           >
             <ClipboardCheck size={15} /> {isPractice ? 'Evaluación / Desafío' : 'Evaluación a ciegas'}
           </button>
+          {isLanguageStudio && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === 'chat'}
+              onClick={() => requestTabChange('chat')}
+              className={tabCls(tab === 'chat')}
+            >
+              <MessagesSquare size={15} /> Práctica Chat
+            </button>
+          )}
         </div>
       </header>
 
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 sm:px-5">
-        {tab === 'story' ? (
+        {tab === 'story' && (
           <StoryTab
             courseId={courseId}
             engineType={engineType}
@@ -132,7 +160,8 @@ export default function StudyStation({
             onRegenerateStory={onRegenerateStory}
             onAskTutor={onAskTutor}
           />
-        ) : (
+        )}
+        {tab === 'eval' && (
           <EvalTab
             courseId={courseId}
             engineType={engineType}
@@ -147,18 +176,34 @@ export default function StudyStation({
             onInProgressChange={handleProgress}
           />
         )}
+        {isLanguageStudio && (
+          <div className={tab === 'chat' ? 'block' : 'hidden'}>
+            <LanguageChatTab courseId={courseId} node={node} active={tab === 'chat'} />
+          </div>
+        )}
       </div>
 
-      {askLeave && (
+      {pendingTab !== null && (
         <ConfirmDialog
           title="Salir de la evaluación"
-          message="Si vuelves a la historia se descartan tus respuestas de este intento. ¿Continuar?"
-          confirmLabel={isPractice ? 'Ver Caso / Enunciado' : 'Volver a la historia'}
+          message={
+            pendingTab === 'chat'
+              ? 'Si cambias a Práctica Chat se descartan tus respuestas de este intento. ¿Continuar?'
+              : 'Si vuelves a la historia se descartan tus respuestas de este intento. ¿Continuar?'
+          }
+          confirmLabel={
+            pendingTab === 'chat'
+              ? 'Ir a Práctica Chat'
+              : isPractice
+                ? 'Ver Caso / Enunciado'
+                : 'Volver a la historia'
+          }
           cancelLabel="Seguir evaluándome"
-          onCancel={() => setAskLeave(false)}
+          onCancel={() => setPendingTab(null)}
           onConfirm={() => {
-            setAskLeave(false)
-            setTab('story')
+            const target = pendingTab
+            setPendingTab(null)
+            setTab(target)
           }}
         />
       )}

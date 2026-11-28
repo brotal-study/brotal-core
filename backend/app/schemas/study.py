@@ -97,6 +97,28 @@ class PhraseTtsRequest(BaseModel):
     accent: Literal["us", "gb", "au"] = "us"
 
 
+class LanguageChatRequest(BaseModel):
+    message: str = ""
+    history: list[dict[str, str]] = Field(default_factory=list)
+    missions: list[str] = Field(default_factory=list)
+    turn_index: int = Field(default=0, ge=0)
+    start: bool = False
+    finish: bool = False
+
+
+class LanguageChatResponse(BaseModel):
+    reply_en: str
+    translation_es: str
+    inline_correction_es: str | None = None
+    example_en: str | None = None
+    missions: list[str] = Field(default_factory=list)
+    missions_completed: list[int] = Field(default_factory=list)
+    lexical_chips: list[str] = Field(default_factory=list)
+    sentence_starter: str | None = None
+    session_summary: dict[str, Any] | None = None
+    provider: str = "local_fallback"
+
+
 class ExamRouteRequest(BaseModel):
     exam_date: str = Field(..., min_length=8, max_length=32)
     hours_per_day: float = Field(default=3.0, ge=0.5, le=14.0)

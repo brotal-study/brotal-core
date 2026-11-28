@@ -17,6 +17,10 @@ ChallengeType = Literal[
     "fill_blank",
     "translate",
     "speaking_prompt",
+    "word_order",
+    "categorize",
+    "find_error",
+    "dictation",
 ]
 CodeLanguage = Literal["java", "sql", "python", "c", "en", "text"]
 
@@ -28,6 +32,10 @@ _VALID_CHALLENGE_TYPES = {
     "fill_blank",
     "translate",
     "speaking_prompt",
+    "word_order",
+    "categorize",
+    "find_error",
+    "dictation",
 }
 _VALID_CODE_LANGUAGES = {"java", "sql", "python", "c", "en", "text"}
 
@@ -39,6 +47,7 @@ class EvalPrompt(BaseModel):
     challenge_type: ChallengeType = "concept"
     language: CodeLanguage = "text"
     starter_code: str | None = None
+    interaction_data: dict[str, Any] | None = None
 
     @field_validator("challenge_type", mode="before")
     @classmethod

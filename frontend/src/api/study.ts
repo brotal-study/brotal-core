@@ -11,6 +11,10 @@ export type ChallengeType =
   | 'fill_blank'
   | 'translate'
   | 'speaking_prompt'
+  | 'word_order'
+  | 'categorize'
+  | 'find_error'
+  | 'dictation'
 export type CodeLanguage = 'java' | 'sql' | 'python' | 'c' | 'en' | 'text'
 export type EngineType = 'concept_tree' | 'code_lab' | 'language_studio'
 export type TtsLang = 'en' | 'es'
@@ -23,6 +27,7 @@ export interface EvalPrompt {
   challenge_type?: ChallengeType | null
   language?: CodeLanguage | null
   starter_code?: string | null
+  interaction_data?: Record<string, unknown> | null
 }
 
 export interface PackNode {
@@ -135,6 +140,45 @@ export interface ChatResponse {
   assistant_message: ChatMessage
   provider: string
   suggested_nodes?: SuggestedNode[]
+}
+
+export interface LanguageChatTurn {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface LanguageChatRequest {
+  message?: string
+  history?: LanguageChatTurn[]
+  missions?: string[]
+  turn_index?: number
+  start?: boolean
+  finish?: boolean
+}
+
+export interface LanguageChatSummaryItem {
+  said: string
+  better: string
+  why: string
+}
+
+export interface LanguageChatSessionSummary {
+  headline?: string
+  score_hint?: string
+  items: LanguageChatSummaryItem[]
+}
+
+export interface LanguageChatResponse {
+  reply_en: string
+  translation_es: string
+  inline_correction_es?: string | null
+  example_en?: string | null
+  missions: string[]
+  missions_completed: number[]
+  lexical_chips: string[]
+  sentence_starter?: string | null
+  session_summary?: LanguageChatSessionSummary | null
+  provider: string
 }
 
 export interface ExamRouteRequest {
@@ -423,6 +467,23 @@ export async function clearChatHistory(courseId: string): Promise<void> {
   await api<{ course_id: string; deleted: number }>(
     `/api/v1/chat/${encodeURIComponent(courseId)}`,
     { method: 'DELETE' },
+  )
+}
+
+/** POST /api/v1/study/{course_id}/{node_id}/language-chat */
+export async function sendLanguagePracticeChat(
+  courseId: string,
+  nodeId: string,
+  req: LanguageChatRequest,
+  signal?: AbortSignal,
+): Promise<LanguageChatResponse> {
+  return api<LanguageChatResponse>(
+    `/api/v1/study/${encodeURIComponent(courseId)}/${encodeURIComponent(nodeId)}/language-chat`,
+    {
+      method: 'POST',
+      body: JSON.stringify(req),
+      signal,
+    },
   )
 }
 

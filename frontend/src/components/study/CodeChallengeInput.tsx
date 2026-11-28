@@ -6,17 +6,21 @@ import { python } from '@codemirror/lang-python'
 import { cpp } from '@codemirror/lang-cpp'
 import { oneDark } from '@codemirror/theme-one-dark'
 import {
+  ArrowUpDown,
   Bug,
   Code2,
   Eye,
   EyeOff,
+  Headphones,
   Languages,
+  LayoutGrid,
   Lightbulb,
   Loader2,
   Mic,
   MicOff,
   PenLine,
   RotateCcw,
+  SearchCheck,
   Square,
   Terminal,
   Volume2,
@@ -29,8 +33,26 @@ import {
   type TtsAccent,
 } from '../../api/study'
 import { useAppStore } from '../../store/useAppStore'
+import LanguageExerciseInput from './LanguageExerciseInput'
 
 export type SupportLevel = 'guided' | 'transition' | 'exam'
+
+export type InteractiveLanguageChallengeType =
+  | 'word_order'
+  | 'categorize'
+  | 'find_error'
+  | 'dictation'
+
+export function isInteractiveLanguageChallenge(
+  type?: ChallengeType | string | null,
+): type is InteractiveLanguageChallengeType {
+  return (
+    type === 'word_order' ||
+    type === 'categorize' ||
+    type === 'find_error' ||
+    type === 'dictation'
+  )
+}
 
 interface SpeechRecognitionResultAlternativeLike {
   transcript: string
@@ -517,6 +539,89 @@ export default function CodeChallengeInput({
       setDictating(false)
       recognitionRef.current = null
     }
+  }
+
+  if (isInteractiveLanguageChallenge(challengeType)) {
+    const interactiveBadge =
+      challengeType === 'word_order'
+        ? {
+            label: 'Ordenar palabras',
+            icon: <ArrowUpDown size={12} />,
+            cls: 'border border-teal-300 bg-teal-50 text-teal-900 dark:border-teal-700/80 dark:bg-teal-950/50 dark:text-teal-200',
+          }
+        : challengeType === 'categorize'
+          ? {
+              label: 'Categorizar',
+              icon: <LayoutGrid size={12} />,
+              cls: 'border border-sky-300 bg-sky-50 text-sky-900 dark:border-sky-700/80 dark:bg-sky-950/50 dark:text-sky-200',
+            }
+          : challengeType === 'find_error'
+            ? {
+                label: 'Encontrar error',
+                icon: <SearchCheck size={12} />,
+                cls: 'border border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700/80 dark:bg-amber-950/50 dark:text-amber-200',
+              }
+            : {
+                label: 'Dictado',
+                icon: <Headphones size={12} />,
+                cls: 'border border-indigo-300 bg-indigo-50 text-indigo-900 dark:border-indigo-700/80 dark:bg-indigo-950/50 dark:text-indigo-200',
+              }
+
+    return (
+      <div className="flex min-w-0 flex-col gap-2.5 rounded-md border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900/60">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span
+              className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-semibold ${interactiveBadge.cls}`}
+            >
+              {interactiveBadge.icon}
+              {interactiveBadge.label}
+            </span>
+            <span className="rounded border border-slate-300 bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300">
+              EN
+            </span>
+          </div>
+
+          {challengeType === 'dictation' && (
+            <div
+              className="inline-flex rounded border border-slate-300 bg-slate-50 p-0.5 dark:border-slate-600 dark:bg-slate-800"
+              role="group"
+              aria-label="Acento en inglés"
+            >
+              {(['us', 'gb'] as const).map((acc) => (
+                <button
+                  key={acc}
+                  type="button"
+                  aria-pressed={activeAccent === acc}
+                  onClick={() => handleSelectAccent(acc)}
+                  className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase transition ${
+                    activeAccent === acc
+                      ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
+                      : 'text-slate-600 hover:bg-slate-200/70 dark:text-slate-300 dark:hover:bg-slate-700'
+                  }`}
+                >
+                  {acc === 'us' ? 'US' : 'UK'}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <span className="break-words text-sm font-medium text-slate-900 dark:text-slate-100">
+          {index + 1}. {cleanQuestion}
+        </span>
+
+        <LanguageExerciseInput
+          prompt={prompt}
+          index={index}
+          value={value}
+          onChange={onChange}
+          courseId={courseId}
+          accent={activeAccent}
+          onAccentChange={handleSelectAccent}
+        />
+      </div>
+    )
   }
 
   const isLanguageChallenge =

@@ -34,6 +34,42 @@ interface Props {
 }
 
 const NODE_MENTION_RE = /\[\[node:([^|\]]+)\|([^\]]+)\]\]/g
+const CHAT_WIDTH_STORAGE_KEY = 'brotal_chat_width'
+const MIN_CHAT_WIDTH = 340
+const DEFAULT_CHAT_WIDTH = 448
+const EXPANDED_CHAT_WIDTH = 768
+
+function getMaxChatWidth(): number {
+  if (typeof window === 'undefined') return 1200
+  return Math.max(MIN_CHAT_WIDTH, Math.floor(window.innerWidth * 0.9))
+}
+
+function clampChatWidth(rawWidth: number): number {
+  return Math.min(getMaxChatWidth(), Math.max(MIN_CHAT_WIDTH, Math.round(rawWidth)))
+}
+
+function readInitialChatWidth(): number {
+  try {
+    const raw = window.localStorage.getItem(CHAT_WIDTH_STORAGE_KEY)
+    if (raw) {
+      const parsed = Number(raw)
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return clampChatWidth(parsed)
+      }
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+  return clampChatWidth(DEFAULT_CHAT_WIDTH)
+}
+
+function persistChatWidth(width: number): void {
+  try {
+    window.localStorage.setItem(CHAT_WIDTH_STORAGE_KEY, String(Math.round(width)))
+  } catch {
+    // Ignore storage access errors
+  }
+}
 
 function extractNodesFromText(text: string): SuggestedNode[] {
   const seen = new Set<string>()
@@ -66,12 +102,96 @@ export default function ChatDrawer({
   const [suggestedByMsg, setSuggestedByMsg] = useState<Record<number, SuggestedNode[]>>({})
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [expanded, setExpanded] = useState(false)
+  const [width, setWidth] = useState<number>(() => readInitialChatWidth())
+  const [expanded, setExpanded] = useState<boolean>(() => readInitialChatWidth() >= EXPANDED_CHAT_WIDTH - 24)
+  const [isResizing, setIsResizing] = useState(false)
   const [provider, setProvider] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const lastAutoSentTriggerRef = useRef(0)
+  const widthRef = useRef(width)
+  widthRef.current = width
+  const savedNormalWidthRef = useRef(
+    width < EXPANDED_CHAT_WIDTH - 24 ? width : DEFAULT_CHAT_WIDTH,
+  )
+  const resizeCleanupRef = useRef<(() => void) | null>(null)
+
+  useEffect(() => {
+    const handleWindowResize = () => {
+      const clamped = clampChatWidth(widthRef.current)
+      if (clamped !== widthRef.current) {
+        widthRef.current = clamped
+        setWidth(clamped)
+        setExpanded(clamped >= EXPANDED_CHAT_WIDTH - 24)
+      }
+    }
+    window.addEventListener('resize', handleWindowResize)
+    return () => {
+      window.removeEventListener('resize', handleWindowResize)
+      resizeCleanupRef.current?.()
+      resizeCleanupRef.current = null
+    }
+  }, [])
+
+  const handleToggleExpand = () => {
+    if (expanded) {
+      const target = clampChatWidth(
+        savedNormalWidthRef.current < EXPANDED_CHAT_WIDTH - 24
+          ? savedNormalWidthRef.current
+          : DEFAULT_CHAT_WIDTH,
+      )
+      widthRef.current = target
+      setWidth(target)
+      setExpanded(false)
+      persistChatWidth(target)
+    } else {
+      if (widthRef.current < EXPANDED_CHAT_WIDTH - 24) {
+        savedNormalWidthRef.current = widthRef.current
+      }
+      const target = clampChatWidth(Math.max(EXPANDED_CHAT_WIDTH, widthRef.current))
+      widthRef.current = target
+      setWidth(target)
+      setExpanded(true)
+      persistChatWidth(target)
+    }
+  }
+
+  const handleResizePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    resizeCleanupRef.current?.()
+    setIsResizing(true)
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const next = clampChatWidth(window.innerWidth - moveEvent.clientX)
+      widthRef.current = next
+      setWidth(next)
+      const isNowExpanded = next >= EXPANDED_CHAT_WIDTH - 24
+      setExpanded(isNowExpanded)
+      if (!isNowExpanded) {
+        savedNormalWidthRef.current = next
+      }
+    }
+
+    const finishResize = () => {
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', finishResize)
+      window.removeEventListener('pointercancel', finishResize)
+      resizeCleanupRef.current = null
+      setIsResizing(false)
+      persistChatWidth(widthRef.current)
+    }
+
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', finishResize)
+    window.addEventListener('pointercancel', finishResize)
+    resizeCleanupRef.current = () => {
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', finishResize)
+      window.removeEventListener('pointercancel', finishResize)
+    }
+  }
 
   const handleGoToNode = (targetNodeId: string) => {
     if (onSelectNode) {
@@ -158,10 +278,29 @@ export default function ChatDrawer({
         role="dialog"
         aria-label="Chat Tutor del Ramo"
         onClick={(e) => e.stopPropagation()}
-        className={`flex h-full w-full flex-col border-l border-slate-200 bg-white shadow-xl transition-[max-width] duration-200 dark:border-slate-800 dark:bg-slate-900 ${
-          expanded ? 'max-w-3xl' : 'max-w-md'
+        style={{ width: `${width}px`, maxWidth: '90vw' }}
+        className={`relative flex h-full flex-col border-l border-slate-200 bg-white shadow-xl dark:border-slate-800 dark:bg-slate-900 ${
+          isResizing ? 'select-none' : 'transition-[width] duration-200'
         }`}
       >
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Redimensionar panel del tutor"
+          title="Arrastra para ajustar el ancho del panel"
+          onPointerDown={handleResizePointerDown}
+          className={`group absolute inset-y-0 left-0 z-10 w-2 -translate-x-1/2 cursor-col-resize touch-none ${
+            isResizing ? 'bg-indigo-500/35' : 'hover:bg-indigo-500/25'
+          }`}
+        >
+          <span
+            className={`pointer-events-none absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 transition-colors ${
+              isResizing
+                ? 'bg-indigo-500 dark:bg-indigo-400'
+                : 'bg-transparent group-hover:bg-indigo-500/70 dark:group-hover:bg-indigo-400/70'
+            }`}
+          />
+        </div>
         <header className="flex items-start justify-between gap-2 border-b border-slate-200 p-4 dark:border-slate-800">
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 text-sm font-semibold">
@@ -178,7 +317,7 @@ export default function ChatDrawer({
               type="button"
               title={expanded ? 'Contraer panel del tutor' : 'Expandir panel para leer código'}
               aria-label={expanded ? 'Contraer panel del tutor' : 'Expandir panel del tutor'}
-              onClick={() => setExpanded((v) => !v)}
+              onClick={handleToggleExpand}
               className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-slate-800 dark:hover:text-slate-100"
             >
               {expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}

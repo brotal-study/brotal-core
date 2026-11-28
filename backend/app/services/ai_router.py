@@ -8,6 +8,7 @@ Soporta:
 """
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import unicodedata
@@ -26,10 +27,432 @@ from app.config import (
     configured_providers,
     get_secret,
 )
+from app.services.evaluator import evaluate_rubric
 from app.services.tts import split_story_sentences
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+
+LANGUAGE_INTERACTIVE_CHALLENGE_TYPES = (
+    "word_order",
+    "categorize",
+    "find_error",
+    "dictation",
+)
+LANGUAGE_CHALLENGE_TYPES = (
+    "fill_blank",
+    "translate",
+    "speaking_prompt",
+    *LANGUAGE_INTERACTIVE_CHALLENGE_TYPES,
+)
+ALL_VALID_CHALLENGE_TYPES = (
+    "concept",
+    "trace",
+    "debug",
+    "implement",
+    *LANGUAGE_CHALLENGE_TYPES,
+)
+
+_L1_ES_DISTRACTOR_PAIRS: dict[str, str] = {
+    "goes": "go",
+    "go": "goes",
+    "studies": "study",
+    "study": "studies",
+    "does": "do",
+    "do": "does",
+    "doesn't": "don't",
+    "don't": "doesn't",
+    "is": "are",
+    "are": "is",
+    "isn't": "aren't",
+    "aren't": "isn't",
+    "has": "have",
+    "have": "has",
+    "much": "many",
+    "many": "much",
+    "some": "any",
+    "any": "some",
+    "am": "is",
+    "in": "on",
+    "on": "in",
+    "at": "in",
+    "there": "their",
+    "their": "there",
+    "works": "work",
+    "work": "works",
+    "reviews": "review",
+    "review": "reviews",
+}
+
+_FALLBACK_WORD_ORDER_POOL: tuple[dict[str, Any], ...] = (
+    {
+        "tiles": ["She", "goes", "to", "university", "every", "morning"],
+        "distractors": ["go", "does"],
+        "hint_es": "Present Simple en 3.ª persona singular (afirmativa); descarta los bloques de interferencia.",
+    },
+    {
+        "tiles": ["Are", "there", "any", "notebooks", "on", "the", "desk?"],
+        "distractors": ["Is", "some"],
+        "hint_es": "Pregunta con sustantivo plural contable usando There are + any.",
+    },
+    {
+        "tiles": ["He", "doesn't", "have", "much", "free", "time"],
+        "distractors": ["has", "many"],
+        "hint_es": "Negativa en 3.ª persona singular (doesn't + verbo base) con sustantivo incontable.",
+    },
+    {
+        "tiles": ["How", "often", "do", "you", "study", "English?"],
+        "distractors": ["does", "studies"],
+        "hint_es": "Pregunta de frecuencia con sujeto 'you' y auxiliar correcto.",
+    },
+)
+
+_FALLBACK_CATEGORIZE_POOL: tuple[dict[str, Any], ...] = (
+    {
+        "categories": ["Countable", "Uncountable"],
+        "items": [
+            "two notebooks",
+            "many students",
+            "some coffee",
+            "much homework",
+            "three classes",
+            "a little time",
+        ],
+        "expected_map": {
+            "two notebooks": "Countable",
+            "many students": "Countable",
+            "some coffee": "Uncountable",
+            "much homework": "Uncountable",
+            "three classes": "Countable",
+            "a little time": "Uncountable",
+        },
+    },
+    {
+        "categories": ["There is", "There are"],
+        "items": [
+            "a whiteboard on the wall",
+            "some milk in the fridge",
+            "three computers in the lab",
+            "many chairs in the room",
+            "a quiet library nearby",
+            "two exams this week",
+        ],
+        "expected_map": {
+            "a whiteboard on the wall": "There is",
+            "some milk in the fridge": "There is",
+            "three computers in the lab": "There are",
+            "many chairs in the room": "There are",
+            "a quiet library nearby": "There is",
+            "two exams this week": "There are",
+        },
+    },
+    {
+        "categories": ["Do / Don't", "Does / Doesn't"],
+        "items": [
+            "you study at night",
+            "they live near campus",
+            "she review vocabulary",
+            "he have class on Friday",
+            "we need more practice",
+            "the bus arrive at eight",
+        ],
+        "expected_map": {
+            "you study at night": "Do / Don't",
+            "they live near campus": "Do / Don't",
+            "she review vocabulary": "Does / Doesn't",
+            "he have class on Friday": "Does / Doesn't",
+            "we need more practice": "Do / Don't",
+            "the bus arrive at eight": "Does / Doesn't",
+        },
+    },
+    {
+        "categories": ["Morning routine", "At university", "Evening habits"],
+        "items": [
+            "wake up at seven",
+            "take a quick shower",
+            "attend a grammar lecture",
+            "take notes in class",
+            "review vocabulary flashcards",
+            "go to bed early",
+        ],
+        "expected_map": {
+            "wake up at seven": "Morning routine",
+            "take a quick shower": "Morning routine",
+            "attend a grammar lecture": "At university",
+            "take notes in class": "At university",
+            "review vocabulary flashcards": "Evening habits",
+            "go to bed early": "Evening habits",
+        },
+    },
+)
+
+_FALLBACK_FIND_ERROR_POOL: tuple[dict[str, Any], ...] = (
+    {
+        "sentence": "She don't study English at the library on Mondays.",
+        "allow_no_error": True,
+        "error_token": "don't",
+        "correction": "doesn't",
+    },
+    {
+        "sentence": "There is many students waiting outside the classroom today.",
+        "allow_no_error": True,
+        "error_token": "is",
+        "correction": "are",
+    },
+    {
+        "sentence": "He doesn't has enough time for breakfast before class.",
+        "allow_no_error": True,
+        "error_token": "has",
+        "correction": "have",
+    },
+    {
+        "sentence": "Is very important to practice speaking English every day.",
+        "allow_no_error": True,
+        "error_token": "Is",
+        "correction": "It is",
+    },
+)
+
+_FALLBACK_DICTATION_POOL: tuple[dict[str, Any], ...] = (
+    {
+        "audio_text": "She usually studies English at the library before her morning classes.",
+        "accent": "us",
+        "hint_es": "Escucha con atención la 3.ª persona singular y las preposiciones de lugar.",
+    },
+    {
+        "audio_text": "There aren't any chairs left in the classroom, so we need two more.",
+        "accent": "us",
+        "hint_es": "Presta atención a la contracción negativa y al cuantificador plural.",
+    },
+    {
+        "audio_text": "Does your classmate have enough time to review vocabulary this evening?",
+        "accent": "gb",
+        "hint_es": "Fíjate en el auxiliar al inicio de la pregunta y el verbo en forma base.",
+    },
+    {
+        "audio_text": "I always drink some coffee and check my schedule at seven thirty.",
+        "accent": "us",
+        "hint_es": "Transcribe la oración completa cuidando adverbio de frecuencia y hora.",
+    },
+)
+
+
+def _norm_en_tokens(text: str) -> list[str]:
+    cleaned = (text or "").strip().lower()
+    cleaned = cleaned.replace("\u2019", "'").replace("\u2018", "'").replace("`", "'")
+    return re.findall(r"[a-z0-9]+(?:'[a-z0-9]+)?", cleaned)
+
+
+def _infer_l1_es_distractors(tiles: list[str], existing: list[str]) -> list[str]:
+    tiles_lower = {re.sub(r"[^a-z0-9']", "", t.lower()) for t in tiles}
+    out: list[str] = []
+    seen_lower: set[str] = set()
+    for raw in existing:
+        cleaned = str(raw).strip()
+        low = re.sub(r"[^a-z0-9']", "", cleaned.lower())
+        if cleaned and low not in seen_lower:
+            out.append(cleaned)
+            seen_lower.add(low)
+        if len(out) >= 2:
+            return out
+
+    for tile in tiles:
+        low = re.sub(r"[^a-z0-9']", "", tile.lower())
+        cand = _L1_ES_DISTRACTOR_PAIRS.get(low)
+        if cand and cand not in tiles_lower and cand not in seen_lower:
+            out.append(cand)
+            seen_lower.add(cand)
+        if len(out) >= 2:
+            return out
+
+    for fallback_d in ("does", "do", "is", "are", "much", "many", "has", "have"):
+        if fallback_d not in tiles_lower and fallback_d not in seen_lower:
+            out.append(fallback_d)
+            seen_lower.add(fallback_d)
+        if len(out) >= 1:
+            break
+
+    return out[:2]
+
+
+def normalize_language_interaction_data(
+    challenge_type: str,
+    raw_interaction_data: Any,
+    *,
+    question: str = "",
+    node_title: str = "",
+    idx: int = 0,
+) -> dict[str, Any] | None:
+    """Normalizador defensivo obligatorio para interaction_data en retos interactivos de language_studio.
+
+    Garantiza un payload completo y valido para word_order, categorize, find_error y dictation
+    incluso si el LLM devolvio None, {} o campos incompletos.
+    """
+    ct = (challenge_type or "").strip().lower()
+    raw = raw_interaction_data if isinstance(raw_interaction_data, dict) else {}
+
+    if ct == "word_order":
+        fb = _FALLBACK_WORD_ORDER_POOL[idx % len(_FALLBACK_WORD_ORDER_POOL)]
+        raw_tiles = raw.get("tiles")
+        tiles = (
+            [str(t).strip() for t in raw_tiles if str(t).strip()]
+            if isinstance(raw_tiles, list)
+            else []
+        )
+        used_fallback = False
+        if len(tiles) < 4:
+            cand_sentence = str(raw.get("sentence") or raw.get("target_sentence") or "").strip()
+            if len(cand_sentence.split()) >= 4:
+                tiles = cand_sentence.split()
+            else:
+                tiles = list(fb["tiles"])
+                used_fallback = True
+
+        raw_distractors = raw.get("distractors")
+        existing_d = (
+            [str(d).strip() for d in raw_distractors if str(d).strip()]
+            if isinstance(raw_distractors, list)
+            else []
+        )
+        if not existing_d and used_fallback:
+            existing_d = list(fb["distractors"])
+        distractors = _infer_l1_es_distractors(tiles, existing_d)
+
+        hint_es = str(raw.get("hint_es") or "").strip()
+        if not hint_es:
+            hint_es = (
+                str(fb["hint_es"])
+                if used_fallback
+                else f"Ordena los bloques en inglés aplicando {node_title or 'la regla del nodo'} y descarta distractores."
+            )
+        return {
+            "tiles": tiles,
+            "distractors": distractors,
+            "hint_es": hint_es,
+        }
+
+    if ct == "categorize":
+        fb = _FALLBACK_CATEGORIZE_POOL[idx % len(_FALLBACK_CATEGORIZE_POOL)]
+        raw_cats = raw.get("categories")
+        raw_items = raw.get("items")
+        categories: list[str] = []
+        if isinstance(raw_cats, list):
+            for c in raw_cats:
+                cs = str(c).strip()
+                if cs and cs not in categories:
+                    categories.append(cs)
+        items: list[str] = []
+        if isinstance(raw_items, list):
+            for it in raw_items:
+                its = str(it).strip()
+                if its and its not in items:
+                    items.append(its)
+
+        raw_map = raw.get("expected_map")
+        expected_map: dict[str, str] = {}
+        if len(categories) >= 2 and len(items) >= 4:
+            cat_lookup = {c.lower(): c for c in categories}
+            if isinstance(raw_map, dict):
+                for k, v in raw_map.items():
+                    ks = str(k).strip()
+                    vs = str(v).strip()
+                    canon_cat = cat_lookup.get(vs.lower())
+                    if ks and canon_cat:
+                        if ks not in items:
+                            items.append(ks)
+                        expected_map[ks] = canon_cat
+        else:
+            categories = list(fb["categories"])
+            items = list(fb["items"])
+            expected_map = dict(fb["expected_map"])
+
+        result: dict[str, Any] = {
+            "categories": categories,
+            "items": items,
+        }
+        if expected_map:
+            result["expected_map"] = expected_map
+        return result
+
+    if ct == "find_error":
+        fb = _FALLBACK_FIND_ERROR_POOL[idx % len(_FALLBACK_FIND_ERROR_POOL)]
+        sentence = str(raw.get("sentence") or "").strip()
+        used_fallback = False
+        if len(sentence.split()) < 4:
+            quoted = re.findall(r"['\"]([A-Za-z][^'\"]{10,160})['\"]", question or "")
+            valid_quoted = next((q.strip() for q in quoted if len(q.strip().split()) >= 4), "")
+            if valid_quoted:
+                sentence = valid_quoted
+            else:
+                sentence = str(fb["sentence"])
+                used_fallback = True
+
+        raw_tokens = raw.get("tokens")
+        tokens = (
+            [str(t).strip() for t in raw_tokens if str(t).strip()]
+            if isinstance(raw_tokens, list)
+            else []
+        )
+        if len(tokens) < 4:
+            tokens = [tok for tok in sentence.split() if tok]
+        if len(tokens) < 4:
+            sentence = str(fb["sentence"])
+            tokens = sentence.split()
+            used_fallback = True
+
+        allow_no_error = (
+            bool(raw["allow_no_error"])
+            if isinstance(raw.get("allow_no_error"), bool)
+            else True
+        )
+        raw_err_tok = raw.get("error_token")
+        error_token = (
+            str(raw_err_tok).strip() or None
+            if raw_err_tok is not None
+            else (fb["error_token"] if used_fallback else None)
+        )
+        raw_corr = raw.get("correction")
+        correction = (
+            str(raw_corr).strip() or None
+            if raw_corr is not None
+            else (fb["correction"] if used_fallback else None)
+        )
+
+        out_fe: dict[str, Any] = {
+            "sentence": sentence,
+            "tokens": tokens,
+            "allow_no_error": allow_no_error,
+        }
+        if error_token is not None:
+            out_fe["error_token"] = error_token
+        if correction is not None:
+            out_fe["correction"] = correction
+        return out_fe
+
+    if ct == "dictation":
+        fb = _FALLBACK_DICTATION_POOL[idx % len(_FALLBACK_DICTATION_POOL)]
+        audio_text = str(raw.get("audio_text") or "").strip()
+        used_fallback = False
+        if len(audio_text) < 4:
+            audio_text = str(fb["audio_text"])
+            used_fallback = True
+
+        raw_accent = str(raw.get("accent") or (fb["accent"] if used_fallback else "us")).strip().lower()
+        accent = raw_accent if raw_accent in ("us", "gb", "au") else "us"
+        hint_es = str(raw.get("hint_es") or "").strip()
+        if not hint_es:
+            hint_es = (
+                str(fb["hint_es"])
+                if used_fallback
+                else "Escucha el audio en inglés y escribe exactamente lo que oyes."
+            )
+        return {
+            "audio_text": audio_text,
+            "accent": accent,
+            "hint_es": hint_es,
+        }
+
+    return raw if raw else None
 
 
 class AiProviderError(RuntimeError):
@@ -521,6 +944,541 @@ def _clean_fenced_solution(raw_sol: Any) -> str | None:
     return s
 
 
+def _format_expected_categorize_solution(interaction_data: dict[str, Any]) -> str | None:
+    expected_map = interaction_data.get("expected_map")
+    categories = interaction_data.get("categories") or []
+    if not isinstance(expected_map, dict) or not expected_map:
+        return None
+    grouped: dict[str, list[str]] = {str(c): [] for c in categories if str(c).strip()}
+    for item, cat in expected_map.items():
+        cs = str(cat).strip()
+        its = str(item).strip()
+        if cs and its:
+            grouped.setdefault(cs, []).append(its)
+    lines = [f"{cat}: {', '.join(its)}" for cat, its in grouped.items() if its]
+    return "\n".join(lines) if lines else None
+
+
+def _build_fixed_find_error_sentence(interaction_data: dict[str, Any]) -> str:
+    sentence = str(interaction_data.get("sentence") or "").strip()
+    error_token = str(interaction_data.get("error_token") or "").strip()
+    correction = str(interaction_data.get("correction") or "").strip()
+    if sentence and error_token and correction:
+        pattern = re.compile(re.escape(error_token), re.IGNORECASE)
+        replaced, count = pattern.subn(correction, sentence, count=1)
+        if count > 0:
+            return replaced
+    return sentence
+
+
+def _interactive_reference_solution(ct: str, interaction_data: dict[str, Any] | None) -> str | None:
+    if not isinstance(interaction_data, dict):
+        return None
+    if ct == "word_order":
+        tiles = [str(t).strip() for t in (interaction_data.get("tiles") or []) if str(t).strip()]
+        return " ".join(tiles) if tiles else None
+    if ct == "categorize":
+        return _format_expected_categorize_solution(interaction_data)
+    if ct == "find_error":
+        error_token = interaction_data.get("error_token")
+        correction = interaction_data.get("correction")
+        fixed_sentence = _build_fixed_find_error_sentence(interaction_data)
+        if error_token and correction:
+            return f"{fixed_sentence} (Error: {error_token} -> Corrección: {correction})"
+        return fixed_sentence or "Sin error"
+    if ct == "dictation":
+        audio_text = str(interaction_data.get("audio_text") or "").strip()
+        return audio_text or None
+    return None
+
+
+def _parse_categorize_answer(student_ans: str, categories: list[str]) -> dict[str, str]:
+    """Parsea líneas 'Categoria: item1, item2' en un mapa item_lower -> categoria_canonica."""
+    cat_lookup = {c.strip().lower(): c.strip() for c in categories if c.strip()}
+    assigned: dict[str, str] = {}
+    raw_lines = [ln.strip() for ln in re.split(r"[\n;]+", student_ans or "") if ln.strip()]
+    for ln in raw_lines:
+        if ":" not in ln:
+            continue
+        cat_raw, items_raw = ln.split(":", 1)
+        cat_clean = cat_raw.strip().lower()
+        matched_cat = cat_lookup.get(cat_clean)
+        if not matched_cat:
+            for k_low, k_canon in cat_lookup.items():
+                if k_low in cat_clean or cat_clean in k_low:
+                    matched_cat = k_canon
+                    break
+        if not matched_cat:
+            continue
+        for part in items_raw.split(","):
+            item_clean = part.strip()
+            if item_clean:
+                assigned[item_clean.lower()] = matched_cat
+    return assigned
+
+
+def _evaluate_single_interactive_prompt(
+    q: dict[str, Any],
+    student_ans: str,
+    idx: int,
+) -> dict[str, Any]:
+    """Evalua deterministicamente un reto interactivo de language_studio (word_order/categorize/find_error/dictation)."""
+    qid = str(q.get("id") or f"q{idx + 1}")
+    ct = str(q.get("challenge_type") or "concept").strip().lower()
+    r_points = [str(p) for p in (q.get("rubric_points") or [])]
+    q_keys = [f"{qid}::{i}" for i in range(len(r_points))]
+    idata = normalize_language_interaction_data(
+        ct,
+        q.get("interaction_data"),
+        question=str(q.get("question") or ""),
+        idx=idx,
+    ) or {}
+    ans = (student_ans or "").strip()
+
+    ratio = 0.0
+    status = "failed"
+    diagnosis = ""
+    code_fixes: list[dict[str, str]] = []
+    corrected_solution: str | None = None
+    imprecision: str | None = None
+
+    if ct == "word_order":
+        tiles = [str(t).strip() for t in (idata.get("tiles") or []) if str(t).strip()]
+        distractors = [str(d).strip() for d in (idata.get("distractors") or []) if str(d).strip()]
+        expected_sentence = " ".join(tiles)
+        exp_tokens = _norm_en_tokens(expected_sentence)
+        stu_tokens = _norm_en_tokens(ans)
+        used_distractors = [
+            d
+            for d in distractors
+            if _norm_en_tokens(d)
+            and all(tok in stu_tokens for tok in _norm_en_tokens(d))
+            and not all(tok in exp_tokens for tok in _norm_en_tokens(d))
+        ]
+        if stu_tokens and stu_tokens == exp_tokens:
+            ratio = 1.0
+            status = "passed"
+            diagnosis = "Excelente: armaste la oración en el orden natural en inglés descartando los distractores."
+        elif not stu_tokens:
+            ratio = 0.0
+            status = "failed"
+            diagnosis = "No armaste ninguna oración en inglés."
+            imprecision = f"Falta construir la oración objetivo: '{expected_sentence}'."
+            corrected_solution = expected_sentence
+            code_fixes.append(
+                {
+                    "broken_snippet": "(sin oración armada)",
+                    "fixed_snippet": expected_sentence,
+                    "why": "Este cambio muestra el orden natural Sujeto + Verbo + Complemento en inglés.",
+                }
+            )
+        else:
+            sim = difflib.SequenceMatcher(None, exp_tokens, stu_tokens).ratio()
+            if used_distractors:
+                sim = max(0.0, sim - 0.25)
+            ratio = round(sim, 2)
+            if ratio >= 0.95 and not used_distractors:
+                status = "passed"
+                diagnosis = "Oración correcta en inglés respetando orden y concordancia."
+            elif ratio >= 0.55:
+                status = "partial"
+                if used_distractors:
+                    diagnosis = (
+                        f"Estructura casi lograda, pero incluiste el distractor de interferencia "
+                        f"'{', '.join(used_distractors)}'."
+                    )
+                    imprecision = f"Incluiste un distractor ({', '.join(used_distractors)}) en lugar de la forma natural en inglés."
+                else:
+                    diagnosis = "Tienes varias palabras correctas, pero el orden de los bloques en inglés no coincide."
+                    imprecision = f"Revisa el orden sintáctico de la oración: '{expected_sentence}'."
+                corrected_solution = expected_sentence
+                code_fixes.append(
+                    {
+                        "broken_snippet": ans[:180],
+                        "fixed_snippet": expected_sentence,
+                        "why": (
+                            f"Este cambio corrige la interferencia español-inglés eliminando '{', '.join(used_distractors)}' "
+                            "y restaurando el orden natural."
+                            if used_distractors
+                            else "Este cambio corrige el orden sintáctico natural en inglés."
+                        ),
+                    }
+                )
+            else:
+                status = "failed"
+                diagnosis = "El orden de las palabras o la elección de bloques no forma una oración gramatical válida."
+                imprecision = f"La oración esperada era '{expected_sentence}'."
+                corrected_solution = expected_sentence
+                code_fixes.append(
+                    {
+                        "broken_snippet": ans[:180],
+                        "fixed_snippet": expected_sentence,
+                        "why": "Este cambio corrige el orden Sujeto + Verbo + Complemento y descarta distractores.",
+                    }
+                )
+
+    elif ct == "categorize":
+        categories = [str(c).strip() for c in (idata.get("categories") or []) if str(c).strip()]
+        items = [str(it).strip() for it in (idata.get("items") or []) if str(it).strip()]
+        expected_map = idata.get("expected_map") if isinstance(idata.get("expected_map"), dict) else {}
+        assigned = _parse_categorize_answer(ans, categories)
+        ref_sol = _format_expected_categorize_solution(idata)
+
+        if expected_map:
+            total = len(expected_map)
+            correct = 0
+            wrong_items: list[tuple[str, str | None, str]] = []
+            for item_key, exp_cat in expected_map.items():
+                stu_cat = assigned.get(item_key.strip().lower())
+                if stu_cat and stu_cat.lower() == str(exp_cat).strip().lower():
+                    correct += 1
+                else:
+                    wrong_items.append((item_key, stu_cat, str(exp_cat)))
+            ratio = correct / total if total else 0.0
+            if ratio >= 0.99:
+                status = "passed"
+                diagnosis = "Clasificación perfecta: asignaste todos los bloques a su categoría correcta."
+            elif ratio >= 0.5:
+                status = "partial"
+                diagnosis = (
+                    f"Clasificaste correctamente {correct} de {total} bloques, "
+                    "pero hay asignaciones que debes ajustar."
+                )
+                imprecision = f"Revisa la clasificación de: {', '.join(w[0] for w in wrong_items[:3])}."
+                corrected_solution = ref_sol
+                for w_item, stu_cat, exp_cat in wrong_items[:3]:
+                    code_fixes.append(
+                        {
+                            "broken_snippet": f"{stu_cat}: {w_item}" if stu_cat else f"(sin clasificar): {w_item}",
+                            "fixed_snippet": f"{exp_cat}: {w_item}",
+                            "why": f"Este cambio corrige la categoría: '{w_item}' corresponde a '{exp_cat}'.",
+                        }
+                    )
+            else:
+                status = "failed"
+                diagnosis = (
+                    f"Solo acertaste {correct} de {total} bloques. Revisa el criterio funcional de cada categoría."
+                )
+                imprecision = f"Clasificación incompleta o errónea en {len(wrong_items)} bloques."
+                corrected_solution = ref_sol
+                for w_item, stu_cat, exp_cat in wrong_items[:3]:
+                    code_fixes.append(
+                        {
+                            "broken_snippet": f"{stu_cat}: {w_item}" if stu_cat else f"(sin clasificar): {w_item}",
+                            "fixed_snippet": f"{exp_cat}: {w_item}",
+                            "why": f"Este cambio corrige la categoría: '{w_item}' corresponde a '{exp_cat}'.",
+                        }
+                    )
+        else:
+            total = len(items)
+            matched = sum(1 for it in items if it.lower() in assigned)
+            ratio = matched / total if total else 0.0
+            if ratio >= 0.99:
+                status = "passed"
+                diagnosis = "Clasificaste todos los bloques en las categorías solicitadas."
+            elif ratio >= 0.5:
+                status = "partial"
+                diagnosis = f"Asignaste {matched} de {total} bloques; falta clasificar los restantes."
+                imprecision = "Faltaron bloques por asignar a sus categorías."
+            else:
+                status = "failed"
+                diagnosis = "No clasificaste suficientes bloques con el formato 'Categoría: item1, item2'."
+                imprecision = "Completa la clasificación usando cada categoría disponible."
+
+    elif ct == "find_error":
+        sentence = str(idata.get("sentence") or "").strip()
+        error_token = str(idata.get("error_token") or "").strip() or None
+        correction = str(idata.get("correction") or "").strip() or None
+        allow_no_error = bool(idata.get("allow_no_error", True))
+        fixed_sentence = _build_fixed_find_error_sentence(idata)
+
+        ans_low = ans.lower()
+        said_no_error = bool(re.match(r"^(?:sin\s+error|no\s+error|no\s+hay\s+error|correcta?)\.?$", ans_low))
+        parsed_match = re.search(
+            r"error\s*:\s*(.+?)\s*(?:->|→)\s*correcci[oó]n\s*:\s*(.+)$",
+            ans,
+            flags=re.IGNORECASE,
+        )
+
+        if error_token is None and allow_no_error:
+            if said_no_error:
+                ratio = 1.0
+                status = "passed"
+                diagnosis = "Correcto: identificaste que la oración en inglés no tiene errores gramaticales."
+            else:
+                ratio = 0.0
+                status = "failed"
+                diagnosis = "La oración original ya era correcta en inglés; debías marcar 'Sin error'."
+                imprecision = "Se marcó un error inexistente en una oración gramaticalmente válida."
+                corrected_solution = f"Sin error ({sentence})"
+                code_fixes.append(
+                    {
+                        "broken_snippet": ans[:180] or "(sin respuesta)",
+                        "fixed_snippet": "Sin error",
+                        "why": "Este cambio corrige el diagnóstico porque la oración original cumple las reglas del inglés.",
+                    }
+                )
+        else:
+            exp_err_toks = _norm_en_tokens(error_token or "")
+            exp_corr_toks = _norm_en_tokens(correction or "")
+            exp_fixed_toks = _norm_en_tokens(fixed_sentence)
+            if not ans or said_no_error:
+                ratio = 0.0
+                status = "failed"
+                diagnosis = (
+                    f"La oración sí contenía un error en '{error_token}'. "
+                    f"La forma natural en inglés usa '{correction}'."
+                )
+                imprecision = f"No se detectó el error '{error_token}' -> '{correction}'."
+                corrected_solution = f"{fixed_sentence} (Error: {error_token} -> Corrección: {correction})"
+                code_fixes.append(
+                    {
+                        "broken_snippet": ans or sentence,
+                        "fixed_snippet": f"Error: {error_token} -> Corrección: {correction}",
+                        "why": f"Este cambio corrige '{error_token}' por '{correction}' evitando interferencia del español.",
+                    }
+                )
+            elif parsed_match:
+                picked_tok = parsed_match.group(1).strip()
+                picked_corr = parsed_match.group(2).strip()
+                tok_ok = _norm_en_tokens(picked_tok) == exp_err_toks
+                corr_ok = bool(exp_corr_toks) and (
+                    _norm_en_tokens(picked_corr) == exp_corr_toks
+                    or _norm_en_tokens(picked_corr) == exp_fixed_toks
+                )
+                if tok_ok and corr_ok:
+                    ratio = 1.0
+                    status = "passed"
+                    diagnosis = f"Excelente detección: identificaste '{error_token}' y lo corregiste por '{correction}'."
+                elif tok_ok:
+                    ratio = 0.5
+                    status = "partial"
+                    diagnosis = (
+                        f"Identificaste bien la palabra con error ('{error_token}'), "
+                        f"pero la corrección natural es '{correction}'."
+                    )
+                    imprecision = f"Corrige '{error_token}' por '{correction}'."
+                    corrected_solution = f"{fixed_sentence} (Error: {error_token} -> Corrección: {correction})"
+                    code_fixes.append(
+                        {
+                            "broken_snippet": ans[:180],
+                            "fixed_snippet": f"Error: {error_token} -> Corrección: {correction}",
+                            "why": f"Este cambio corrige la forma sugerida usando '{correction}' en inglés natural.",
+                        }
+                    )
+                elif corr_ok:
+                    ratio = 0.6
+                    status = "partial"
+                    diagnosis = f"La corrección '{correction}' es adecuada, pero el token erróneo exacto era '{error_token}'."
+                    imprecision = f"El token con error exacto en la oración es '{error_token}'."
+                    corrected_solution = f"{fixed_sentence} (Error: {error_token} -> Corrección: {correction})"
+                    code_fixes.append(
+                        {
+                            "broken_snippet": ans[:180],
+                            "fixed_snippet": f"Error: {error_token} -> Corrección: {correction}",
+                            "why": f"Este cambio señala exactamente el token erróneo '{error_token}' y su corrección '{correction}'.",
+                        }
+                    )
+                else:
+                    ratio = 0.0
+                    status = "failed"
+                    diagnosis = (
+                        f"El error real de la oración está en '{error_token}' y debe corregirse por '{correction}'."
+                    )
+                    imprecision = f"El error en la oración era '{error_token}' -> '{correction}'."
+                    corrected_solution = f"{fixed_sentence} (Error: {error_token} -> Corrección: {correction})"
+                    code_fixes.append(
+                        {
+                            "broken_snippet": ans[:180],
+                            "fixed_snippet": f"Error: {error_token} -> Corrección: {correction}",
+                            "why": f"Este cambio corrige '{error_token}' por '{correction}' según la gramática del inglés.",
+                        }
+                    )
+            else:
+                if _norm_en_tokens(ans) == exp_fixed_toks:
+                    ratio = 1.0
+                    status = "passed"
+                    diagnosis = "Corregiste correctamente la oración completa en inglés."
+                else:
+                    ratio = 0.0
+                    status = "failed"
+                    diagnosis = f"No identificaste correctamente el error '{error_token}' -> '{correction}'."
+                    imprecision = f"Revisa el error '{error_token}' en la oración original."
+                    corrected_solution = f"{fixed_sentence} (Error: {error_token} -> Corrección: {correction})"
+                    code_fixes.append(
+                        {
+                            "broken_snippet": ans[:180],
+                            "fixed_snippet": f"Error: {error_token} -> Corrección: {correction}",
+                            "why": f"Este cambio corrige '{error_token}' por '{correction}' en la oración.",
+                        }
+                    )
+
+    elif ct == "dictation":
+        audio_text = str(idata.get("audio_text") or "").strip()
+        exp_tokens = _norm_en_tokens(audio_text)
+        stu_tokens = _norm_en_tokens(ans)
+        if stu_tokens and stu_tokens == exp_tokens:
+            ratio = 1.0
+            status = "passed"
+            diagnosis = "Transcripción exacta: captaste correctamente todas las palabras del audio en inglés."
+        elif not stu_tokens:
+            ratio = 0.0
+            status = "failed"
+            diagnosis = "No escribiste ninguna transcripción del audio."
+            imprecision = f"Falta transcribir la frase del audio: '{audio_text}'."
+            corrected_solution = audio_text
+            code_fixes.append(
+                {
+                    "broken_snippet": "(sin transcripción)",
+                    "fixed_snippet": audio_text,
+                    "why": "Este cambio muestra la transcripción exacta de la frase escuchada en inglés.",
+                }
+            )
+        else:
+            sim = difflib.SequenceMatcher(None, exp_tokens, stu_tokens).ratio()
+            ratio = round(sim, 2)
+            if ratio >= 0.92:
+                ratio = 1.0
+                status = "passed"
+                diagnosis = "Muy buena transcripción: coincide casi exactamente con el audio en inglés."
+            elif ratio >= 0.65:
+                status = "partial"
+                diagnosis = "Transcripción parcial: captaste la idea general pero faltaron o cambiaron algunas palabras."
+                imprecision = f"Compara tu transcripción palabra por palabra contra: '{audio_text}'."
+                corrected_solution = audio_text
+                code_fixes.append(
+                    {
+                        "broken_snippet": ans[:180],
+                        "fixed_snippet": audio_text,
+                        "why": "Este cambio corrige las palabras omitidas o mal escritas respecto al audio original.",
+                    }
+                )
+            else:
+                status = "failed"
+                diagnosis = "La transcripción difiere demasiado del audio original en inglés."
+                imprecision = f"Escucha nuevamente con atención y compáralo con: '{audio_text}'."
+                corrected_solution = audio_text
+                code_fixes.append(
+                    {
+                        "broken_snippet": ans[:180],
+                        "fixed_snippet": audio_text,
+                        "why": "Este cambio muestra la frase exacta del dictado para afinar comprensión auditiva y ortografía.",
+                    }
+                )
+
+    n_pts = len(q_keys)
+    if n_pts == 0:
+        covered_keys: list[str] = []
+    elif status == "passed" or ratio >= 0.92:
+        covered_keys = list(q_keys)
+    elif ratio >= 0.5:
+        covered_count = max(1, min(n_pts - 1, round(n_pts * ratio))) if n_pts > 1 else 0
+        covered_keys = q_keys[:covered_count]
+    else:
+        covered_keys = []
+
+    return {
+        "prompt_id": qid,
+        "ratio": ratio,
+        "covered_keys": covered_keys,
+        "imprecision": imprecision,
+        "review": {
+            "prompt_id": qid,
+            "status": status,
+            "diagnosis": diagnosis,
+            "code_fixes": code_fixes,
+            "corrected_solution": corrected_solution,
+        },
+    }
+
+
+def evaluate_language_fallback_deterministic(
+    *,
+    node_title: str,
+    eval_prompts: list[dict[str, Any]],
+    answers_by_prompt: dict[str, str],
+) -> dict[str, Any]:
+    """Evaluador offline determinista para language_studio (incluye word_order, categorize, find_error y dictation)."""
+    covered_points: list[str] = []
+    imprecisions: list[str] = []
+    raw_reviews: list[dict[str, Any]] = []
+    prompt_ratios: list[float] = []
+
+    for idx, q in enumerate(eval_prompts):
+        qid = str(q.get("id") or f"q{idx + 1}")
+        ct = str(q.get("challenge_type") or "concept").strip().lower()
+        ans = (answers_by_prompt.get(qid) or "").strip()
+
+        if ct in LANGUAGE_INTERACTIVE_CHALLENGE_TYPES:
+            res = _evaluate_single_interactive_prompt(q, ans, idx)
+            covered_points.extend(res["covered_keys"])
+            prompt_ratios.append(float(res["ratio"]))
+            if res["imprecision"]:
+                imprecisions.append(str(res["imprecision"]))
+            raw_reviews.append(res["review"])
+        else:
+            # Fallback para fill_blank, translate, speaking_prompt o concept en el mismo nodo
+            fb_items = evaluate_rubric([q], answers_by_prompt, None)
+            en_tokens = _norm_en_tokens(ans)
+            q_keys = [f"{qid}::{i}" for i in range(len(q.get("rubric_points") or []))]
+            matched_keys = [f"{it['prompt_id']}::{it['point_index']}" for it in fb_items if it["covered"]]
+            if not matched_keys and ans and ct in ("fill_blank", "translate", "speaking_prompt"):
+                min_words = 6 if ct == "speaking_prompt" else (3 if ct == "translate" else 1)
+                if len(en_tokens) >= min_words:
+                    matched_keys = q_keys[: max(1, len(q_keys) // 2)]
+            covered_points.extend(matched_keys)
+            p_ratio = len(matched_keys) / len(q_keys) if q_keys else (1.0 if ans else 0.0)
+            prompt_ratios.append(p_ratio)
+            if p_ratio < 1.0:
+                missed = [
+                    str(q.get("rubric_points", [])[i])
+                    for i, k in enumerate(q_keys)
+                    if k not in matched_keys
+                ]
+                if missed:
+                    imprecisions.append(f"En {qid}: refuerza {missed[0]}.")
+
+    avg_ratio = sum(prompt_ratios) / len(prompt_ratios) if prompt_ratios else 0.0
+    score = round(max(1.0, min(10.0, 1.0 + 9.0 * avg_ratio)), 1)
+    if avg_ratio >= 0.99 and not imprecisions:
+        score = 10.0
+
+    re_explanation: str | None = None
+    if score < 7.0:
+        if imprecisions:
+            re_explanation = (
+                "Repasemos los puntos clave en inglés antes del próximo intento: "
+                + " ".join(imprecisions[:3])
+            )
+        else:
+            re_explanation = (
+                f"Repasa la explicación de {node_title} cuidando el orden Sujeto + Verbo + Complemento, "
+                "los auxiliares do/does y la concordancia."
+            )
+
+    prompt_reviews, routing_suggestion = build_prompt_reviews_and_routing(
+        node_title=node_title,
+        eval_prompts=eval_prompts,
+        answers_by_prompt=answers_by_prompt,
+        covered_points=covered_points,
+        score=score,
+        imprecisions=imprecisions,
+        raw_prompt_reviews=raw_reviews,
+        raw_routing_suggestion=None,
+    )
+
+    return {
+        "score": score,
+        "covered_points": covered_points,
+        "imprecisions": imprecisions,
+        "re_explanation": re_explanation,
+        "prompt_reviews": prompt_reviews,
+        "routing_suggestion": routing_suggestion,
+        "provider": "local_fallback",
+        "model": "local-fallback",
+    }
+
+
 def build_prompt_reviews_and_routing(
     *,
     node_title: str,
@@ -552,6 +1510,7 @@ def build_prompt_reviews_and_routing(
         ct = str(q.get("challenge_type") or "concept").strip().lower()
         lang = str(q.get("language") or "java").strip().lower()
         starter = str(q.get("starter_code") or "").strip()
+        interaction_data = q.get("interaction_data") if isinstance(q.get("interaction_data"), dict) else None
         student_ans = (answers_by_prompt.get(qid) or "").strip()
         r_points = [str(p) for p in (q.get("rubric_points") or [])]
         q_keys = [f"{qid}::{i}" for i in range(len(r_points))]
@@ -606,7 +1565,9 @@ def build_prompt_reviews_and_routing(
         elif status == "passed" and (code_fixes or covered_count < len(q_keys)):
             status = "partial" if covered_count > 0 or code_fixes else "failed"
 
-        # Si es reto de codigo no aprobado y no vinieron code_fixes del proveedor, generar guia puntual
+        ref_interactive_sol = _interactive_reference_solution(ct, interaction_data)
+
+        # Si es reto de codigo o idioma no aprobado y no vinieron code_fixes del proveedor, generar guia puntual
         if ct in ("debug", "implement", "trace") and status != "passed" and not code_fixes:
             formatted_starter = format_multiline_starter_code(starter, lang) or starter
             code_lines = [
@@ -623,13 +1584,14 @@ def build_prompt_reviews_and_routing(
                     "why": f"Este cambio permite cumplir con el criterio técnico evaluado: {target_criterion}.",
                 }
             )
-        elif ct in ("fill_blank", "translate", "speaking_prompt") and status != "passed" and not code_fixes:
+        elif ct in LANGUAGE_CHALLENGE_TYPES and status != "passed" and not code_fixes:
             sample_phrase = student_ans[:180] if student_ans else "(sin respuesta en inglés)"
             target_criterion = missed_criteria[0] if missed_criteria else f"Aplicar estructura natural de {node_title}"
+            fixed_target = ref_interactive_sol or f"Apply natural English structure: {target_criterion}"
             code_fixes.append(
                 {
                     "broken_snippet": sample_phrase,
-                    "fixed_snippet": f"Apply natural English structure: {target_criterion}",
+                    "fixed_snippet": fixed_target,
                     "why": f"Este cambio corrige la gramática/vocabulario requerido: {target_criterion}.",
                 }
             )
@@ -659,15 +1621,22 @@ def build_prompt_reviews_and_routing(
         corrected_solution = _clean_fenced_solution(raw_item.get("corrected_solution"))
         if status == "passed" and not code_fixes:
             corrected_solution = None
-        elif corrected_solution is None and status != "passed" and r_points:
-            if ct in ("debug", "implement"):
-                comment_prefix = "--" if lang == "sql" else ("#" if lang == "python" else "//")
-                corrected_solution = "\n".join(
-                    [f"{comment_prefix} Solución de referencia ({node_title}):"]
-                    + [f"{comment_prefix} {i + 1}. {pt}" for i, pt in enumerate(r_points)]
-                )
-            else:
-                corrected_solution = "\n".join(f"- {pt}" for pt in r_points)
+        elif status != "passed":
+            if ct == "dictation" and ref_interactive_sol:
+                if not corrected_solution or ref_interactive_sol.lower() not in corrected_solution.lower():
+                    corrected_solution = ref_interactive_sol
+            elif corrected_solution is None:
+                if ref_interactive_sol:
+                    corrected_solution = ref_interactive_sol
+                elif r_points:
+                    if ct in ("debug", "implement"):
+                        comment_prefix = "--" if lang == "sql" else ("#" if lang == "python" else "//")
+                        corrected_solution = "\n".join(
+                            [f"{comment_prefix} Solución de referencia ({node_title}):"]
+                            + [f"{comment_prefix} {i + 1}. {pt}" for i, pt in enumerate(r_points)]
+                        )
+                    else:
+                        corrected_solution = "\n".join(f"- {pt}" for pt in r_points)
 
         reviews_out.append(
             {
@@ -710,21 +1679,27 @@ def evaluate_with_ai(
 
     Cuando engine_type == 'code_lab' o alguna pregunta es 'debug'/'implement'/'trace',
     actua como Senior Dev / Profesor exigente de programacion y bases de datos.
+    Cuando engine_type == 'language_studio', evalua gramatica, vocabulario y mecanicas interactivas
+    con fallback determinista offline coherente.
     """
     rubric_spec: list[dict[str, Any]] = []
     all_keys: list[str] = []
     has_code_challenge = engine_type == "code_lab"
     has_language_challenge = engine_type == "language_studio"
+    has_interactive_language = False
 
     for q in eval_prompts:
         qid = str(q["id"])
         ct = str(q.get("challenge_type") or "concept").strip().lower()
         lang = str(q.get("language") or "text").strip().lower()
         starter = q.get("starter_code")
+        interaction_data = q.get("interaction_data")
         if ct in ("debug", "implement", "trace") or starter:
             has_code_challenge = True
-        if ct in ("fill_blank", "translate", "speaking_prompt") or lang == "en":
+        if ct in LANGUAGE_CHALLENGE_TYPES or lang == "en":
             has_language_challenge = True
+        if ct in LANGUAGE_INTERACTIVE_CHALLENGE_TYPES:
+            has_interactive_language = True
         pts = []
         for idx, pt in enumerate(q.get("rubric_points", [])):
             key = f"{qid}::{idx}"
@@ -740,6 +1715,8 @@ def evaluate_with_ai(
         }
         if starter:
             item_spec["starter_code"] = str(starter)
+        if isinstance(interaction_data, dict) and interaction_data:
+            item_spec["interaction_data"] = interaction_data
         rubric_spec.append(item_spec)
 
     senior_dev_rules = ""
@@ -753,6 +1730,16 @@ def evaluate_with_ai(
             "sin omitir pronombres sujeto), uso preciso del vocabulario del nodo y claridad comunicativa.\n"
             "- En `fill_blank`, `translate` y `speaking_prompt`, exige que la respuesta este escrita en ingles correcto "
             "(si responde solo en espanol cuando se pedia ingles, califica bajo).\n"
+            "- MECANICAS INTERACTIVAS (usa `interaction_data` como referencia exacta):\n"
+            "  * `word_order`: el estudiante envia la oracion armada; compara contra `interaction_data.tiles` y penaliza "
+            "si incluyo algun distractor de `interaction_data.distractors` o altero el orden natural.\n"
+            "  * `categorize`: el estudiante envia lineas `Categoria: item1, item2`; valida contra "
+            "`interaction_data.categories`, `items` y `expected_map`.\n"
+            "  * `find_error`: el estudiante envia `'Sin error'` o `'Error: <token> -> Corrección: <texto>'`; valida contra "
+            "`interaction_data.sentence`, `error_token`, `correction` y `allow_no_error`.\n"
+            "  * `dictation`: el estudiante envia su transcripcion; compara palabra por palabra contra "
+            "`interaction_data.audio_text` e incluye siempre la frase original `audio_text` en `corrected_solution` cuando "
+            "haya errores u omisiones.\n"
             "- En `prompt_reviews` y `code_fixes`: cuando la frase del estudiante tenga errores gramaticales, de vocabulario "
             "o suene poco natural, llena `code_fixes` mostrando cada error puntual (`broken_snippet`: Tu frase exacta con el error, "
             "`fixed_snippet`: Correccion natural en ingles, `why`: explicacion breve en espanol iniciando con 'Este cambio corrige...') "
@@ -827,17 +1814,26 @@ def evaluate_with_ai(
         ensure_ascii=False,
     )
 
-    completion = complete_chat(
-        [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        preferred_provider=preferred_provider,
-        json_mode=True,
-        temperature=0.1,
-    )
+    try:
+        completion = complete_chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            preferred_provider=preferred_provider,
+            json_mode=True,
+            temperature=0.1,
+        )
+        parsed = extract_json_object(completion.text)
+    except (AiProviderError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        if has_language_challenge or has_interactive_language:
+            return evaluate_language_fallback_deterministic(
+                node_title=node_title,
+                eval_prompts=eval_prompts,
+                answers_by_prompt=answers_by_prompt,
+            )
+        raise
 
-    parsed = extract_json_object(completion.text)
     valid_keys = set(all_keys)
     raw_covered = parsed.get("covered_points") or []
     covered_points = [str(k) for k in raw_covered if str(k) in valid_keys]
@@ -1054,7 +2050,7 @@ def regenerate_story_with_ai(
         if str(q.get("question") or "").strip()
     ]
     is_language_studio = engine_type == "language_studio" or any(
-        str(q.get("challenge_type") or "concept") in ("fill_blank", "translate", "speaking_prompt")
+        str(q.get("challenge_type") or "concept") in LANGUAGE_CHALLENGE_TYPES
         or str(q.get("language") or "").strip().lower() == "en"
         for q in eval_prompts
     )
@@ -1320,7 +2316,7 @@ def regenerate_questions_with_ai(
         }
     ]
     is_language_studio = engine_type == "language_studio" or any(
-        str(p.get("challenge_type") or "concept") in ("fill_blank", "translate", "speaking_prompt")
+        str(p.get("challenge_type") or "concept") in LANGUAGE_CHALLENGE_TYPES
         or str(p.get("language") or "").strip().lower() == "en"
         for p in source_prompts
     )
@@ -1348,9 +2344,14 @@ def regenerate_questions_with_ai(
     if is_language_studio:
         code_lab_regen_rule = (
             "\n5. MODO `language_studio` ACTIVO (Ingles universitario, `\"language\": \"en\"`, `\"starter_code\": null`): "
-            "Manten o combina los tipos `\"fill_blank\"` (completar huecos gramaticales/vocabulario en ingles con `___`), "
-            "`\"translate\"` (redactar o traducir 1-2 oraciones al ingles aplicando la regla del nodo) y "
-            "`\"speaking_prompt\"` (pregunta abierta en ingles tipo examen oral/escrito corto en 3-4 oraciones).\n"
+            "Mezcla retos de produccion a ciegas con interferencia real espanol->ingles combinando los 4 tipos interactivos "
+            "(`\"word_order\"`, `\"categorize\"`, `\"find_error\"`, `\"dictation\"`) con `\"fill_blank\"`, `\"translate\"` y "
+            "`\"speaking_prompt\"`.\n"
+            "   - Para los 4 tipos interactivos DEBES incluir `\"interaction_data\"` valido:\n"
+            "     * `word_order`: `{\"tiles\": [>=4 bloques de la oracion valida], \"distractors\": [1-2 distractores L1-ES como do/does, is/are, much/many], \"hint_es\": \"...\"}`\n"
+            "     * `categorize`: `{\"categories\": [>=2 categorias], \"items\": [>=4 bloques], \"expected_map\": {\"item\": \"categoria\"}}`\n"
+            "     * `find_error`: `{\"sentence\": \"oracion en ingles\", \"tokens\": [>=4 tokens], \"allow_no_error\": true, \"error_token\": \"...\"|null, \"correction\": \"...\"|null}`\n"
+            "     * `dictation`: `{\"audio_text\": \"frase en ingles no vacia\", \"accent\": \"us\"|\"gb\"|\"au\", \"hint_es\": \"...\"}`\n"
         )
     elif is_code_lab:
         code_lab_regen_rule = (
@@ -1436,20 +2437,17 @@ def regenerate_questions_with_ai(
 
             orig_ct = str(orig.get("challenge_type") or "concept").strip().lower()
             raw_ct = str(ai_item.get("challenge_type") or orig_ct).strip().lower()
-            valid_cts = (
-                "concept",
-                "trace",
-                "debug",
-                "implement",
-                "fill_blank",
-                "translate",
-                "speaking_prompt",
+            ct = (
+                raw_ct
+                if raw_ct in ALL_VALID_CHALLENGE_TYPES
+                else (orig_ct if orig_ct in ALL_VALID_CHALLENGE_TYPES else "concept")
             )
-            ct = raw_ct if raw_ct in valid_cts else (orig_ct if orig_ct in valid_cts else "concept")
             lang = str(ai_item.get("language") or orig.get("language") or inferred_lang).strip().lower()
             if lang in ("english", "eng", "en-us", "en-gb", "en-au"):
                 lang = "en"
-            if lang not in ("java", "sql", "python", "c", "en", "text"):
+            if ct in LANGUAGE_CHALLENGE_TYPES or is_language_studio:
+                lang = "en"
+            elif lang not in ("java", "sql", "python", "c", "en", "text"):
                 lang = inferred_lang
 
             starter: str | None = None
@@ -1479,6 +2477,13 @@ def regenerate_questions_with_ai(
 
             final_starter = starter if ct in ("debug", "implement", "trace") else None
             clean_q, clean_starter = sanitize_code_prompt(candidate_q, final_starter, lang)
+            interaction_data = normalize_language_interaction_data(
+                ct,
+                ai_item.get("interaction_data"),
+                question=clean_q,
+                node_title=node_title,
+                idx=idx,
+            )
 
             updated.append(
                 {
@@ -1488,6 +2493,7 @@ def regenerate_questions_with_ai(
                     "challenge_type": ct,
                     "language": lang,
                     "starter_code": clean_starter,
+                    "interaction_data": interaction_data,
                 }
             )
         return (updated, comp.provider)
@@ -1513,20 +2519,15 @@ def regenerate_questions_with_ai(
             prev_q = str(orig.get("question") or "").strip()
             focus = " y ".join(p.rstrip(".") for p in pts[:2]) if pts else (node_summary or node_title)
             ct = str(orig.get("challenge_type") or "concept").strip().lower()
-            if ct not in (
-                "concept",
-                "trace",
-                "debug",
-                "implement",
-                "fill_blank",
-                "translate",
-                "speaking_prompt",
-            ):
+            if ct not in ALL_VALID_CHALLENGE_TYPES:
                 ct = "concept"
             lang = str(orig.get("language") or inferred_lang).strip().lower()
-            if lang not in ("java", "sql", "python", "c", "en", "text"):
+            if ct in LANGUAGE_CHALLENGE_TYPES or is_language_studio:
+                lang = "en"
+            elif lang not in ("java", "sql", "python", "c", "en", "text"):
                 lang = inferred_lang
 
+            raw_fb_idata: dict[str, Any] | None = None
             if ct == "fill_blank":
                 alt_fb = (
                     f"Complete the blanks using the grammar and vocabulary of {node_title}: "
@@ -1554,6 +2555,54 @@ def regenerate_questions_with_ai(
                     f"Speaking / Short Answer ({node_title}): What do you usually do on weekends to rest and "
                     "prepare for your classes? Answer in 3-4 sentences in English."
                 )
+            elif ct == "word_order":
+                prev_tiles = (orig.get("interaction_data") or {}).get("tiles") if isinstance(orig.get("interaction_data"), dict) else None
+                pick_idx = (idx + 1) % len(_FALLBACK_WORD_ORDER_POOL)
+                if prev_tiles and list(prev_tiles) == list(_FALLBACK_WORD_ORDER_POOL[pick_idx]["tiles"]):
+                    pick_idx = (pick_idx + 1) % len(_FALLBACK_WORD_ORDER_POOL)
+                raw_fb_idata = dict(_FALLBACK_WORD_ORDER_POOL[pick_idx])
+                alt_wo = (
+                    f"Ordena los bloques en inglés aplicando {node_title} y descarta los distractores sobrantes."
+                )
+                new_q = alt_wo if alt_wo != prev_q else (
+                    f"Construye la oración natural en inglés sobre {node_title} evitando interferencia desde el español."
+                )
+            elif ct == "categorize":
+                prev_cats = (orig.get("interaction_data") or {}).get("categories") if isinstance(orig.get("interaction_data"), dict) else None
+                pick_idx = (idx + 1) % len(_FALLBACK_CATEGORIZE_POOL)
+                if prev_cats and list(prev_cats) == list(_FALLBACK_CATEGORIZE_POOL[pick_idx]["categories"]):
+                    pick_idx = (pick_idx + 1) % len(_FALLBACK_CATEGORIZE_POOL)
+                raw_fb_idata = dict(_FALLBACK_CATEGORIZE_POOL[pick_idx])
+                alt_cat = (
+                    f"Clasifica cada expresión en la categoría gramatical o situacional correcta ({node_title})."
+                )
+                new_q = alt_cat if alt_cat != prev_q else (
+                    f"Asigna los bloques de vocabulario y estructura de {node_title} a su categoría correspondiente."
+                )
+            elif ct == "find_error":
+                prev_sent = (orig.get("interaction_data") or {}).get("sentence") if isinstance(orig.get("interaction_data"), dict) else None
+                pick_idx = (idx + 1) % len(_FALLBACK_FIND_ERROR_POOL)
+                if prev_sent and str(prev_sent) == str(_FALLBACK_FIND_ERROR_POOL[pick_idx]["sentence"]):
+                    pick_idx = (pick_idx + 1) % len(_FALLBACK_FIND_ERROR_POOL)
+                raw_fb_idata = dict(_FALLBACK_FIND_ERROR_POOL[pick_idx])
+                alt_fe = (
+                    f"Detecta si hay un error típico de hispanohablante en la oración de {node_title} y corrígelo."
+                )
+                new_q = alt_fe if alt_fe != prev_q else (
+                    f"Revisa cada palabra de la oración ({node_title}): indica el error y su corrección, o marca 'Sin error'."
+                )
+            elif ct == "dictation":
+                prev_audio = (orig.get("interaction_data") or {}).get("audio_text") if isinstance(orig.get("interaction_data"), dict) else None
+                pick_idx = (idx + 1) % len(_FALLBACK_DICTATION_POOL)
+                if prev_audio and str(prev_audio) == str(_FALLBACK_DICTATION_POOL[pick_idx]["audio_text"]):
+                    pick_idx = (pick_idx + 1) % len(_FALLBACK_DICTATION_POOL)
+                raw_fb_idata = dict(_FALLBACK_DICTATION_POOL[pick_idx])
+                alt_di = (
+                    f"Escucha el dictado en inglés sobre {node_title} y transcribe exactamente lo que oyes."
+                )
+                new_q = alt_di if alt_di != prev_q else (
+                    f"Dictado en inglés ({node_title}): reproduce el audio y escribe la oración completa con precisión."
+                )
             else:
                 tpl = templates[idx % len(templates)]
                 new_q = tpl.format(metaphor=metaphor_hint, node=node_title, course=course_title, focus=focus)
@@ -1578,6 +2627,13 @@ def regenerate_questions_with_ai(
                 else None
             )
             clean_q, clean_starter = sanitize_code_prompt(new_q, starter, lang)
+            interaction_data = normalize_language_interaction_data(
+                ct,
+                raw_fb_idata,
+                question=clean_q,
+                node_title=node_title,
+                idx=idx + 1,
+            )
             updated_fallback.append(
                 {
                     "id": qid,
@@ -1586,6 +2642,7 @@ def regenerate_questions_with_ai(
                     "challenge_type": ct,
                     "language": lang,
                     "starter_code": clean_starter,
+                    "interaction_data": interaction_data,
                 }
             )
         return (updated_fallback, "local_fallback")
@@ -4181,3 +5238,586 @@ def generate_code_storyboard_with_ai(
             story_script=story_script,
         )
         return (fallback, "local_fallback")
+
+
+# ---------------- Language Studio Interactive Practice Chat (v1.2.3) ----------------
+
+_L1_ES_RECAST_RULES: tuple[tuple[re.Pattern[str], str, str, str], ...] = (
+    (
+        re.compile(r"\b(she|he|it)\s+don't\b", re.IGNORECASE),
+        r"\1 doesn't",
+        "En 3.ª persona singular (he/she/it) usamos **doesn't** en lugar de don't.",
+        "She doesn't study at night.",
+    ),
+    (
+        re.compile(r"\b(she|he|it)\s+doesn't\s+(goes|studies|has|works|likes|plays|does)\b", re.IGNORECASE),
+        r"\1 doesn't",
+        "Después de **doesn't**, el verbo principal vuelve a su forma base sin -s.",
+        "He doesn't have class on Saturday.",
+    ),
+    (
+        re.compile(r"\b(she|he)\s+go\b", re.IGNORECASE),
+        r"\1 goes",
+        "En afirmativa de Present Simple con he/she agregamos **-es** (goes).",
+        "She goes to university every morning.",
+    ),
+    (
+        re.compile(r"\b(she|he)\s+study\b", re.IGNORECASE),
+        r"\1 studies",
+        "Con he/she en Present Simple, study cambia a **studies**.",
+        "She studies English in the library.",
+    ),
+    (
+        re.compile(r"\b(she|he)\s+have\b", re.IGNORECASE),
+        r"\1 has",
+        "Con he/she en afirmativa usamos **has** en lugar de have.",
+        "He has two classes in the morning.",
+    ),
+    (
+        re.compile(r"\bthere\s+is\s+(many|two|three|four|five|several|some\s+\w+s)\b", re.IGNORECASE),
+        r"there are \1",
+        "Para sustantivos en plural usamos **there are**, no there is.",
+        "There are many students in the classroom.",
+    ),
+    (
+        re.compile(r"\bi\s+have\s+(\d+)\s+years?\b", re.IGNORECASE),
+        r"I am \1 years old",
+        "En inglés la edad se expresa con **verb to be** (I am ... years old), no con have.",
+        "I am twenty years old.",
+    ),
+    (
+        re.compile(r"\bi\s+am\s+agree\b", re.IGNORECASE),
+        "I agree",
+        "**Agree** es un verbo principal: decimos **I agree**, sin am.",
+        "I agree with that idea.",
+    ),
+    (
+        re.compile(r"^\s*is\s+(important|good|easy|hard|interesting|raining|sunny)\b", re.IGNORECASE),
+        r"It is \1",
+        "En inglés nunca omitimos el sujeto: usa **It is** al inicio de la oración.",
+        "It is important to practice every day.",
+    ),
+)
+
+
+def _cap_en_words(text: str, max_words: int = 25) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    words = cleaned.split()
+    if len(words) <= max_words:
+        return cleaned
+    trimmed = " ".join(words[:max_words]).rstrip(",;:")
+    if trimmed and trimmed[-1] not in ".!?":
+        trimmed += "."
+    return trimmed
+
+
+def _default_language_missions(node_title: str, node_summary: str) -> list[str]:
+    ctx = f"{node_title} {node_summary}".lower()
+    if any(k in ctx for k in ("there is", "there are", "quantifier", "countable", "uncountable", "classroom", "room")):
+        return [
+            "Describe two things in your room or classroom using 'There is' and 'There are'.",
+            "Use 'some' or 'any' in a sentence about study objects or food.",
+            "Ask one question with 'Is there...?' or 'Are there...?'.",
+        ]
+    if any(k in ctx for k in ("routine", "present simple", "habit", "daily", "frequency", "verb to be")):
+        return [
+            "Describe two activities from your daily routine using Present Simple.",
+            "Mention something you or a classmate doesn't do on weekends.",
+            "Ask one question using 'Do' or 'Does' about study habits.",
+        ]
+    return [
+        f"Write one clear affirmative sentence in English about {node_title}.",
+        f"Share a negative or contrasting idea using {node_title}.",
+        f"Ask a simple question in English connected to {node_title}.",
+    ]
+
+
+def _default_lexical_chips(node_title: str, node_summary: str) -> list[str]:
+    ctx = f"{node_title} {node_summary}".lower()
+    if any(k in ctx for k in ("there is", "there are", "quantifier", "countable", "uncountable")):
+        return ["There is", "There are", "some coffee", "any notebooks", "many students", "on the desk"]
+    if any(k in ctx for k in ("routine", "present simple", "habit", "daily", "frequency")):
+        return ["usually", "every morning", "studies", "doesn't have", "at university", "Do you...?"]
+    return ["usually", "every day", "there are", "doesn't", "in class", "Do you...?"]
+
+
+def _detect_l1_es_recast(message: str) -> tuple[str | None, str | None, str | None]:
+    """Detecta errores frecuentes L1-español y devuelve (frase_corregida, explicacion_es, ejemplo_en)."""
+    msg = (message or "").strip()
+    if not msg:
+        return (None, None, None)
+
+    # Caso especial: doesn't + verbo con -s
+    m_doesnt = re.search(
+        r"\b(she|he|it)\s+doesn't\s+(goes|studies|has|works|likes|plays|does)\b",
+        msg,
+        flags=re.IGNORECASE,
+    )
+    if m_doesnt:
+        base_map = {
+            "goes": "go",
+            "studies": "study",
+            "has": "have",
+            "works": "work",
+            "likes": "like",
+            "plays": "play",
+            "does": "do",
+        }
+        subj = m_doesnt.group(1)
+        bad_v = m_doesnt.group(2).lower()
+        base_v = base_map.get(bad_v, bad_v)
+        recast = re.sub(
+            re.escape(m_doesnt.group(0)),
+            f"{subj} doesn't {base_v}",
+            msg,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        return (
+            recast,
+            f"Después de doesn't el verbo vuelve a su forma base: usa '{subj} doesn't {base_v}'.",
+            f"{subj.capitalize()} doesn't {base_v} on weekends.",
+        )
+
+    for pattern, repl, why_es, example_en in _L1_ES_RECAST_RULES:
+        if pattern.search(msg):
+            recast = pattern.sub(repl, msg, count=1)
+            return (recast, why_es, example_en)
+
+    return (None, None, None)
+
+
+def _compute_fallback_missions_completed(
+    history: list[dict[str, str]],
+    message: str,
+    turn_index: int,
+) -> list[int]:
+    user_msgs = [
+        str(h.get("content") or "").strip()
+        for h in history
+        if str(h.get("role") or "").lower() == "user" and str(h.get("content") or "").strip()
+    ]
+    if message.strip():
+        user_msgs.append(message.strip())
+
+    completed: set[int] = set()
+    substantive = [m for m in user_msgs if len(_norm_en_tokens(m)) >= 3]
+    if len(substantive) >= 1 or turn_index >= 1:
+        completed.add(0)
+    if (
+        len(substantive) >= 2
+        or any(
+            re.search(r"\b(don't|doesn't|not|never|some|any|there\s+are|but)\b", m, re.IGNORECASE)
+            for m in user_msgs
+        )
+    ):
+        completed.add(1)
+    if (
+        len(substantive) >= 3
+        or any(
+            "?" in m
+            or re.match(r"^\s*(do|does|is|are|what|where|when|how)\b", m, re.IGNORECASE)
+            for m in user_msgs
+        )
+    ):
+        completed.add(2)
+    return sorted(completed)
+
+
+def _build_language_session_summary(
+    *,
+    node_title: str,
+    history: list[dict[str, str]],
+    message: str,
+) -> dict[str, Any]:
+    user_msgs = [
+        str(h.get("content") or "").strip()
+        for h in history
+        if str(h.get("role") or "").lower() == "user" and str(h.get("content") or "").strip()
+    ]
+    if message.strip() and (not user_msgs or user_msgs[-1] != message.strip()):
+        user_msgs.append(message.strip())
+
+    items: list[dict[str, str]] = []
+    seen_said: set[str] = set()
+
+    for utt in user_msgs:
+        if utt.lower() in seen_said:
+            continue
+        recast, why_es, _example = _detect_l1_es_recast(utt)
+        if recast and why_es:
+            items.append({"said": utt, "better": recast, "why": why_es})
+            seen_said.add(utt.lower())
+        elif len(items) < 2 and len(_norm_en_tokens(utt)) >= 2:
+            polished = utt[0].upper() + utt[1:] if utt else utt
+            if polished and polished[-1] not in ".!?":
+                polished += "."
+            items.append(
+                {
+                    "said": utt,
+                    "better": polished,
+                    "why": "Buena producción en inglés; mantén mayúscula inicial, puntuación y orden Sujeto + Verbo.",
+                }
+            )
+            seen_said.add(utt.lower())
+        if len(items) >= 3:
+            break
+
+    fallback_pairs = [
+        {
+            "said": "She don't study on Mondays.",
+            "better": "She doesn't study on Mondays.",
+            "why": "En 3.ª persona singular (he/she/it) el auxiliar negativo es doesn't + verbo base.",
+        },
+        {
+            "said": "There is many books on the desk.",
+            "better": "There are many books on the desk.",
+            "why": "Con sustantivos plurales contables siempre usamos 'there are'.",
+        },
+        {
+            "said": "Is very important to practice every day.",
+            "better": "It is very important to practice every day.",
+            "why": "En inglés no se omite el sujeto: iniciamos con el pronombre 'It'.",
+        },
+    ]
+    for fp in fallback_pairs:
+        if len(items) >= 2:
+            break
+        items.append(fp)
+
+    return {
+        "headline": f"Resumen de tu práctica guiada en {node_title}",
+        "items": items[:3],
+    }
+
+
+def _sanitize_session_summary(
+    raw_summary: Any,
+    *,
+    node_title: str,
+    history: list[dict[str, str]],
+    message: str,
+) -> dict[str, Any]:
+    if isinstance(raw_summary, dict):
+        headline = str(raw_summary.get("headline") or "").strip()
+        raw_items = raw_summary.get("items")
+        clean_items: list[dict[str, str]] = []
+        if isinstance(raw_items, list):
+            for it in raw_items[:3]:
+                if isinstance(it, dict):
+                    said = str(it.get("said") or "").strip()
+                    better = str(it.get("better") or "").strip()
+                    why = str(it.get("why") or "").strip()
+                    if said and better and why:
+                        clean_items.append({"said": said, "better": better, "why": why})
+        if len(clean_items) >= 2:
+            return {
+                "headline": headline or f"Resumen de tu práctica en {node_title}",
+                "items": clean_items,
+            }
+    return _build_language_session_summary(
+        node_title=node_title,
+        history=history,
+        message=message,
+    )
+
+
+def _fallback_language_practice_chat(
+    *,
+    node_title: str,
+    node_summary: str,
+    message: str,
+    history: list[dict[str, str]],
+    missions: list[str],
+    turn_index: int,
+    start: bool,
+    finish: bool,
+) -> dict[str, Any]:
+    active_missions = [str(m).strip() for m in missions if str(m).strip()][:3]
+    if len(active_missions) < 3:
+        defaults = _default_language_missions(node_title, node_summary)
+        for d in defaults:
+            if len(active_missions) >= 3:
+                break
+            if d not in active_missions:
+                active_missions.append(d)
+
+    chips = _default_lexical_chips(node_title, node_summary)
+
+    if start:
+        ctx = f"{node_title} {node_summary}".lower()
+        if any(k in ctx for k in ("there is", "there are", "quantifier", "countable")):
+            reply_en = "Hi! Let's practice English together. What is on your desk right now?"
+            translation_es = "¡Hola! Practiquemos inglés juntos. ¿Qué hay sobre tu escritorio ahora mismo?"
+            example_en = "There is a notebook and there are two pens on my desk."
+            starter = "There is a ... and there are ..."
+        else:
+            reply_en = "Hi! Let's practice English together. What do you usually do every morning before classes?"
+            translation_es = "¡Hola! Practiquemos inglés juntos. ¿Qué haces normalmente cada mañana antes de clases?"
+            example_en = "I usually wake up at seven and review my notes."
+            starter = "I usually ..."
+        return {
+            "reply_en": _cap_en_words(reply_en, 25),
+            "translation_es": translation_es,
+            "inline_correction_es": None,
+            "example_en": example_en,
+            "missions": active_missions,
+            "missions_completed": [],
+            "lexical_chips": chips[:6],
+            "sentence_starter": starter,
+            "session_summary": None,
+            "provider": "local_fallback",
+        }
+
+    completed = _compute_fallback_missions_completed(history, message, turn_index)
+
+    if finish:
+        summary = _build_language_session_summary(
+            node_title=node_title,
+            history=history,
+            message=message,
+        )
+        return {
+            "reply_en": _cap_en_words(
+                "Great work today! You practiced natural English sentences and completed your session. See you next time!",
+                25,
+            ),
+            "translation_es": "¡Excelente trabajo hoy! Practicaste oraciones naturales en inglés y completaste tu sesión. ¡Hasta la próxima!",
+            "inline_correction_es": None,
+            "example_en": summary["items"][0]["better"] if summary["items"] else "She studies English every day.",
+            "missions": active_missions,
+            "missions_completed": completed,
+            "lexical_chips": chips[:5],
+            "sentence_starter": None,
+            "session_summary": summary,
+            "provider": "local_fallback",
+        }
+
+    recast, why_es, example_en = _detect_l1_es_recast(message)
+    next_missing = next((i for i in (0, 1, 2) if i not in completed), None)
+
+    if recast and why_es:
+        follow_q = (
+            "What do you never do on weekends?"
+            if next_missing == 1
+            else ("Can you ask me one question using Do or Does?" if next_missing == 2 else "Tell me one more detail!")
+        )
+        reply_en = _cap_en_words(f"Nice try! You mean **{recast}**. {follow_q}", 25)
+        translation_es = f"¡Buen intento! Quieres decir «{recast}». Continúa con la siguiente misión."
+        inline_corr: str | None = why_es
+    else:
+        if next_missing == 1:
+            reply_en = _cap_en_words(
+                "Great! You **expressed that clearly**. Now, what is something you **don't do** on weekends?",
+                25,
+            )
+            translation_es = "¡Genial! Lo expresaste con claridad. Ahora, ¿qué es algo que no haces los fines de semana?"
+        elif next_missing == 2:
+            reply_en = _cap_en_words(
+                "Awesome! That sounds **very natural**. Can you **ask me a question** in English now?",
+                25,
+            )
+            translation_es = "¡Excelente! Eso suena muy natural. ¿Puedes hacerme una pregunta en inglés ahora?"
+        else:
+            reply_en = _cap_en_words(
+                "Well done! You **completed all three missions** in English. Ready to see your summary?",
+                25,
+            )
+            translation_es = "¡Bien hecho! Completaste las tres misiones en inglés. ¿Listo para ver tu resumen?"
+        inline_corr = None
+        example_en = example_en or "On weekends, I don't have early classes, so I review vocabulary."
+
+    if next_missing == 1:
+        starter = "On weekends, I don't ..."
+    elif next_missing == 2:
+        starter = "Do you usually ...?"
+    else:
+        starter = "I also like to ..."
+
+    should_summarize = len(completed) >= 3 or turn_index >= 5
+    summary = (
+        _build_language_session_summary(node_title=node_title, history=history, message=message)
+        if should_summarize
+        else None
+    )
+
+    return {
+        "reply_en": reply_en,
+        "translation_es": translation_es,
+        "inline_correction_es": inline_corr,
+        "example_en": example_en,
+        "missions": active_missions,
+        "missions_completed": completed,
+        "lexical_chips": chips[:6],
+        "sentence_starter": starter,
+        "session_summary": summary,
+        "provider": "local_fallback",
+    }
+
+
+def run_language_practice_chat_with_ai(
+    *,
+    course_title: str,
+    node_title: str,
+    node_summary: str,
+    story_script: str,
+    message: str = "",
+    history: list[dict[str, str]] | None = None,
+    missions: list[str] | None = None,
+    turn_index: int = 0,
+    start: bool = False,
+    finish: bool = False,
+    preferred_provider: str = "auto",
+) -> dict[str, Any]:
+    """Ejecuta un turno de practica conversacional guiada de ingles (A1-A2) con Salient Recasts y 3 misiones."""
+    hist = list(history or [])
+    existing_missions = [str(m).strip() for m in (missions or []) if str(m).strip()]
+
+    fallback_res = _fallback_language_practice_chat(
+        node_title=node_title,
+        node_summary=node_summary,
+        message=message,
+        history=hist,
+        missions=existing_missions,
+        turn_index=turn_index,
+        start=start,
+        finish=finish,
+    )
+
+    mode_str = "start" if start else ("finish" if finish else "turn")
+    system_prompt = (
+        "Eres un tutor conversacional de ingles A1-A2 de Brotal (`language_studio`) para estudiantes universitarios "
+        "hispanohablantes.\n"
+        "REGLAS ESTRICTAS:\n"
+        "1. `reply_en`: SIEMPRE en ingles claro nivel A1-A2 y BREVE (MAXIMO 25 PALABRAS). "
+        "En turnos intermedios aplica **Salient Recasts**: incorpora la forma corregida o natural en **negrita** (`**...**`) "
+        "dentro de la respuesta conversacional.\n"
+        "2. `translation_es`: traduccion natural al espanol de `reply_en`.\n"
+        "3. `missions`: SIEMPRE exactamente 3 misiones comunicativas concretas derivadas del nodo.\n"
+        "4. `missions_completed`: lista ordenada de indices enteros en [0, 1, 2] ya logrados considerando todo `history` + `message` "
+        "(nunca retroceder misiones ya logradas; en `start=true` devolver `[]`).\n"
+        "5. `inline_correction_es`: explicacion breve en espanol (1 linea) SOLO si el estudiante cometio un error real "
+        "(ej. interferencia espanol->ingles); `null` si la frase estuvo bien o si `start=true`/`finish=true`.\n"
+        "6. `lexical_chips`: entre 4 y 6 palabras o frases cortas utiles en ingles para ayudar en el siguiente turno.\n"
+        "7. `sentence_starter`: inicio de oracion en ingles (ej. `'I usually ...'`) o `null` si `finish=true`.\n"
+        "8. `session_summary`: OBLIGATORIO cuando `finish=true` (y recomendado si se completaron las 3 misiones o `turn_index >= 5`): "
+        "`{\"headline\": \"...\", \"items\": [{\"said\": \"...\", \"better\": \"...\", \"why\": \"...\"}]}` con 2 a 3 pares reales "
+        "basados en los mensajes del usuario en `history` (o ejemplos clave del nodo si hubo pocos turnos). `null` en `start=true`.\n"
+        "9. PROHIBIDO usar emojis.\n"
+        "Responde UNICAMENTE JSON valido con claves: `reply_en`, `translation_es`, `inline_correction_es`, `example_en`, "
+        "`missions`, `missions_completed`, `lexical_chips`, `sentence_starter`, `session_summary`."
+    )
+
+    user_payload = {
+        "mode": mode_str,
+        "course_title": course_title,
+        "node_title": node_title,
+        "node_summary": node_summary,
+        "story_context": story_script[:1200],
+        "missions": existing_missions or fallback_res["missions"],
+        "turn_index": turn_index,
+        "history": hist[-12:],
+        "message": message,
+    }
+
+    try:
+        comp = complete_chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            preferred_provider=preferred_provider,
+            json_mode=True,
+            temperature=0.4,
+            max_tokens=900,
+        )
+        parsed = extract_json_object(comp.text)
+
+        reply_en = _cap_en_words(str(parsed.get("reply_en") or fallback_res["reply_en"]), 25)
+        translation_es = str(parsed.get("translation_es") or "").strip() or str(fallback_res["translation_es"])
+
+        raw_corr = parsed.get("inline_correction_es")
+        inline_correction_es = (
+            str(raw_corr).strip() or None
+            if (isinstance(raw_corr, str) and not start and not finish)
+            else None
+        )
+
+        raw_example = parsed.get("example_en")
+        example_en = (
+            str(raw_example).strip() or None
+            if isinstance(raw_example, str)
+            else fallback_res["example_en"]
+        )
+
+        raw_missions = parsed.get("missions")
+        clean_missions = (
+            [str(m).strip() for m in raw_missions if str(m).strip()][:3]
+            if isinstance(raw_missions, list)
+            else []
+        )
+        if len(clean_missions) < 3:
+            for fm in fallback_res["missions"]:
+                if len(clean_missions) >= 3:
+                    break
+                if fm not in clean_missions:
+                    clean_missions.append(fm)
+
+        if start:
+            missions_completed: list[int] = []
+        else:
+            raw_done = parsed.get("missions_completed")
+            ai_done = {
+                int(x)
+                for x in (raw_done if isinstance(raw_done, list) else [])
+                if isinstance(x, int) and 0 <= x <= 2
+            }
+            fb_done = set(fallback_res["missions_completed"])
+            missions_completed = sorted(ai_done | fb_done)
+
+        raw_chips = parsed.get("lexical_chips")
+        lexical_chips = (
+            [str(c).strip() for c in raw_chips if str(c).strip()][:6]
+            if isinstance(raw_chips, list)
+            else []
+        )
+        if len(lexical_chips) < 4:
+            for fc in fallback_res["lexical_chips"]:
+                if len(lexical_chips) >= 4:
+                    break
+                if fc not in lexical_chips:
+                    lexical_chips.append(fc)
+
+        raw_starter = parsed.get("sentence_starter")
+        sentence_starter = (
+            None
+            if finish
+            else (str(raw_starter).strip() or fallback_res["sentence_starter"])
+        )
+
+        if start:
+            session_summary: dict[str, Any] | None = None
+        elif finish or len(missions_completed) >= 3 or turn_index >= 5 or parsed.get("session_summary"):
+            session_summary = _sanitize_session_summary(
+                parsed.get("session_summary"),
+                node_title=node_title,
+                history=hist,
+                message=message,
+            )
+        else:
+            session_summary = None
+
+        return {
+            "reply_en": reply_en,
+            "translation_es": translation_es,
+            "inline_correction_es": inline_correction_es,
+            "example_en": example_en,
+            "missions": clean_missions,
+            "missions_completed": missions_completed,
+            "lexical_chips": lexical_chips,
+            "sentence_starter": sentence_starter,
+            "session_summary": session_summary,
+            "provider": comp.provider,
+        }
+    except (AiProviderError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return fallback_res

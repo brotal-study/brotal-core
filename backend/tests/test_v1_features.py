@@ -1753,3 +1753,407 @@ def test_regenerate_story_preserves_canonical_node_storyboard(client: TestClient
     tree = client.get(f"/api/v1/courses/{_STORYBOARD_COURSE}/tree")
     assert tree.status_code == 200
     assert all(n["storyboard_ref"] is None for n in tree.json()["nodes"])
+
+
+# ---------------- v1.2.3: Language Studio interactivo + Language Chat ----------------
+
+
+def test_eval_prompt_validates_four_new_language_challenge_types_and_retrocompat() -> None:
+    from app.schemas.pack import EvalPrompt
+
+    # Retrocompatibilidad estricta: EvalPrompt sin interaction_data sigue valido
+    legacy = EvalPrompt.model_validate(
+        {
+            "id": "q_legacy",
+            "question": "Complete with is/are.",
+            "rubric_points": ["Usa concordancia correcta"],
+            "challenge_type": "fill_blank",
+            "language": "en",
+        }
+    )
+    assert legacy.interaction_data is None
+    assert legacy.challenge_type == "fill_blank"
+
+    for ct, payload in (
+        ("word_order", {"tiles": ["She", "goes", "to", "school"], "distractors": ["go"], "hint_es": "3a persona"}),
+        ("categorize", {"categories": ["Countable", "Uncountable"], "items": ["two books", "some coffee", "many pens", "much time"]}),
+        ("find_error", {"sentence": "She don't study on Mondays.", "tokens": ["She", "don't", "study", "on", "Mondays."], "allow_no_error": True}),
+        ("dictation", {"audio_text": "She studies English every day.", "accent": "us", "hint_es": "Escucha y escribe."}),
+    ):
+        ep = EvalPrompt.model_validate(
+            {
+                "id": f"q_{ct}",
+                "question": f"Task {ct}",
+                "rubric_points": ["Criterio verificable"],
+                "challenge_type": ct,
+                "language": "en",
+                "interaction_data": payload,
+            }
+        )
+        assert ep.challenge_type == ct
+        assert ep.language == "en"
+        assert ep.interaction_data == payload
+        dumped = ep.model_dump()
+        assert dumped["interaction_data"] == payload
+
+
+def test_defensive_normalizer_guarantees_valid_interaction_data_for_empty_payloads() -> None:
+    from app.services.ai_router import normalize_language_interaction_data
+    from app.services.ingest import _normalize_eval_prompt
+
+    # 1. word_order con None / {} / incompleto
+    for bad in (None, {}, {"tiles": ["only", "two"], "distractors": []}):
+        wo = normalize_language_interaction_data("word_order", bad, node_title="Present Simple")
+        assert wo is not None
+        assert len(wo["tiles"]) >= 4
+        assert 1 <= len(wo["distractors"]) <= 2
+        assert isinstance(wo["hint_es"], str) and wo["hint_es"].strip()
+
+    # 2. categorize con None / {} / incompleto
+    for bad in (None, {}, {"categories": ["OnlyOne"], "items": ["a"]}):
+        cat = normalize_language_interaction_data("categorize", bad, node_title="Quantifiers")
+        assert cat is not None
+        assert len(cat["categories"]) >= 2
+        assert len(cat["items"]) >= 4
+        assert isinstance(cat.get("expected_map"), dict)
+
+    # 3. find_error con None / {} / solo sentence sin tokens
+    for bad in (None, {}, {"sentence": "There is many chairs in this room."}):
+        fe = normalize_language_interaction_data("find_error", bad, node_title="There is / There are")
+        assert fe is not None
+        assert isinstance(fe["sentence"], str) and len(fe["sentence"].split()) >= 4
+        assert len(fe["tokens"]) >= 4
+        assert isinstance(fe["allow_no_error"], bool)
+
+    # 4. dictation con None / {} / audio vacio
+    for bad in (None, {}, {"audio_text": "", "accent": "invalid"}):
+        di = normalize_language_interaction_data("dictation", bad, node_title="Listening")
+        assert di is not None
+        assert isinstance(di["audio_text"], str) and len(di["audio_text"].strip()) >= 4
+        assert di["accent"] in ("us", "gb", "au")
+        assert isinstance(di["hint_es"], str) and di["hint_es"].strip()
+
+    # _normalize_eval_prompt preserva y repara interaction_data en ingesta
+    repaired = _normalize_eval_prompt(
+        {
+            "id": "q1",
+            "question": "Ordena la oración.",
+            "rubric_points": ["Orden natural"],
+            "challenge_type": "word_order",
+            "interaction_data": {},
+        },
+        p_idx=1,
+        node_title="Present Simple",
+        nid="N1",
+        engine_type="language_studio",
+        default_language="en",
+    )
+    assert repaired["language"] == "en"
+    assert repaired["starter_code"] is None
+    assert len(repaired["interaction_data"]["tiles"]) >= 4
+    assert 1 <= len(repaired["interaction_data"]["distractors"]) <= 2
+
+
+def test_language_studio_interactive_evaluation_offline_and_with_ai(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import ai_router
+
+    interactive_pack = {
+        "schema_version": "1.0",
+        "id": "local-ing9002-interactive",
+        "course_code": "ING9002",
+        "title": "Inglés 1 · Interactive Studio",
+        "language": "es",
+        "engine_type": "language_studio",
+        "metadata": {
+            "university_id": "local",
+            "career_ids": ["cl-pucv-inf-2022"],
+            "created_year": 2026,
+            "updated_year": 2026,
+            "version": "1.0.0",
+            "authors": ["Test"],
+            "license": "CC-BY-SA-4.0",
+            "world_metaphor": "Campus Bilingue",
+        },
+        "nodes": [
+            {
+                "id": "L1",
+                "parent_ids": [],
+                "branch": "theory",
+                "block": "Bloque 1 · Present Simple",
+                "title": "Present Simple & Quantifiers",
+                "summary": "Rutinas, tercera persona singular, countable/uncountable y dictado.",
+                "story_script": (
+                    "En inglés respetamos **Sujeto + Verbo + Complemento** y **doesn't + verbo base**.\n\n"
+                    "```en\nShe goes to school every day.\n```\n"
+                ),
+                "eval_prompts": [
+                    {
+                        "id": "q1",
+                        "question": "Ordena los bloques en inglés y descarta distractores.",
+                        "rubric_points": ["Ordena correctamente la oración en 3a persona", "Descarta distractores"],
+                        "challenge_type": "word_order",
+                        "language": "en",
+                        "starter_code": None,
+                        "interaction_data": {
+                            "tiles": ["She", "goes", "to", "school", "every", "day"],
+                            "distractors": ["go", "does"],
+                            "hint_es": "3a persona singular afirmativa",
+                        },
+                    },
+                    {
+                        "id": "q2",
+                        "question": "Clasifica cada expresión en Countable o Uncountable.",
+                        "rubric_points": ["Distingue sustantivos contables e incontables"],
+                        "challenge_type": "categorize",
+                        "language": "en",
+                        "starter_code": None,
+                        "interaction_data": {
+                            "categories": ["Countable", "Uncountable"],
+                            "items": ["two notebooks", "many students", "some coffee", "much homework"],
+                            "expected_map": {
+                                "two notebooks": "Countable",
+                                "many students": "Countable",
+                                "some coffee": "Uncountable",
+                                "much homework": "Uncountable",
+                            },
+                        },
+                    },
+                    {
+                        "id": "q3",
+                        "question": "Detecta y corrige el error en la oración.",
+                        "rubric_points": ["Corrige el auxiliar de 3a persona singular"],
+                        "challenge_type": "find_error",
+                        "language": "en",
+                        "starter_code": None,
+                        "interaction_data": {
+                            "sentence": "She don't study English on Mondays.",
+                            "tokens": ["She", "don't", "study", "English", "on", "Mondays."],
+                            "allow_no_error": True,
+                            "error_token": "don't",
+                            "correction": "doesn't",
+                        },
+                    },
+                    {
+                        "id": "q4",
+                        "question": "Escucha el audio y transcribe la frase en inglés.",
+                        "rubric_points": ["Transcribe correctamente todas las palabras del dictado"],
+                        "challenge_type": "dictation",
+                        "language": "en",
+                        "starter_code": None,
+                        "interaction_data": {
+                            "audio_text": "There aren't any chairs left in the classroom.",
+                            "accent": "us",
+                            "hint_es": "Atención a la contracción negativa y el plural.",
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+    inst = client.post("/api/v1/courses/install-pack", json=interactive_pack)
+    assert inst.status_code == 200, inst.text
+
+    # Verificar que GET /tree preserva interaction_data de los 4 tipos
+    tree = client.get("/api/v1/courses/local-ing9002-interactive/tree").json()
+    prompts = tree["nodes"][0]["eval_prompts"]
+    assert [p["challenge_type"] for p in prompts] == ["word_order", "categorize", "find_error", "dictation"]
+    assert all(isinstance(p["interaction_data"], dict) for p in prompts)
+
+    # 1. Evaluación offline (sin API key) con respuestas correctas -> 10/10 aprobado
+    ev_perfect = client.post(
+        "/api/v1/study/local-ing9002-interactive/L1/evaluate",
+        json={
+            "answers": [
+                {"prompt_id": "q1", "text": "She goes to school every day"},
+                {"prompt_id": "q2", "text": "Countable: two notebooks, many students\nUncountable: some coffee, much homework"},
+                {"prompt_id": "q3", "text": "Error: don't -> Corrección: doesn't"},
+                {"prompt_id": "q4", "text": "There aren't any chairs left in the classroom."},
+            ],
+            "cooldown_mode": "semester",
+        },
+    )
+    assert ev_perfect.status_code == 200, ev_perfect.text
+    perf = ev_perfect.json()
+    assert perf["evaluated_by"] == "local_fallback"
+    assert perf["passed"] is True
+    assert perf["score"] == 10.0
+    assert all(r["status"] == "passed" for r in perf["prompt_reviews"])
+
+    # 2. Evaluación offline con errores reales -> devuelve diagnósticos, code_fixes y audio_text en dictation
+    ev_err = client.post(
+        "/api/v1/study/local-ing9002-interactive/L1/evaluate",
+        json={
+            "answers": [
+                {"prompt_id": "q1", "text": "She go to school every day"},
+                {"prompt_id": "q2", "text": "Countable: two notebooks, some coffee\nUncountable: many students, much homework"},
+                {"prompt_id": "q3", "text": "Sin error"},
+                {"prompt_id": "q4", "text": "There is chairs in classroom"},
+            ],
+            "cooldown_mode": "semester",
+        },
+    )
+    assert ev_err.status_code == 200, ev_err.text
+    err_body = ev_err.json()
+    assert err_body["evaluated_by"] == "local_fallback"
+    assert err_body["score"] < 7.0
+    assert err_body["passed"] is False
+    reviews_by_id = {r["prompt_id"]: r for r in err_body["prompt_reviews"]}
+    assert reviews_by_id["q1"]["status"] in ("partial", "failed")
+    assert len(reviews_by_id["q1"]["code_fixes"]) >= 1
+    assert "She goes to school every day" in (reviews_by_id["q1"]["corrected_solution"] or "")
+    assert reviews_by_id["q2"]["status"] == "partial"
+    assert len(reviews_by_id["q2"]["code_fixes"]) >= 1
+    assert reviews_by_id["q3"]["status"] == "failed"
+    assert "doesn't" in (reviews_by_id["q3"]["corrected_solution"] or "")
+    assert reviews_by_id["q4"]["status"] in ("partial", "failed")
+    assert "There aren't any chairs left in the classroom." in (reviews_by_id["q4"]["corrected_solution"] or "")
+
+    # 3. Evaluación con IA mockeada recibe interaction_data en el payload del evaluador
+    captured_user_payloads: list[dict[str, Any]] = []
+
+    def fake_complete_chat(messages: list[dict[str, str]], **_kwargs: Any) -> AiCompletion:
+        captured_user_payloads.append(json.loads(messages[1]["content"]))
+        payload = {
+            "score": 8.0,
+            "covered_points": ["q1::0", "q1::1", "q2::0", "q3::0"],
+            "imprecisions": ["En el dictado faltó la contracción aren't."],
+            "re_explanation": "",
+            "routing_suggestion": "Aprobaste; repasa la transcripción del dictado antes de avanzar.",
+            "prompt_reviews": [
+                {"prompt_id": "q1", "status": "passed", "diagnosis": "Orden correcto.", "code_fixes": [], "corrected_solution": None},
+                {"prompt_id": "q2", "status": "passed", "diagnosis": "Categorías correctas.", "code_fixes": [], "corrected_solution": None},
+                {"prompt_id": "q3", "status": "passed", "diagnosis": "Error detectado y corregido.", "code_fixes": [], "corrected_solution": None},
+                {
+                    "prompt_id": "q4",
+                    "status": "partial",
+                    "diagnosis": "Faltó la contracción negativa aren't.",
+                    "code_fixes": [
+                        {
+                            "broken_snippet": "There are not chairs left in the classroom.",
+                            "fixed_snippet": "There aren't any chairs left in the classroom.",
+                            "why": "Este cambio corrige la contracción y el cuantificador any escuchados en el audio.",
+                        }
+                    ],
+                    "corrected_solution": "There aren't any chairs left in the classroom.",
+                },
+            ],
+        }
+        return AiCompletion(text=json.dumps(payload), provider="groq", model="llama-3.3-70b-versatile")
+
+    monkeypatch.setattr(ai_router, "complete_chat", fake_complete_chat)
+    ev_ai = client.post(
+        "/api/v1/study/local-ing9002-interactive/L1/evaluate",
+        json={
+            "answers": [
+                {"prompt_id": "q1", "text": "She goes to school every day"},
+                {"prompt_id": "q2", "text": "Countable: two notebooks, many students\nUncountable: some coffee, much homework"},
+                {"prompt_id": "q3", "text": "Error: don't -> Corrección: doesn't"},
+                {"prompt_id": "q4", "text": "There are not chairs left in the classroom."},
+            ],
+            "cooldown_mode": "semester",
+        },
+    )
+    assert ev_ai.status_code == 200
+    assert ev_ai.json()["evaluated_by"] == "groq"
+    eval_items = captured_user_payloads[0]["evaluation_items"]
+    assert eval_items[0]["interaction_data"]["tiles"] == ["She", "goes", "to", "school", "every", "day"]
+    assert eval_items[3]["interaction_data"]["audio_text"] == "There aren't any chairs left in the classroom."
+
+
+def test_language_practice_chat_full_flow_start_turn_finish_and_404(client: TestClient) -> None:
+    english_notes = (
+        b"# Unit 1: Present Simple and Daily Routines\n"
+        b"Grammar focus: Present Simple affirmative, negative (don't/doesn't) and questions (do/does).\n\n"
+        b"# Unit 2: There is / There are and Quantifiers\n"
+        b"Countable and uncountable nouns with some, any, much and many.\n"
+    )
+    ing = client.post(
+        "/api/v1/courses/ingest-local",
+        data={"course_code": "ING9010", "title": "Inglés 1 · Chat Studio", "engine_type": "language_studio"},
+        files=[("files", ("ing9010.md", english_notes, "text/markdown"))],
+    )
+    assert ing.status_code == 200
+    cid = ing.json()["course_id"]
+
+    tree = client.get(f"/api/v1/courses/{cid}/tree").json()
+    node_id = tree["nodes"][0]["id"]
+    # El árbol completo language_studio mezcla los 4 tipos interactivos además de los clásicos
+    all_cts = {p["challenge_type"] for n in tree["nodes"] for p in n["eval_prompts"]}
+    assert {"word_order", "categorize", "find_error", "dictation"}.issubset(all_cts)
+
+    # 404 si el curso o nodo no existe
+    assert client.post("/api/v1/study/no-such-course/N1/language-chat", json={"start": True}).status_code == 404
+    assert client.post(f"/api/v1/study/{cid}/NOPE/language-chat", json={"start": True}).status_code == 404
+
+    # 1. Start=True -> 3 misiones, saludo <= 25 palabras, chips y sentence_starter
+    r_start = client.post(
+        f"/api/v1/study/{cid}/{node_id}/language-chat",
+        json={"start": True},
+    )
+    assert r_start.status_code == 200, r_start.text
+    start_data = r_start.json()
+    assert len(start_data["missions"]) == 3
+    assert start_data["missions_completed"] == []
+    assert len(start_data["reply_en"].split()) <= 25
+    assert start_data["translation_es"].strip()
+    assert 4 <= len(start_data["lexical_chips"]) <= 6
+    assert start_data["sentence_starter"]
+    assert start_data["session_summary"] is None
+
+    # 2. Turno intermedio con error típico L1-español -> Salient Recast en **negrita** + inline_correction_es + avance misión
+    history = [{"role": "assistant", "content": start_data["reply_en"]}]
+    user_turn_1 = "She don't study English in the morning."
+    r_turn1 = client.post(
+        f"/api/v1/study/{cid}/{node_id}/language-chat",
+        json={
+            "message": user_turn_1,
+            "history": history,
+            "missions": start_data["missions"],
+            "turn_index": 1,
+            "start": False,
+            "finish": False,
+        },
+    )
+    assert r_turn1.status_code == 200, r_turn1.text
+    t1 = r_turn1.json()
+    assert len(t1["reply_en"].split()) <= 25
+    assert "**" in t1["reply_en"]
+    assert "doesn't" in t1["reply_en"].lower()
+    assert t1["inline_correction_es"] is not None
+    assert 0 in t1["missions_completed"]
+    assert len(t1["missions"]) == 3
+
+    # 3. Finish=True -> cierre + session_summary con pares {said, better, why}
+    history.extend(
+        [
+            {"role": "user", "content": user_turn_1},
+            {"role": "assistant", "content": t1["reply_en"]},
+            {"role": "user", "content": "Do you study English every morning?"},
+        ]
+    )
+    r_finish = client.post(
+        f"/api/v1/study/{cid}/{node_id}/language-chat",
+        json={
+            "message": "",
+            "history": history,
+            "missions": start_data["missions"],
+            "turn_index": 2,
+            "start": False,
+            "finish": True,
+        },
+    )
+    assert r_finish.status_code == 200, r_finish.text
+    fin = r_finish.json()
+    assert fin["reply_en"].strip()
+    assert fin["translation_es"].strip()
+    summary = fin["session_summary"]
+    assert isinstance(summary, dict)
+    assert summary["headline"].strip()
+    assert 2 <= len(summary["items"]) <= 3
+    for item in summary["items"]:
+        assert {"said", "better", "why"} <= set(item.keys())
+        assert item["said"].strip() and item["better"].strip() and item["why"].strip()
+    assert any("doesn't" in it["better"].lower() for it in summary["items"])
