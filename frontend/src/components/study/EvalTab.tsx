@@ -6,6 +6,8 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUpDown,
+  ArrowUpRight,
+  BookOpen,
   Bug,
   CheckCircle2,
   ChevronDown,
@@ -15,6 +17,7 @@ import {
   Compass,
   Cpu,
   EyeOff,
+  FlaskConical,
   GraduationCap,
   Headphones,
   Info,
@@ -70,6 +73,9 @@ interface Props {
   progress: NodeProgress
   nextNode?: PackNode | null
   onSelectNextNode?: (nodeId: string) => void
+  parentNodes?: PackNode[]
+  onSelectNode?: (nodeId: string) => void
+  onDraftChange?: (hasDraft: boolean) => void
   onSubmit: (req: {
     answers: { prompt_id: string; text: string }[]
     covered_points?: string[]
@@ -343,6 +349,9 @@ export default function EvalTab({
   progress,
   nextNode = null,
   onSelectNextNode,
+  parentNodes = [],
+  onSelectNode,
+  onDraftChange,
   onSubmit,
   onRegenerateQuestions,
   onBackToStory,
@@ -354,6 +363,7 @@ export default function EvalTab({
   const effectiveCourseId = courseId ?? storeCourseId ?? 'default'
   const effectiveEngineType = engineType ?? storeEngineType ?? 'concept_tree'
   const isLanguageStudio = effectiveEngineType === 'language_studio'
+  const isPractice = node.branch === 'practice'
 
   const questionStyle = useStudyStore((s) => s.questionStyle)
   const setQuestionStyle = useStudyStore((s) => s.setQuestionStyle)
@@ -388,7 +398,24 @@ export default function EvalTab({
   }, [phase, onInProgressChange])
   useEffect(() => () => onInProgressChange(false), [onInProgressChange])
 
-  const hasAnswer = order.some((q) => isPromptEditedOrAnswered(q, answers))
+  const answeredCount = order.filter((q) => isPromptEditedOrAnswered(q, answers)).length
+  const hasAnswer = answeredCount > 0
+  const progressPct = order.length > 0 ? Math.round((answeredCount / order.length) * 100) : 0
+
+  const prevHasDraft = useRef(false)
+  useEffect(() => {
+    const v = hasAnswer && phase !== 'result'
+    if (v !== prevHasDraft.current) {
+      prevHasDraft.current = v
+      onDraftChange?.(v)
+    }
+  }, [hasAnswer, phase, onDraftChange])
+  useEffect(
+    () => () => {
+      onDraftChange?.(false)
+    },
+    [onDraftChange],
+  )
 
   const evaluateWithAi = async () => {
     setBusy(true)
@@ -463,36 +490,82 @@ export default function EvalTab({
 
   return (
     <div className="flex min-w-0 max-w-full flex-col gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-800/60 dark:text-slate-300">
-        <span className="inline-flex min-w-0 flex-1 items-center gap-2">
-          <EyeOff size={14} className="shrink-0" />
-          <span className="break-words">
-            Historia oculta: responde de memoria, con tus propias palabras. Aprobar requiere{' '}
-            {PASS_SCORE.toFixed(1)} o más.
-          </span>
-        </span>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <select
-            aria-label="Estilo de preguntas"
-            value={questionStyle}
-            onChange={(e) => setQuestionStyle(e.target.value as QuestionStyle)}
-            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
-          >
-            <option value="direct">Estilo: Directas (examen)</option>
-            <option value="scenario">Estilo: Caso aplicado</option>
-          </select>
-          <button
-            type="button"
-            disabled={busy || regeneratingQuestions}
-            onClick={handleRegenerateQuestions}
-            title="Genera nuevas preguntas evaluando la misma rúbrica"
-            className="inline-flex shrink-0 items-center gap-1.5 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-          >
-            <RefreshCw size={12} className={regeneratingQuestions ? 'animate-spin' : ''} />
-            {regeneratingQuestions ? 'Generando preguntas...' : 'Nuevas preguntas (IA)'}
-          </button>
+      {isPractice ? (
+        <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-md border border-amber-200/80 bg-amber-50/50 px-3 py-2 text-xs text-slate-700 dark:border-amber-800/60 dark:bg-amber-950/20 dark:text-slate-200">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2.5">
+            <span className="inline-flex shrink-0 items-center gap-1 rounded border border-amber-300 bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-900 dark:border-amber-700 dark:bg-amber-900/60 dark:text-amber-200">
+              <FlaskConical size={12} />
+              Taller / Simulacro
+            </span>
+            <div className="flex min-w-[140px] flex-1 items-center gap-2">
+              <span className="shrink-0 font-medium text-slate-700 dark:text-slate-200">
+                Respondidas {answeredCount} / {order.length}
+              </span>
+              <div className="h-1.5 min-w-[64px] max-w-[140px] flex-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                <div
+                  className="h-full rounded-full bg-amber-500 transition-all dark:bg-amber-400"
+                  style={{ width: `${progressPct}%` }}
+                />
+              </div>
+              <span className="hidden text-[11px] text-slate-500 sm:inline dark:text-slate-400">
+                Meta: {PASS_SCORE.toFixed(1)}/10
+              </span>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <select
+              aria-label="Estilo de preguntas"
+              value={questionStyle}
+              onChange={(e) => setQuestionStyle(e.target.value as QuestionStyle)}
+              className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
+            >
+              <option value="direct">Estilo: Directas (examen)</option>
+              <option value="scenario">Estilo: Caso aplicado</option>
+            </select>
+            <button
+              type="button"
+              disabled={busy || regeneratingQuestions}
+              onClick={handleRegenerateQuestions}
+              title="Genera nuevas preguntas evaluando la misma rúbrica"
+              className="inline-flex shrink-0 items-center gap-1.5 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              <RefreshCw size={12} className={regeneratingQuestions ? 'animate-spin' : ''} />
+              {regeneratingQuestions ? 'Generando preguntas...' : 'Nuevas preguntas (IA)'}
+            </button>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-800/60 dark:text-slate-300">
+          <span className="inline-flex min-w-0 flex-1 items-center gap-2">
+            <EyeOff size={14} className="shrink-0" />
+            <span className="break-words">
+              Historia oculta: responde de memoria, con tus propias palabras. Aprobar requiere{' '}
+              {PASS_SCORE.toFixed(1)} o más.
+            </span>
+          </span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <select
+              aria-label="Estilo de preguntas"
+              value={questionStyle}
+              onChange={(e) => setQuestionStyle(e.target.value as QuestionStyle)}
+              className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
+            >
+              <option value="direct">Estilo: Directas (examen)</option>
+              <option value="scenario">Estilo: Caso aplicado</option>
+            </select>
+            <button
+              type="button"
+              disabled={busy || regeneratingQuestions}
+              onClick={handleRegenerateQuestions}
+              title="Genera nuevas preguntas evaluando la misma rúbrica"
+              className="inline-flex shrink-0 items-center gap-1.5 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              <RefreshCw size={12} className={regeneratingQuestions ? 'animate-spin' : ''} />
+              {regeneratingQuestions ? 'Generando preguntas...' : 'Nuevas preguntas (IA)'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {regeneratingQuestions && (
         <div
@@ -685,6 +758,9 @@ export default function EvalTab({
           courseId={effectiveCourseId}
           ttsAccent={accent}
           nodeTitle={node.title}
+          isPractice={isPractice}
+          parentNodes={parentNodes}
+          onSelectNode={onSelectNode}
           orderedPrompts={order}
           answers={answers}
           result={result}
@@ -706,6 +782,9 @@ function Result({
   courseId,
   ttsAccent,
   nodeTitle,
+  isPractice,
+  parentNodes = [],
+  onSelectNode,
   orderedPrompts,
   answers,
   result,
@@ -721,6 +800,9 @@ function Result({
   courseId: string
   ttsAccent: TtsAccent
   nodeTitle: string
+  isPractice: boolean
+  parentNodes?: PackNode[]
+  onSelectNode?: (nodeId: string) => void
   orderedPrompts: EvalPrompt[]
   answers: Record<string, string>
   result: EvaluateResponse
@@ -1324,14 +1406,38 @@ function Result({
           <RefreshCw size={15} className={regeneratingQuestions ? 'animate-spin' : ''} />
           Nuevas preguntas (IA)
         </button>
-        <button
-          type="button"
-          onClick={onBackToStory}
-          className="rounded-md border border-slate-300 px-4 py-2 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
-        >
-          Volver a la historia
-        </button>
+        {!isPractice && (
+          <button
+            type="button"
+            onClick={onBackToStory}
+            className="rounded-md border border-slate-300 px-4 py-2 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
+          >
+            Volver a la historia
+          </button>
+        )}
       </div>
+
+      {isPractice && parentNodes.length > 0 && onSelectNode && (
+        <div className="flex flex-col gap-2 rounded-md border border-indigo-200/80 bg-indigo-50/50 p-3 dark:border-indigo-800/70 dark:bg-indigo-950/25">
+          <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-indigo-900 dark:text-indigo-200">
+            <BookOpen size={13} className="text-indigo-600 dark:text-indigo-400" />
+            Reforzar teoría base
+          </span>
+          <div className="flex flex-wrap gap-1.5">
+            {parentNodes.map((parent) => (
+              <button
+                key={parent.id}
+                type="button"
+                onClick={() => onSelectNode(parent.id)}
+                className="inline-flex items-center gap-1 rounded-full border border-indigo-300 bg-white px-3 py-1 text-xs font-medium text-indigo-900 hover:bg-indigo-100 dark:border-indigo-700 dark:bg-slate-900 dark:text-indigo-200 dark:hover:bg-indigo-950/70"
+              >
+                <span>Reforzar: {parent.title}</span>
+                <ArrowUpRight size={12} className="shrink-0" />
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <form
         onSubmit={(e) => {

@@ -95,6 +95,7 @@ class PhraseTtsRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=1200)
     lang: Literal["en", "es"] = "en"
     accent: Literal["us", "gb", "au"] = "us"
+    voice_role: Literal["default", "teacher", "partner"] = "default"
 
 
 class LanguageChatRequest(BaseModel):
@@ -104,6 +105,25 @@ class LanguageChatRequest(BaseModel):
     turn_index: int = Field(default=0, ge=0)
     start: bool = False
     finish: bool = False
+    mode: Literal["missions", "exam_3parts"] = "missions"
+
+
+class LanguageChatSummaryItem(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    said: str
+    better: str
+    why: str
+
+
+class LanguageChatSessionSummary(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    headline: str = ""
+    score_hint: str = ""
+    score_10: float | None = None
+    passed: bool | None = None
+    items: list[LanguageChatSummaryItem] = Field(default_factory=list)
 
 
 class LanguageChatResponse(BaseModel):
@@ -115,7 +135,11 @@ class LanguageChatResponse(BaseModel):
     missions_completed: list[int] = Field(default_factory=list)
     lexical_chips: list[str] = Field(default_factory=list)
     sentence_starter: str | None = None
-    session_summary: dict[str, Any] | None = None
+    mode: str = "missions"
+    speaker_role: Literal["teacher", "partner"] = "teacher"
+    part_index: int | None = None
+    part_label: str = ""
+    session_summary: LanguageChatSessionSummary | dict[str, Any] | None = None
     provider: str = "local_fallback"
 
 
