@@ -2643,3 +2643,301 @@ def test_ingest_local_endpoint_returns_coverage_metrics_in_replace_and_append(cl
     assert isinstance(d_app["coverage_warning"], str)
     assert f"{d_app['coverage_pct']}%" in d_app["coverage_warning"]
     assert "Chat Tutor" in d_app["coverage_warning"]
+
+
+# ---------------- v1.2.6: Cinema Editorial Motion (reveal_at, kickers, max_tokens=4096, retrocompat) ----------------
+
+
+def test_cinema_reel_reveal_at_trigger_words_and_editorial_sanitization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import ai_router
+
+    captured_kwargs: dict[str, Any] = {}
+
+    sample_ai_response = {
+        "title": "Contratos sin acoplamiento",
+        "acts": [
+            {
+                "index": 0,
+                "kind": "hook",
+                "title": "El quiebre silencioso",
+                "kicker": "Acto 1: Gancho",  # prohibido -> debe sanearse a // el problema
+                "narration_es": (
+                    "Cuando acoplas cada módulo a una implementación concreta, cualquier cambio menor "
+                    "rompe todo el flujo y convierte una mejora simple en una pesadilla de mantenimiento."
+                ),
+                "estimated_sec": 11.0,
+                "visual_mode": "kinetic_blocks",
+                "headline": "Un contrato, cero dependencias",
+                "accent_words": ["contrato", "dependencias"],
+                "previous_echo": "no deberia aparecer en acto 0",
+                "nodes": [
+                    {
+                        "id": "h1",
+                        "label": "Acoplamiento rigido",
+                        "sublabel": "Dependencia directa",
+                        "tone": "rose",
+                        "status": "problem",
+                        "trigger_word": "modulo",  # sin tilde debe matchear "módulo"
+                    },
+                    {
+                        "id": "h2",
+                        "label": "Quiebre en cascada",
+                        "sublabel": "Cambio menor rompe todo",
+                        "tone": "amber",
+                        "status": "active",
+                        "trigger_word": "rompe todo",
+                    },
+                    {
+                        "id": "h3",
+                        "label": "Costo de mantenimiento",
+                        "sublabel": "Friccion constante",
+                        "tone": "indigo",
+                        "status": "core",
+                        "trigger_word": "mantenimiento",
+                    },
+                ],
+                "flow_label": "Modulo -> Ruptura",
+                "code_before": None,
+                "code_after": None,
+                "pills": [],
+            },
+            {
+                "index": 1,
+                "kind": "analogy",
+                "title": "Enchufe universal",
+                "kicker": "// el truco",
+                "narration_es": (
+                    "Piénsalo como un enchufe eléctrico estándar: la pared solo expone el contrato "
+                    "y puedes conectar lámparas o cargadores nuevos sin picar los cables internos."
+                ),
+                "estimated_sec": 10.5,
+                "visual_mode": "kinetic_blocks",
+                "headline": "Enchufas piezas sin romper",
+                "accent_words": ["Enchufas"],
+                "previous_echo": "",  # vacio -> debe heredarse del headline del acto 0
+                "nodes": [
+                    {"id": "a1", "label": "Pared", "sublabel": "Base fija", "tone": "slate", "status": "core"},
+                    {"id": "a2", "label": "Enchufe", "sublabel": "Contrato", "tone": "sky", "status": "active"},
+                    {"id": "a3", "label": "Lampara", "sublabel": "Implementacion A", "tone": "emerald", "status": "new"},
+                    {"id": "a4", "label": "Cargador", "sublabel": "Implementacion B", "tone": "indigo", "status": "solved"},
+                ],
+                "flow_label": "Pared -> Contrato",
+                "code_before": None,
+                "code_after": None,
+                "pills": [],
+            },
+            {
+                "index": 2,
+                "kind": "mechanism",
+                "title": "Despacho en ejecucion",
+                "kicker": "Mecanismo",  # prohibido -> debe sanearse a // por dentro
+                "narration_es": (
+                    "En tiempo de ejecución la máquina virtual consulta el tipo real del objeto "
+                    "y despacha el método exacto sin cadenas interminables de condicionales."
+                ),
+                "estimated_sec": 10.0,
+                "visual_mode": "kinetic_blocks",
+                "headline": "Despacho dinámico sin condicionales",
+                "accent_words": ["dinámico"],
+                "nodes": [
+                    {"id": "m1", "label": "Tipo real", "sublabel": "Inspeccion en runtime", "tone": "indigo", "status": "active", "trigger_word": "tipo real"},
+                    {"id": "m2", "label": "Metodo exacto", "sublabel": "Sin if/else", "tone": "emerald", "status": "solved", "trigger_word": "metodo exacto"},
+                ],
+                "flow_label": "JVM · Despacho",
+                "code_before": None,
+                "code_after": None,
+                "pills": [],
+            },
+            {
+                "index": 3,
+                "kind": "payoff",
+                "title": "Escala limpia",
+                "kicker": "// en accion",
+                "narration_es": (
+                    "Al agregar un nuevo medio de pago solo creas una clase que firma el contrato "
+                    "y el checkout sigue intacto sin tocar una sola línea vieja."
+                ),
+                "estimated_sec": 9.5,
+                "visual_mode": "kinetic_blocks",
+                "headline": "Crece sin tocar el núcleo",
+                "accent_words": ["núcleo"],
+                "nodes": [
+                    {"id": "p1", "label": "Checkout intacto", "sublabel": "Cero regresiones", "tone": "indigo", "status": "core", "trigger_word": "checkout"},
+                    {"id": "p2", "label": "Nuevo medio", "sublabel": "Se enchufa aparte", "tone": "emerald", "status": "new", "trigger_word": "medio de pago"},
+                ],
+                "flow_label": "Checkout -> Pago",
+                "code_before": None,
+                "code_after": None,
+                "pills": [],
+            },
+            {
+                "index": 4,
+                "kind": "takeaway",
+                "title": "Cierre",
+                "kicker": "// quedate con esto",
+                "narration_es": (
+                    "Recuerda siempre depender de abstracciones estables y no de detalles concretos. "
+                    "Baja a la guía para ver el código completo paso a paso."
+                ),
+                "estimated_sec": 9.0,
+                "visual_mode": "kinetic_blocks",
+                "headline": "Depende del contrato, no del detalle",
+                "accent_words": ["contrato"],
+                "nodes": [],
+                "flow_label": "",
+                "code_before": None,
+                "code_after": None,
+                "pills": ["Contrato estable", "Despacho dinamico", "Extension sin cambios"],
+            },
+        ],
+    }
+
+    def fake_complete_chat(messages: list[dict[str, str]], **kwargs: Any) -> Any:
+        captured_kwargs.update(kwargs)
+        return ai_router.AiCompletion(
+            text=json.dumps(sample_ai_response, ensure_ascii=False),
+            provider="gemini",
+            model="gemini-2.5-flash",
+        )
+
+    monkeypatch.setattr(ai_router, "complete_chat", fake_complete_chat)
+
+    reel, provider = ai_router.generate_cinema_reel_with_ai(
+        course_title="Programación Orientada a Objetos",
+        engine_type="code_lab",
+        node_title="Polimorfismo e Interfaces",
+        node_summary="Desacoplar módulos mediante contratos polimórficos",
+        story_script="Texto base",
+    )
+
+    assert provider == "gemini"
+    assert captured_kwargs.get("max_tokens") == 4096
+
+    acts = reel["acts"]
+    assert len(acts) == 5
+
+    # Acto 0: reveal_at estrictamente creciente desde trigger_word (accent-insensitive), kicker saneado, previous_echo vacio
+    act0 = acts[0]
+    assert act0["kicker"] == "// el problema"
+    assert act0["previous_echo"] == ""
+    assert act0["accent_words"] == ["contrato", "dependencias"]
+    reveals0 = [n["reveal_at"] for n in act0["nodes"]]
+    assert all(isinstance(r, float) and 0.06 <= r <= 0.84 for r in reveals0)
+    assert reveals0[0] < reveals0[1] < reveals0[2]
+
+    # Acto 1: sin trigger_word -> distribucion progresiva exacta (0.12, 0.38, 0.64, 0.80) y previous_echo heredado
+    act1 = acts[1]
+    assert act1["kicker"] == "// el truco"
+    assert act1["previous_echo"] != ""
+    assert [n["reveal_at"] for n in act1["nodes"]] == [0.12, 0.38, 0.64, 0.80]
+
+    # Acto 2: kicker prohibido "Mecanismo" saneado a "// por dentro"
+    assert acts[2]["kicker"] == "// por dentro"
+
+    # Acto 3: incluso si el orden de trigger_words viene invertido, reveal_at es estrictamente creciente
+    reveals3 = [n["reveal_at"] for n in acts[3]["nodes"]]
+    assert reveals3[0] < reveals3[1]
+
+
+def test_cinema_reel_fallback_never_truncates_words_and_legacy_db_row_is_retrocompatible(
+    client: TestClient,
+) -> None:
+    from app.db.database import _connect
+    from app.services.ai_router import _build_fallback_cinema_reel
+
+    # 1. Fallback con titulo largo: nunca corta palabras a la mitad en headline ni en labels y no usa "Contraste inicial"
+    long_title = "Principios de Polimorfismo y Despacho Dinámico Avanzado"
+    fallback = _build_fallback_cinema_reel(
+        course_title="Programación Orientada a Objetos Avanzada",
+        engine_type="code_lab",
+        node_title=long_title,
+        node_summary="Aplicar contratos polimórficos sin acoplamiento en sistemas complejos",
+        story_script="## Idea\nEl **polimorfismo** separa el contrato de la **implementación**.",
+    )
+    assert len(fallback["acts"]) == 5
+    assert fallback["acts"][0]["previous_echo"] == ""
+    for act in fallback["acts"]:
+        assert "Contraste inicial" not in act["flow_label"]
+        assert "Diná" not in act["headline"]
+        assert "Despach" not in act["headline"]
+        assert act["kicker"].startswith("// ")
+        assert not any(
+            bad in act["kicker"].lower()
+            for bad in ("acto", "gancho", "analogia", "mecanismo", "impacto", "claves")
+        )
+        # Todas las palabras del headline y de labels son palabras completas (no cortadas del titulo largo)
+        for node in act["nodes"]:
+            assert "Polimorfis" not in node["label"] or "Polimorfismo" in node["label"]
+            assert isinstance(node["reveal_at"], float)
+        reveals = [n["reveal_at"] for n in act["nodes"]]
+        assert reveals == sorted(reveals)
+        assert len(set(reveals)) == len(reveals)
+
+    # 2. Retrocompatibilidad estricta: fila legacy v1.2.4 en node_cinema_reels sin kicker/accent_words/previous_echo/trigger_word/reveal_at
+    _install_storyboard_pack(client)
+    legacy_payload = {
+        "title": "Reel legacy v1.2.4",
+        "acts": [
+            {
+                "index": i,
+                "kind": kind,
+                "title": f"Titulo {i}",
+                "narration_es": f"Narracion legacy suficiente del acto {i} para validar compatibilidad completa.",
+                "estimated_sec": 9.0,
+                "visual_mode": "kinetic_blocks",
+                "headline": f"Titular legacy {i}",
+                "nodes": [
+                    {
+                        "id": f"old_{i}_1",
+                        "label": "Bloque viejo",
+                        "sublabel": "Sin campos v1.2.6",
+                        "tone": "indigo",
+                        "status": "active",
+                    }
+                ],
+                "flow_label": "Flujo viejo",
+                "code_before": None,
+                "code_after": None,
+                "pills": ["Clave 1", "Clave 2", "Clave 3"] if kind == "takeaway" else [],
+            }
+            for i, kind in enumerate(["hook", "analogy", "mechanism", "payoff", "takeaway"])
+        ],
+    }
+
+    conn = _connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO node_cinema_reels (course_id, node_id, reel_json, provider, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(course_id, node_id) DO UPDATE SET
+                reel_json = excluded.reel_json,
+                provider = excluded.provider,
+                updated_at = excluded.updated_at;
+            """,
+            (
+                _STORYBOARD_COURSE,
+                "OOP",
+                json.dumps(legacy_payload, ensure_ascii=False),
+                "groq",
+                "2026-01-01T00:00:00Z",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    res = client.get(f"/api/v1/study/{_STORYBOARD_COURSE}/OOP/cinema-reel")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["title"] == "Reel legacy v1.2.4"
+    assert body["provider"] == "groq"
+    assert len(body["acts"]) == 5
+    for act in body["acts"]:
+        assert act["kicker"] == ""
+        assert act["accent_words"] == []
+        assert act["previous_echo"] == ""
+        assert act["nodes"][0]["trigger_word"] == ""
+        assert act["nodes"][0]["reveal_at"] is None

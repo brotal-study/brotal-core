@@ -215,6 +215,8 @@ class CinemaVisualNode(BaseModel):
     sublabel: str = ""
     tone: str = "indigo"
     status: str = "active"
+    trigger_word: str = ""
+    reveal_at: float | None = None
 
 
 class CinemaAct(BaseModel):
@@ -225,6 +227,9 @@ class CinemaAct(BaseModel):
     estimated_sec: float = 10.0
     visual_mode: CinemaVisualMode = "kinetic_blocks"
     headline: str = ""
+    kicker: str = ""
+    accent_words: list[str] = Field(default_factory=list)
+    previous_echo: str = ""
     nodes: list[CinemaVisualNode] = Field(default_factory=list)
     flow_label: str = ""
     code_before: str | None = None

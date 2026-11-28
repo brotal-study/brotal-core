@@ -3,7 +3,7 @@ import {
   AlertTriangle,
   ArrowRight,
   CheckCircle2,
-  Cpu,
+  Code2,
   Film,
   Layers,
   Loader2,
@@ -13,6 +13,7 @@ import {
   RotateCcw,
   Shield,
   Sparkles,
+  Subtitles,
   VolumeX,
   X,
   Zap,
@@ -35,16 +36,216 @@ export interface CinemaReelModalProps {
   onClose: () => void
 }
 
-const ACT_KIND_LABEL: Record<CinemaActKind, string> = {
-  hook: 'Gancho',
-  analogy: 'Analogía',
-  mechanism: 'Mecanismo',
-  payoff: 'Impacto',
-  takeaway: 'Claves',
-}
-
 const PLAYBACK_RATES = [1, 1.25, 1.5] as const
 type PlaybackRate = (typeof PLAYBACK_RATES)[number]
+
+const FALLBACK_REVEAL_SLOTS = [0.12, 0.38, 0.64, 0.8] as const
+
+const DEFAULT_EDITORIAL_KICKERS: Record<CinemaActKind, string> = {
+  hook: '// el problema',
+  analogy: '// el truco',
+  mechanism: '// por dentro',
+  payoff: '// el resultado',
+  takeaway: '// quédate con esto',
+}
+
+const FORBIDDEN_KICKER_TOKENS = new Set([
+  'acto',
+  'gancho',
+  'analogia',
+  'mecanismo',
+  'impacto',
+  'claves',
+  'hook',
+  'analogy',
+  'mechanism',
+  'payoff',
+  'takeaway',
+])
+
+const ACCENT_STOPWORDS = new Set([
+  'el',
+  'la',
+  'los',
+  'las',
+  'un',
+  'una',
+  'unos',
+  'unas',
+  'de',
+  'del',
+  'al',
+  'a',
+  'en',
+  'con',
+  'por',
+  'para',
+  'sin',
+  'sobre',
+  'y',
+  'o',
+  'u',
+  'e',
+  'que',
+  'como',
+  'su',
+  'sus',
+  'tu',
+  'tus',
+  'se',
+  'es',
+  'son',
+  'no',
+  'mas',
+  'pero',
+  'si',
+  'esta',
+  'este',
+  'todo',
+  'cada',
+])
+
+interface ActTheme {
+  text: string
+  barFill: string
+  glowRgba: string
+  borderActive: string
+  dot: string
+  pillBg: string
+  ctaBg: string
+}
+
+const ACT_THEME_BY_KIND: Record<CinemaActKind, ActTheme> = {
+  hook: {
+    text: 'text-amber-400',
+    barFill: 'bg-amber-400',
+    glowRgba: 'rgba(245, 158, 11, 0.13)',
+    borderActive: 'border-amber-400/55 bg-amber-400/[0.07] shadow-[0_0_28px_-10px_rgba(245,158,11,0.45)]',
+    dot: 'bg-amber-400',
+    pillBg: 'border-amber-400/35 bg-amber-400/10 text-amber-200',
+    ctaBg: 'bg-amber-400 text-slate-950 hover:bg-amber-300',
+  },
+  analogy: {
+    text: 'text-sky-400',
+    barFill: 'bg-sky-400',
+    glowRgba: 'rgba(56, 189, 248, 0.13)',
+    borderActive: 'border-sky-400/55 bg-sky-400/[0.07] shadow-[0_0_28px_-10px_rgba(56,189,248,0.45)]',
+    dot: 'bg-sky-400',
+    pillBg: 'border-sky-400/35 bg-sky-400/10 text-sky-200',
+    ctaBg: 'bg-sky-400 text-slate-950 hover:bg-sky-300',
+  },
+  mechanism: {
+    text: 'text-indigo-400',
+    barFill: 'bg-indigo-400',
+    glowRgba: 'rgba(99, 102, 241, 0.15)',
+    borderActive: 'border-indigo-400/55 bg-indigo-400/[0.08] shadow-[0_0_28px_-10px_rgba(99,102,241,0.5)]',
+    dot: 'bg-indigo-400',
+    pillBg: 'border-indigo-400/35 bg-indigo-400/10 text-indigo-200',
+    ctaBg: 'bg-indigo-400 text-slate-950 hover:bg-indigo-300',
+  },
+  payoff: {
+    text: 'text-emerald-400',
+    barFill: 'bg-emerald-400',
+    glowRgba: 'rgba(16, 185, 129, 0.14)',
+    borderActive: 'border-emerald-400/55 bg-emerald-400/[0.07] shadow-[0_0_28px_-10px_rgba(16,185,129,0.45)]',
+    dot: 'bg-emerald-400',
+    pillBg: 'border-emerald-400/35 bg-emerald-400/10 text-emerald-200',
+    ctaBg: 'bg-emerald-400 text-slate-950 hover:bg-emerald-300',
+  },
+  takeaway: {
+    text: 'text-lime-400',
+    barFill: 'bg-lime-400',
+    glowRgba: 'rgba(163, 230, 53, 0.13)',
+    borderActive: 'border-lime-400/55 bg-lime-400/[0.07] shadow-[0_0_28px_-10px_rgba(163,230,53,0.45)]',
+    dot: 'bg-lime-400',
+    pillBg: 'border-lime-400/35 bg-lime-400/10 text-lime-200',
+    ctaBg: 'bg-lime-400 text-slate-950 hover:bg-lime-300',
+  },
+}
+
+interface NodeToneStyle {
+  icon: string
+  activeBorder: string
+  dot: string
+}
+
+function getNodeToneStyle(tone: string, status?: string): NodeToneStyle {
+  const normTone = (tone || '').toLowerCase()
+  const normStatus = (status || '').toLowerCase()
+  const resolved =
+    normTone ||
+    (normStatus === 'problem'
+      ? 'rose'
+      : normStatus === 'solved' || normStatus === 'new'
+        ? 'emerald'
+        : normStatus === 'core'
+          ? 'indigo'
+          : 'sky')
+
+  switch (resolved) {
+    case 'rose':
+      return {
+        icon: 'text-rose-400',
+        activeBorder: 'border-rose-400/55 bg-rose-500/[0.08] shadow-[0_0_26px_-10px_rgba(244,63,94,0.5)]',
+        dot: 'bg-rose-400',
+      }
+    case 'emerald':
+      return {
+        icon: 'text-emerald-400',
+        activeBorder: 'border-emerald-400/55 bg-emerald-500/[0.08] shadow-[0_0_26px_-10px_rgba(16,185,129,0.5)]',
+        dot: 'bg-emerald-400',
+      }
+    case 'amber':
+      return {
+        icon: 'text-amber-400',
+        activeBorder: 'border-amber-400/55 bg-amber-500/[0.08] shadow-[0_0_26px_-10px_rgba(245,158,11,0.5)]',
+        dot: 'bg-amber-400',
+      }
+    case 'sky':
+      return {
+        icon: 'text-sky-400',
+        activeBorder: 'border-sky-400/55 bg-sky-500/[0.08] shadow-[0_0_26px_-10px_rgba(56,189,248,0.5)]',
+        dot: 'bg-sky-400',
+      }
+    case 'indigo':
+      return {
+        icon: 'text-indigo-400',
+        activeBorder: 'border-indigo-400/55 bg-indigo-500/[0.09] shadow-[0_0_26px_-10px_rgba(99,102,241,0.5)]',
+        dot: 'bg-indigo-400',
+      }
+    default:
+      return {
+        icon: 'text-slate-300',
+        activeBorder: 'border-white/35 bg-white/[0.06] shadow-[0_0_24px_-10px_rgba(255,255,255,0.25)]',
+        dot: 'bg-slate-300',
+      }
+  }
+}
+
+function NodeGlyph({ status, className }: { status: string; className?: string }) {
+  switch ((status || '').toLowerCase()) {
+    case 'problem':
+      return <AlertTriangle size={15} className={className} />
+    case 'solved':
+      return <CheckCircle2 size={15} className={className} />
+    case 'new':
+      return <Sparkles size={15} className={className} />
+    case 'core':
+      return <Shield size={15} className={className} />
+    case 'active':
+      return <Zap size={15} className={className} />
+    default:
+      return <Layers size={15} className={className} />
+  }
+}
+
+function normalizeToken(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+}
 
 function formatTime(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) return '0:00'
@@ -69,7 +270,7 @@ function defaultStageLabel(stage?: CinemaReelStreamProgress['stage']): string {
     case 'analyzing':
       return 'Analizando concepto...'
     case 'scripting':
-      return 'Escribiendo guion...'
+      return 'Diseñando guion editorial...'
     case 'synthesizing_audio':
       return 'Sintetizando narración neural...'
     case 'done':
@@ -94,111 +295,79 @@ function stageCeiling(stage?: CinemaReelStreamProgress['stage']): number {
   }
 }
 
-interface ToneClasses {
-  card: string
-  accent: string
-  badge: string
-  ring: string
-  stroke: string
+function resolveEditorialKicker(act: CinemaAct): string {
+  const fallback = DEFAULT_EDITORIAL_KICKERS[act.kind] ?? '// idea clave'
+  const raw = (act.kicker || '').trim()
+  if (!raw) return fallback
+  const stripped = raw.replace(/^\/+\s*/, '').trim()
+  if (!stripped) return fallback
+  const tokens = stripped
+    .split(/\s+/)
+    .map((t) => normalizeToken(t))
+    .filter(Boolean)
+  if (tokens.length === 0 || tokens.some((t) => FORBIDDEN_KICKER_TOKENS.has(t))) {
+    return fallback
+  }
+  return `// ${stripped.toLowerCase()}`
 }
 
-function getToneClasses(tone: string, status?: string): ToneClasses {
-  const normTone = (tone || '').toLowerCase()
-  const normStatus = (status || '').toLowerCase()
-  const resolved =
-    normTone ||
-    (normStatus === 'problem'
-      ? 'rose'
-      : normStatus === 'solved' || normStatus === 'new'
-        ? 'emerald'
-        : normStatus === 'core'
-          ? 'indigo'
-          : 'slate')
-
-  switch (resolved) {
-    case 'emerald':
-      return {
-        card: 'border-emerald-300/90 bg-emerald-50/80 text-emerald-950 dark:border-emerald-700/80 dark:bg-emerald-950/40 dark:text-emerald-100',
-        accent: 'text-emerald-600 dark:text-emerald-400',
-        badge: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/70 dark:text-emerald-200',
-        ring: 'ring-2 ring-emerald-500/40 dark:ring-emerald-400/40',
-        stroke: '#10b981',
-      }
-    case 'amber':
-      return {
-        card: 'border-amber-300/90 bg-amber-50/80 text-amber-950 dark:border-amber-700/80 dark:bg-amber-950/35 dark:text-amber-100',
-        accent: 'text-amber-600 dark:text-amber-400',
-        badge: 'bg-amber-100 text-amber-900 dark:bg-amber-900/70 dark:text-amber-200',
-        ring: 'ring-2 ring-amber-500/40 dark:ring-amber-400/40',
-        stroke: '#f59e0b',
-      }
-    case 'rose':
-      return {
-        card: 'border-rose-300/90 bg-rose-50/80 text-rose-950 dark:border-rose-700/80 dark:bg-rose-950/35 dark:text-rose-100',
-        accent: 'text-rose-600 dark:text-rose-400',
-        badge: 'bg-rose-100 text-rose-900 dark:bg-rose-900/70 dark:text-rose-200',
-        ring: 'ring-2 ring-rose-500/40 dark:ring-rose-400/40',
-        stroke: '#f43f5e',
-      }
-    case 'sky':
-      return {
-        card: 'border-sky-300/90 bg-sky-50/80 text-sky-950 dark:border-sky-700/80 dark:bg-sky-950/35 dark:text-sky-100',
-        accent: 'text-sky-600 dark:text-sky-400',
-        badge: 'bg-sky-100 text-sky-900 dark:bg-sky-900/70 dark:text-sky-200',
-        ring: 'ring-2 ring-sky-500/40 dark:ring-sky-400/40',
-        stroke: '#0ea5e9',
-      }
-    case 'indigo':
-      return {
-        card: 'border-indigo-300/90 bg-indigo-50/80 text-indigo-950 dark:border-indigo-700/80 dark:bg-indigo-950/40 dark:text-indigo-100',
-        accent: 'text-indigo-600 dark:text-indigo-400',
-        badge: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/70 dark:text-indigo-200',
-        ring: 'ring-2 ring-indigo-500/45 dark:ring-indigo-400/45',
-        stroke: '#6366f1',
-      }
-    default:
-      return {
-        card: 'border-slate-300 bg-white text-slate-900 dark:border-slate-700 dark:bg-slate-900/80 dark:text-slate-100',
-        accent: 'text-slate-600 dark:text-slate-300',
-        badge: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200',
-        ring: 'ring-2 ring-slate-400/40 dark:ring-slate-500/40',
-        stroke: '#64748b',
-      }
-  }
+function resolvePreviousEcho(act: CinemaAct, prevAct?: CinemaAct): string {
+  if (act.index <= 0 || !prevAct) return ''
+  const raw = (act.previous_echo || '').trim()
+  if (raw) return raw
+  const prevHeadline = (prevAct.headline || prevAct.title || '')
+    .trim()
+    .replace(/^[¿¡]+|[?!.]+$/g, '')
+  if (!prevHeadline) return ''
+  const words = prevHeadline.split(/\s+/).filter(Boolean)
+  if (words.length <= 4) return words.join(' ')
+  return words.slice(-4).join(' ')
 }
 
-function StatusIcon({ status, className }: { status: string; className?: string }) {
-  switch ((status || '').toLowerCase()) {
-    case 'problem':
-      return <AlertTriangle size={15} className={className} />
-    case 'solved':
-      return <CheckCircle2 size={15} className={className} />
-    case 'new':
-      return <Sparkles size={15} className={className} />
-    case 'core':
-      return <Shield size={15} className={className} />
-    case 'active':
-      return <Zap size={15} className={className} />
-    default:
-      return <Layers size={15} className={className} />
+function resolveAccentWordSet(act: CinemaAct, headline: string): Set<string> {
+  const explicit = (act.accent_words ?? [])
+    .flatMap((w) => w.split(/\s+/))
+    .map((w) => normalizeToken(w))
+    .filter(Boolean)
+  if (explicit.length > 0) {
+    return new Set(explicit.slice(0, 2))
   }
+
+  const words = headline.trim().split(/\s+/).filter(Boolean)
+  const meaningful = words
+    .map((w) => normalizeToken(w))
+    .filter((t) => t.length >= 4 && !ACCENT_STOPWORDS.has(t))
+
+  if (meaningful.length === 0) {
+    const last = words.length > 0 ? normalizeToken(words[words.length - 1]) : ''
+    return last ? new Set([last]) : new Set()
+  }
+
+  const picked = [meaningful[meaningful.length - 1]]
+  if (meaningful.length >= 3) {
+    const longestBefore = meaningful
+      .slice(0, -1)
+      .reduce((best, cur) => (cur.length > best.length ? cur : best), '')
+    if (longestBefore && longestBefore !== picked[0]) {
+      picked.push(longestBefore)
+    }
+  }
+  return new Set(picked)
 }
 
-function statusBadgeText(status: string): string | null {
-  switch ((status || '').toLowerCase()) {
-    case 'problem':
-      return 'Fricción'
-    case 'solved':
-      return 'Resuelto'
-    case 'new':
-      return 'Nuevo'
-    case 'core':
-      return 'Núcleo intacto'
-    case 'active':
-      return 'Activo'
-    default:
-      return null
+function resolveNodeRevealAt(node: CinemaVisualNode, idx: number): number {
+  if (typeof node.reveal_at === 'number' && Number.isFinite(node.reveal_at)) {
+    return clamp(node.reveal_at, 0.04, 0.92)
   }
+  return FALLBACK_REVEAL_SLOTS[idx] ?? 0.84
+}
+
+function resolveWindowCaption(act: CinemaAct): string {
+  const raw = (act.flow_label || '').trim()
+  if (!raw || raw.toLowerCase().startsWith('contraste inicial')) {
+    return act.visual_mode === 'code_morph' ? 'editor · refactor' : 'modelo · paso a paso'
+  }
+  return raw
 }
 
 interface WordSpan {
@@ -231,6 +400,48 @@ function buildKineticWords(text: string): WordSpan[] {
   })
 }
 
+interface CaptionChunk {
+  startIdx: number
+  endIdx: number
+  words: WordSpan[]
+}
+
+function buildCaptionChunks(words: WordSpan[]): CaptionChunk[] {
+  if (words.length === 0) return []
+  const chunks: CaptionChunk[] = []
+  let cursor = 0
+
+  while (cursor < words.length) {
+    const remaining = words.length - cursor
+    let size = remaining <= 5 ? remaining : 4
+
+    // Si hay un corte de oración dentro de las palabras 3..5, cierra el chunk ahí
+    if (remaining > 5) {
+      for (let k = 2; k <= 4 && cursor + k < words.length; k++) {
+        if (/[.!?]$/.test(words[cursor + k].word)) {
+          size = k + 1
+          break
+        }
+      }
+      // Evita dejar 1 o 2 palabras huérfanas al final
+      const leftAfter = words.length - (cursor + size)
+      if (leftAfter > 0 && leftAfter < 3 && size === 4) {
+        size = 3
+      }
+    }
+
+    const slice = words.slice(cursor, cursor + size)
+    chunks.push({
+      startIdx: cursor,
+      endIdx: cursor + slice.length - 1,
+      words: slice,
+    })
+    cursor += slice.length
+  }
+
+  return chunks
+}
+
 export default function CinemaReelModal({
   courseId,
   nodeId,
@@ -250,6 +461,7 @@ export default function CinemaReelModal({
   const [isPlaying, setIsPlaying] = useState(false)
   const [hasEnded, setHasEnded] = useState(false)
   const [playbackRate, setPlaybackRate] = useState<PlaybackRate>(1)
+  const [showCaptions, setShowCaptions] = useState(false)
   const [visualOnlyMode, setVisualOnlyMode] = useState(false)
   const [reloadNonce, setReloadNonce] = useState(0)
 
@@ -264,11 +476,11 @@ export default function CinemaReelModal({
   const actTimeRef = useRef<number>(0)
   const durationsRef = useRef<number[]>([])
   const actsRef = useRef<CinemaAct[]>([])
-  const timelineRef = useRef<HTMLDivElement | null>(null)
 
   const acts = useMemo(() => reel?.acts ?? [], [reel])
   const safeActIdx = acts.length > 0 ? clamp(actIdx, 0, acts.length - 1) : 0
   const currentAct: CinemaAct | undefined = acts[safeActIdx]
+  const prevAct: CinemaAct | undefined = safeActIdx > 0 ? acts[safeActIdx - 1] : undefined
 
   useEffect(() => {
     playbackRateRef.current = playbackRate
@@ -392,7 +604,7 @@ export default function CinemaReelModal({
     }
   }, [open, courseId, nodeId, startReelGeneration, stopAndReleaseAudio])
 
-  // Interpolacion suave del % de carga
+  // Interpolación suave del % de carga
   useEffect(() => {
     if (!loading) return
     setDisplayPct((prev) => {
@@ -544,7 +756,7 @@ export default function CinemaReelModal({
     advanceToNextActOrFinish,
   ])
 
-  // Loop rAF para sincronizar progreso de subtítulos y timeline (audio real o temporizador visual)
+  // Loop rAF para sincronizar progreso real de voz, revelación de piezas y subtítulos CC
   useEffect(() => {
     if (!open || !isPlaying || loading || !currentAct) {
       if (rafRef.current) {
@@ -696,7 +908,7 @@ export default function CinemaReelModal({
     [acts, durations, safeActIdx, visualOnlyMode, isPlaying, hasEnded],
   )
 
-  // Atajos de teclado: Escape para cerrar, Space para Play/Pausa
+  // Atajos de teclado: Escape cerrar, Space Play/Pausa, Flechas cambiar de escena
   useEffect(() => {
     if (!open) return
     const onKeyDown = (e: KeyboardEvent) => {
@@ -705,25 +917,31 @@ export default function CinemaReelModal({
         onClose()
         return
       }
+      const target = e.target as HTMLElement | null
+      const tag = target?.tagName ?? ''
+      if (
+        tag === 'BUTTON' ||
+        tag === 'INPUT' ||
+        tag === 'SELECT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'A'
+      ) {
+        return
+      }
       if (e.key === ' ' || e.code === 'Space') {
-        const target = e.target as HTMLElement | null
-        const tag = target?.tagName ?? ''
-        if (
-          tag === 'BUTTON' ||
-          tag === 'INPUT' ||
-          tag === 'SELECT' ||
-          tag === 'TEXTAREA' ||
-          tag === 'A'
-        ) {
-          return
-        }
         e.preventDefault()
         handleTogglePlay()
+      } else if (e.key === 'ArrowRight' && acts.length > 0 && safeActIdx < acts.length - 1) {
+        e.preventDefault()
+        jumpToAct(safeActIdx + 1, 0)
+      } else if (e.key === 'ArrowLeft' && safeActIdx > 0) {
+        e.preventDefault()
+        jumpToAct(safeActIdx - 1, 0)
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [open, onClose, handleTogglePlay])
+  }, [open, onClose, handleTogglePlay, jumpToAct, acts.length, safeActIdx])
 
   const actOffsets = useMemo(() => {
     const offsets: number[] = []
@@ -749,36 +967,18 @@ export default function CinemaReelModal({
   const actProgress =
     currentActDuration > 0 ? clamp(actTime / currentActDuration, 0, 1) : 0
   const globalTime = (actOffsets[safeActIdx] ?? 0) + actTime
-  const globalProgress = totalDuration > 0 ? clamp(globalTime / totalDuration, 0, 1) : 0
-
-  const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!timelineRef.current || totalDuration <= 0 || acts.length === 0) return
-    const rect = timelineRef.current.getBoundingClientRect()
-    const ratio = clamp((e.clientX - rect.left) / Math.max(1, rect.width), 0, 1)
-    const targetGlobalSec = ratio * totalDuration
-
-    let targetActIdx = acts.length - 1
-    for (let i = 0; i < acts.length; i++) {
-      const start = actOffsets[i] ?? 0
-      const dur = durations[i] ?? Math.max(3, acts[i].estimated_sec || 10)
-      if (targetGlobalSec <= start + dur || i === acts.length - 1) {
-        targetActIdx = i
-        break
-      }
-    }
-    const offsetInAct = targetGlobalSec - (actOffsets[targetActIdx] ?? 0)
-    jumpToAct(targetActIdx, offsetInAct)
-  }
 
   const kineticWords = useMemo(
     () => buildKineticWords(currentAct?.narration_es ?? ''),
     [currentAct?.narration_es],
   )
 
+  const captionChunks = useMemo(() => buildCaptionChunks(kineticWords), [kineticWords])
+
   const activeWordIdx = useMemo(() => {
     if (kineticWords.length === 0) return -1
-    if (!isPlaying && actTime <= 0.02 && !hasEnded) return -1
-    if (hasEnded) return kineticWords.length
+    if (!isPlaying && actTime <= 0.02 && !hasEnded) return 0
+    if (hasEnded) return kineticWords.length - 1
     for (let i = 0; i < kineticWords.length; i++) {
       if (actProgress <= kineticWords[i].endRatio) {
         return i
@@ -787,11 +987,22 @@ export default function CinemaReelModal({
     return kineticWords.length - 1
   }, [kineticWords, isPlaying, actTime, hasEnded, actProgress])
 
+  const activeCaptionChunk = useMemo(() => {
+    if (captionChunks.length === 0) return null
+    if (activeWordIdx < 0) return captionChunks[0]
+    return (
+      captionChunks.find((c) => activeWordIdx >= c.startIdx && activeWordIdx <= c.endIdx) ??
+      captionChunks[captionChunks.length - 1]
+    )
+  }, [captionChunks, activeWordIdx])
+
   if (!open) return null
 
-  const actKindLabel = currentAct
-    ? (ACT_KIND_LABEL[currentAct.kind] ?? currentAct.title)
-    : ''
+  const actTheme: ActTheme = currentAct
+    ? (ACT_THEME_BY_KIND[currentAct.kind] ?? ACT_THEME_BY_KIND.mechanism)
+    : ACT_THEME_BY_KIND.mechanism
+
+  const isOfflineFallback = reel?.provider === 'local_fallback'
 
   return (
     <div
@@ -801,108 +1012,152 @@ export default function CinemaReelModal({
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose()
       }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-3 backdrop-blur-sm sm:p-6"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-2.5 backdrop-blur-md sm:p-5"
     >
       <style>{`
-        @keyframes cinemaActEnter {
-          0% { opacity: 0; transform: translateY(10px); }
+        @keyframes cinemaWordRise {
+          0% { opacity: 0; transform: translateY(14px); }
           100% { opacity: 1; transform: translateY(0); }
         }
-        @keyframes cinemaCardPop {
-          0% { opacity: 0; transform: translateY(8px) scale(0.97); }
+        @keyframes cinemaPieceReveal {
+          0% { opacity: 0; transform: translateY(14px) scale(0.985); }
           100% { opacity: 1; transform: translateY(0) scale(1); }
         }
-        @keyframes cinemaDashFlow {
-          0% { stroke-dashoffset: 24; }
-          100% { stroke-dashoffset: 0; }
+        @keyframes cinemaEchoFade {
+          0% { opacity: 0; transform: translateY(8px); }
+          100% { opacity: 0.3; transform: translateY(0); }
         }
-        @keyframes cinemaPlugIn {
-          0% { opacity: 0; transform: translateX(22px) scale(0.95); }
-          100% { opacity: 1; transform: translateX(0) scale(1); }
+        @keyframes cinemaCodeFade {
+          0% { opacity: 0; transform: translateY(6px); }
+          100% { opacity: 1; transform: translateY(0); }
         }
-        @keyframes cinemaPulseDot {
-          0%, 100% { transform: scale(1); opacity: 0.9; }
-          50% { transform: scale(1.25); opacity: 1; }
+        @keyframes cinemaDotPulse {
+          0%, 100% { transform: scale(1); opacity: 0.75; }
+          50% { transform: scale(1.35); opacity: 1; }
         }
-        .cinema-act-enter {
-          animation: cinemaActEnter 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+        .cinema-word-rise {
+          animation: cinemaWordRise 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
         }
-        .cinema-card-pop {
-          animation: cinemaCardPop 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+        .cinema-piece-reveal {
+          animation: cinemaPieceReveal 440ms cubic-bezier(0.22, 1, 0.36, 1) both;
         }
-        .cinema-dash-flow {
-          stroke-dasharray: 6 6;
-          animation: cinemaDashFlow 900ms linear infinite;
+        .cinema-echo-fade {
+          animation: cinemaEchoFade 540ms cubic-bezier(0.22, 1, 0.36, 1) both;
         }
-        .cinema-plug-in {
-          animation: cinemaPlugIn 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+        .cinema-code-fade {
+          animation: cinemaCodeFade 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
         }
-        .cinema-pulse-dot {
-          animation: cinemaPulseDot 1.3s ease-in-out infinite;
+        .cinema-dot-pulse {
+          animation: cinemaDotPulse 1.5s ease-in-out infinite;
         }
       `}</style>
 
-      <div className="flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white text-slate-900 shadow-2xl dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100">
-        {/* Barra superior minimalista */}
-        <header className="flex items-center justify-between gap-3 border-b border-slate-200 bg-slate-50/90 px-4 py-3 dark:border-slate-800 dark:bg-slate-900/80">
-          <div className="flex min-w-0 items-center gap-2.5">
-            <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-indigo-600 px-2.5 py-0.5 text-[11px] font-semibold tracking-wide text-white dark:bg-indigo-500">
-              <Film size={12} />
-              Modo Cine
-            </span>
-            <h2 className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">
-              {reel?.title || nodeTitle}
-            </h2>
-          </div>
+      {/* Canvas cinematográfico Widescreen 16:9 */}
+      <div className="relative flex max-h-[92vh] w-full max-w-[1140px] flex-col overflow-hidden rounded-2xl bg-[#07090e] text-slate-100 shadow-[0_32px_90px_-15px_rgba(0,0,0,0.9)] ring-1 ring-white/10 lg:aspect-video">
+        {/* Único resplandor radial sutil del color acento del acto */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 transition-all duration-700"
+          style={{
+            background: `radial-gradient(ellipse 68% 58% at 72% 46%, ${actTheme.glowRgba}, transparent 72%)`,
+          }}
+        />
 
-          <div className="flex shrink-0 items-center gap-2">
-            {visualOnlyMode && !loading && !error && (
-              <span className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2.5 py-0.5 text-[11px] font-medium text-amber-800 dark:border-amber-700/80 dark:bg-amber-950/50 dark:text-amber-200">
-                <VolumeX size={12} />
-                Sin audio (modo visual)
-              </span>
-            )}
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Cerrar Modo Cine"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"
+        {/* Barra superior minimalista tipo Stories */}
+        <header className="relative z-10 flex flex-col gap-2 px-4 pt-3 pb-1 sm:px-6 sm:pt-4">
+          {/* 5 barras delgadas continuas clicables (sin etiquetas meta) */}
+          {acts.length > 0 && !loading && !error && (
+            <div
+              className="grid gap-1.5"
+              style={{ gridTemplateColumns: `repeat(${acts.length}, minmax(0, 1fr))` }}
             >
-              <X size={16} />
-            </button>
+              {acts.map((act, idx) => {
+                const fillPct =
+                  hasEnded || idx < safeActIdx
+                    ? 100
+                    : idx === safeActIdx
+                      ? clamp(actProgress * 100, 0, 100)
+                      : 0
+                return (
+                  <button
+                    key={act.index}
+                    type="button"
+                    onClick={() => jumpToAct(idx, 0)}
+                    aria-label={`Ir a la escena ${idx + 1}`}
+                    className="group py-1.5 text-left focus:outline-none"
+                  >
+                    <span className="block h-[3px] w-full overflow-hidden rounded-full bg-white/15 transition-colors group-hover:bg-white/25">
+                      <span
+                        className={`block h-full rounded-full transition-[width] duration-75 ${
+                          idx === safeActIdx ? actTheme.barFill : 'bg-white/80'
+                        }`}
+                        style={{ width: `${fillPct}%` }}
+                      />
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+
+          {/* Título discreto del tema + botón cerrar */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <Film size={13} className="shrink-0 text-white/40" />
+              <h2 className="truncate text-xs font-medium tracking-wide text-white/50">
+                {reel?.title || nodeTitle}
+              </h2>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-2">
+              {visualOnlyMode && !loading && !error && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-0.5 text-[11px] font-medium text-white/65">
+                  <VolumeX size={11} />
+                  Modo visual
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="Cerrar Modo Cine"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full text-white/55 transition-colors hover:bg-white/10 hover:text-white"
+              >
+                <X size={16} />
+              </button>
+            </div>
           </div>
         </header>
 
-        {/* Cuerpo principal: Carga, Error o Escenario Cinético */}
+        {/* Cuerpo principal: Carga, Error o Escenario Editorial 16:9 */}
         {loading ? (
-          <div className="flex min-h-[24rem] flex-col items-center justify-center gap-5 px-6 py-10">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-indigo-200 bg-indigo-50 text-indigo-600 dark:border-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-400">
-              <Loader2 size={24} className="animate-spin" />
+          <div className="relative z-10 flex min-h-[24rem] flex-1 flex-col items-center justify-center gap-5 px-6 py-10">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.04] text-indigo-400">
+              <Loader2 size={22} className="animate-spin" />
             </div>
 
             <div className="w-full max-w-md text-center">
-              <div className="flex items-center justify-between gap-2 text-xs font-medium text-slate-700 dark:text-slate-200">
+              <div className="flex items-center justify-between gap-2 text-xs font-medium text-white/80">
                 <span className="truncate">
                   {progress?.label?.trim() || defaultStageLabel(progress?.stage)}
                 </span>
-                <span className="font-mono font-semibold tabular-nums text-indigo-600 dark:text-indigo-400">
+                <span className="font-mono font-semibold tabular-nums text-indigo-400">
                   {clamp(displayPct, 0, 100)}%
                 </span>
               </div>
 
-              <div className="mt-2.5 h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+              <div className="mt-2.5 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
                 <div
-                  className="h-full rounded-full bg-indigo-600 transition-all duration-300 ease-out dark:bg-indigo-400"
+                  className="h-full rounded-full bg-indigo-400 transition-all duration-300 ease-out"
                   style={{ width: `${clamp(displayPct, 4, 100)}%` }}
                 />
               </div>
 
-              <div className="mt-4 flex flex-wrap items-center justify-center gap-1.5 text-[11px]">
+              <div className="mt-4 flex flex-wrap items-center justify-center gap-2 text-[11px]">
                 {(
                   [
-                    { id: 'analyzing', text: '1. Analizando concepto' },
-                    { id: 'scripting', text: '2. Escribiendo guion' },
-                    { id: 'synthesizing_audio', text: '3. Narración neural' },
+                    { id: 'analyzing', text: 'Analizando concepto' },
+                    { id: 'scripting', text: 'Guion editorial' },
+                    { id: 'synthesizing_audio', text: 'Voz neural' },
                   ] as const
                 ).map((st, idx) => {
                   const order: CinemaReelStreamProgress['stage'][] = [
@@ -916,12 +1171,12 @@ export default function CinemaReelModal({
                   return (
                     <span
                       key={st.id}
-                      className={`rounded-full px-2.5 py-0.5 font-medium ${
+                      className={`rounded-full px-2.5 py-0.5 font-medium transition-colors ${
                         current
-                          ? 'bg-indigo-600 text-white dark:bg-indigo-500'
+                          ? 'bg-indigo-500/25 text-indigo-200 ring-1 ring-indigo-400/40'
                           : done
-                            ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300'
-                            : 'bg-slate-100 text-slate-500 dark:bg-slate-900 dark:text-slate-400'
+                            ? 'bg-emerald-500/15 text-emerald-300'
+                            : 'bg-white/[0.04] text-white/40'
                       }`}
                     >
                       {st.text}
@@ -934,27 +1189,27 @@ export default function CinemaReelModal({
             <button
               type="button"
               onClick={onClose}
-              className="rounded-lg border border-slate-300 bg-white px-4 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              className="rounded-lg border border-white/15 bg-white/[0.04] px-4 py-1.5 text-xs font-medium text-white/75 transition-colors hover:bg-white/10 hover:text-white"
             >
               Cancelar
             </button>
           </div>
         ) : error ? (
-          <div className="flex min-h-[22rem] flex-col items-center justify-center gap-4 px-6 py-10 text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-rose-200 bg-rose-50 text-rose-600 dark:border-rose-800 dark:bg-rose-950/50 dark:text-rose-400">
+          <div className="relative z-10 flex min-h-[24rem] flex-1 flex-col items-center justify-center gap-4 px-6 py-10 text-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-rose-500/30 bg-rose-500/10 text-rose-400">
               <AlertTriangle size={22} />
             </div>
             <div className="max-w-md space-y-1">
-              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+              <h3 className="text-sm font-semibold text-white">
                 No se pudo reproducir el mini-video
               </h3>
-              <p className="break-words text-xs text-slate-600 dark:text-slate-400">{error}</p>
+              <p className="break-words text-xs text-white/55">{error}</p>
             </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => void startReelGeneration(false)}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 dark:bg-indigo-500 dark:hover:bg-indigo-400"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-indigo-400"
               >
                 <RefreshCw size={13} />
                 Reintentar
@@ -962,7 +1217,7 @@ export default function CinemaReelModal({
               <button
                 type="button"
                 onClick={onClose}
-                className="rounded-lg border border-slate-300 bg-white px-3.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                className="rounded-lg border border-white/15 bg-white/[0.04] px-3.5 py-1.5 text-xs font-medium text-white/75 transition-colors hover:bg-white/10 hover:text-white"
               >
                 Cerrar
               </button>
@@ -970,189 +1225,148 @@ export default function CinemaReelModal({
           </div>
         ) : currentAct ? (
           <>
-            {/* Escenario cinematográfico */}
-            <div className="relative flex min-h-[21rem] flex-1 flex-col justify-between overflow-y-auto bg-gradient-to-b from-slate-50 via-white to-slate-50/90 px-5 py-6 sm:min-h-[24rem] sm:px-8 dark:from-slate-900 dark:via-slate-950 dark:to-slate-900/95">
-              {/* Etiqueta discreta del acto en la esquina superior */}
-              <div className="mb-4 flex items-center justify-between gap-2">
-                <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white/90 px-2.5 py-0.5 text-[11px] font-semibold text-slate-700 shadow-2xs dark:border-slate-800 dark:bg-slate-900/90 dark:text-slate-200">
-                  <span className="h-1.5 w-1.5 rounded-full bg-indigo-500" />
-                  Acto {safeActIdx + 1}/{acts.length} · {actKindLabel}
-                </span>
-                <span className="truncate text-xs font-medium text-slate-500 dark:text-slate-400">
-                  {currentAct.title}
-                </span>
-              </div>
-
-              {/* Escena cinética según tipo de acto */}
+            {/* Escenario Editorial Principal */}
+            <div className="relative z-10 flex min-h-[22rem] flex-1 flex-col justify-center overflow-y-auto px-5 py-5 sm:px-9 sm:py-6">
               <div
                 key={`${reel?.updated_at ?? ''}-${currentAct.index}`}
-                className="cinema-act-enter my-auto flex w-full flex-col items-center justify-center py-2"
+                className="my-auto w-full"
               >
-                <CinemaActStage
-                  act={currentAct}
-                  actProgress={actProgress}
-                  hasEnded={hasEnded}
-                  onCloseToGuide={onClose}
-                />
+                {currentAct.kind === 'takeaway' || safeActIdx === acts.length - 1 ? (
+                  <TakeawayEditorialStage
+                    act={currentAct}
+                    prevAct={prevAct}
+                    theme={actTheme}
+                    actProgress={actProgress}
+                    hasEnded={hasEnded}
+                    onCloseToGuide={onClose}
+                  />
+                ) : (
+                  <EditorialTwoColumnStage
+                    act={currentAct}
+                    prevAct={prevAct}
+                    theme={actTheme}
+                    actProgress={actProgress}
+                    hasEnded={hasEnded}
+                    isPlaying={isPlaying}
+                  />
+                )}
               </div>
 
-              {/* Subtítulos cinéticos palabra por palabra */}
-              <div className="mt-5 rounded-xl border border-slate-200/90 bg-white/95 px-4 py-3 text-center shadow-xs dark:border-slate-800 dark:bg-slate-900/90">
-                <p className="mx-auto max-w-2xl text-sm leading-relaxed sm:text-[15px]">
-                  {kineticWords.map((item, idx) => {
-                    const isCurrent = idx === activeWordIdx
-                    const isSpoken = activeWordIdx >= 0 && idx < activeWordIdx
-                    return (
-                      <span key={idx}>
-                        <span
-                          className={`inline-block rounded px-0.5 transition-colors duration-150 ${
-                            isCurrent
-                              ? 'bg-indigo-100 font-semibold text-indigo-950 dark:bg-indigo-500/35 dark:text-white'
-                              : isSpoken
-                                ? 'text-slate-900 dark:text-slate-100'
-                                : 'text-slate-400 dark:text-slate-500'
-                          }`}
-                        >
-                          {item.word}
+              {/* Subtítulos CC opcionales: SOLO 1 línea con el chunk actual de 3..5 palabras */}
+              {showCaptions && activeCaptionChunk && (
+                <div className="pointer-events-none sticky bottom-1 mt-4 flex justify-center">
+                  <div className="max-w-[92%] truncate whitespace-nowrap rounded-full border border-white/10 bg-black/75 px-4 py-1.5 text-sm font-medium tracking-tight text-white/90 shadow-lg backdrop-blur-md">
+                    {activeCaptionChunk.words.map((span, offset) => {
+                      const wordGlobalIdx = activeCaptionChunk.startIdx + offset
+                      const isCurrent = wordGlobalIdx === activeWordIdx
+                      return (
+                        <span key={wordGlobalIdx}>
+                          <span
+                            className={
+                              isCurrent
+                                ? `${actTheme.text} font-semibold`
+                                : 'text-white/85'
+                            }
+                          >
+                            {span.word}
+                          </span>
+                          {offset < activeCaptionChunk.words.length - 1 ? ' ' : ''}
                         </span>
-                        {idx < kineticWords.length - 1 ? ' ' : ''}
-                      </span>
-                    )
-                  })}
-                </p>
-              </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
-            {/* Barra inferior de controles tipo video */}
-            <footer className="flex flex-col gap-3 border-t border-slate-200 bg-slate-50 px-4 py-3 sm:px-5 dark:border-slate-800 dark:bg-slate-900/95">
-              {/* Timeline continua clicable con divisores de los 5 actos */}
-              <div className="flex flex-col gap-1.5">
-                <div
-                  ref={timelineRef}
-                  role="slider"
-                  tabIndex={0}
-                  aria-label="Línea de tiempo del mini-video"
-                  aria-valuemin={0}
-                  aria-valuemax={Math.round(totalDuration)}
-                  aria-valuenow={Math.round(globalTime)}
-                  onClick={handleTimelineClick}
-                  onKeyDown={(e) => {
-                    if (e.key === 'ArrowRight') {
-                      e.preventDefault()
-                      jumpToAct(safeActIdx, actTime + 3)
-                    } else if (e.key === 'ArrowLeft') {
-                      e.preventDefault()
-                      jumpToAct(safeActIdx, Math.max(0, actTime - 3))
-                    }
-                  }}
-                  className="group relative h-2.5 w-full cursor-pointer overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800"
+            {/* Barra inferior de controles compacta y discreta */}
+            <footer className="relative z-10 flex flex-wrap items-center justify-between gap-2.5 border-t border-white/[0.07] bg-[#07090e]/95 px-4 py-2.5 sm:px-6">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleTogglePlay}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-950 transition-colors hover:bg-slate-200"
                 >
-                  <div
-                    className="h-full rounded-full bg-indigo-600 transition-[width] duration-75 dark:bg-indigo-400"
-                    style={{ width: `${globalProgress * 100}%` }}
-                  />
-                  {/* Divisores visuales entre actos */}
-                  {acts.slice(1).map((a, idx) => {
-                    const offset = actOffsets[idx + 1] ?? 0
-                    const pct = totalDuration > 0 ? (offset / totalDuration) * 100 : 0
-                    return (
-                      <span
-                        key={a.index}
-                        style={{ left: `${pct}%` }}
-                        className="pointer-events-none absolute top-0 h-full w-0.5 bg-white/90 dark:bg-slate-950/90"
-                      />
-                    )
-                  })}
-                </div>
+                  {isPlaying ? <Pause size={13} /> : <Play size={13} />}
+                  {isPlaying ? 'Pausa' : hasEnded ? 'Ver de nuevo' : 'Play'}
+                </button>
 
-                {/* Etiquetas clicables de los 5 actos */}
-                <div className="grid grid-cols-5 gap-1">
-                  {acts.map((a, idx) => {
-                    const active = idx === safeActIdx
-                    const passed = idx < safeActIdx || hasEnded
-                    const label = ACT_KIND_LABEL[a.kind] ?? `Acto ${idx + 1}`
-                    return (
-                      <button
-                        key={a.index}
-                        type="button"
-                        onClick={() => jumpToAct(idx, 0)}
-                        className={`truncate rounded-md px-1.5 py-1 text-center text-[11px] font-medium transition-colors ${
-                          active
-                            ? 'bg-indigo-600 text-white dark:bg-indigo-500'
-                            : passed
-                              ? 'bg-indigo-50 text-indigo-800 hover:bg-indigo-100 dark:bg-indigo-950/50 dark:text-indigo-200 dark:hover:bg-indigo-950'
-                              : 'bg-white text-slate-600 hover:bg-slate-100 dark:bg-slate-950/60 dark:text-slate-400 dark:hover:bg-slate-800'
-                        }`}
-                      >
-                        <span className="font-mono text-[10px] opacity-80">{idx + 1}. </span>
-                        {label}
-                      </button>
-                    )
-                  })}
-                </div>
+                <span className="font-mono text-xs tabular-nums text-white/55">
+                  {formatTime(globalTime)} / {formatTime(totalDuration)}
+                </span>
               </div>
 
-              {/* Controles de reproducción */}
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleTogglePlay}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
-                  >
-                    {isPlaying ? <Pause size={14} /> : <Play size={14} />}
-                    {isPlaying ? 'Pausa' : hasEnded ? 'Ver de nuevo' : 'Play'}
-                  </button>
-
-                  <span className="font-mono text-xs tabular-nums text-slate-600 dark:text-slate-300">
-                    {formatTime(globalTime)} / {formatTime(totalDuration)}
-                  </span>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {/* Velocidad 1x / 1.25x / 1.5x */}
-                  <div
-                    role="group"
-                    aria-label="Velocidad de reproducción"
-                    className="inline-flex rounded-lg border border-slate-300 bg-white p-0.5 dark:border-slate-700 dark:bg-slate-950"
-                  >
-                    {PLAYBACK_RATES.map((r) => (
-                      <button
-                        key={r}
-                        type="button"
-                        aria-pressed={playbackRate === r}
-                        onClick={() => setPlaybackRate(r)}
-                        className={`rounded-md px-2 py-0.5 font-mono text-[11px] font-semibold transition-colors ${
-                          playbackRate === r
-                            ? 'bg-indigo-600 text-white dark:bg-indigo-500'
-                            : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
-                        }`}
-                      >
-                        {r}x
-                      </button>
-                    ))}
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={handleRestart}
-                    title="Reiniciar desde el acto 1"
-                    className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
-                  >
-                    <RotateCcw size={13} />
-                    Reiniciar
-                  </button>
-
+              <div className="flex flex-wrap items-center gap-1.5">
+                {isOfflineFallback && (
                   <button
                     type="button"
                     onClick={() => void startReelGeneration(true)}
-                    title="Regenerar guion y narración del mini-video"
-                    className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
+                    title="Este guion se generó sin IA activa. Haz clic para regenerar."
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400/25 bg-amber-400/10 px-2.5 py-1 text-[11px] font-medium text-amber-300 transition-colors hover:bg-amber-400/20"
                   >
-                    <RefreshCw size={13} />
-                    Regenerar video
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                    Guion offline
                   </button>
+                )}
+
+                {/* Velocidad 1x / 1.25x / 1.5x */}
+                <div
+                  role="group"
+                  aria-label="Velocidad de reproducción"
+                  className="inline-flex rounded-lg border border-white/10 bg-white/[0.03] p-0.5"
+                >
+                  {PLAYBACK_RATES.map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      aria-pressed={playbackRate === r}
+                      onClick={() => setPlaybackRate(r)}
+                      className={`rounded-md px-2 py-0.5 font-mono text-[11px] font-semibold transition-colors ${
+                        playbackRate === r
+                          ? 'bg-white/15 text-white'
+                          : 'text-white/50 hover:text-white/85'
+                      }`}
+                    >
+                      {r}x
+                    </button>
+                  ))}
                 </div>
+
+                {/* Toggle CC (desactivado por defecto) */}
+                <button
+                  type="button"
+                  aria-pressed={showCaptions}
+                  onClick={() => setShowCaptions((prev) => !prev)}
+                  title={showCaptions ? 'Ocultar subtítulos' : 'Mostrar subtítulos breves (CC)'}
+                  className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                    showCaptions
+                      ? 'border-white/30 bg-white/15 text-white'
+                      : 'border-white/10 bg-white/[0.03] text-white/55 hover:bg-white/[0.08] hover:text-white'
+                  }`}
+                >
+                  <Subtitles size={13} />
+                  CC
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleRestart}
+                  title="Reiniciar desde el principio"
+                  className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1.5 text-xs font-medium text-white/65 transition-colors hover:bg-white/[0.08] hover:text-white"
+                >
+                  <RotateCcw size={13} />
+                  <span className="hidden sm:inline">Reiniciar</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => void startReelGeneration(true)}
+                  title="Regenerar guion y narración del mini-video"
+                  className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1.5 text-xs font-medium text-white/65 transition-colors hover:bg-white/[0.08] hover:text-white"
+                >
+                  <RefreshCw size={13} />
+                  <span className="hidden sm:inline">Regenerar</span>
+                </button>
               </div>
             </footer>
           </>
@@ -1163,455 +1377,387 @@ export default function CinemaReelModal({
 }
 
 // ============================================================================
-// Escenarios cinéticos visuales por acto (sin muros de texto)
+// Tipografía Kinética Editorial + Ventana Flotante Progresiva
 // ============================================================================
 
-function CinemaActStage({
+function KineticHeadline({
+  headline,
+  accentSet,
+  accentClass,
+  centered = false,
+}: {
+  headline: string
+  accentSet: Set<string>
+  accentClass: string
+  centered?: boolean
+}) {
+  const words = headline.trim().split(/\s+/).filter(Boolean)
+  return (
+    <h3
+      className={`text-3xl font-black leading-[1.05] tracking-tight text-white sm:text-4xl lg:text-5xl ${
+        centered ? 'text-center' : 'text-left'
+      }`}
+    >
+      {words.map((word, idx) => {
+        const isAccent = accentSet.has(normalizeToken(word))
+        return (
+          <span
+            key={`${word}-${idx}`}
+            style={{ animationDelay: `${idx * 65}ms` }}
+            className={`cinema-word-rise inline-block ${isAccent ? accentClass : 'text-white'}`}
+          >
+            {word}
+            {idx < words.length - 1 ? '\u00A0' : ''}
+          </span>
+        )
+      })}
+    </h3>
+  )
+}
+
+function EditorialTwoColumnStage({
   act,
+  prevAct,
+  theme,
   actProgress,
   hasEnded,
-  onCloseToGuide,
+  isPlaying,
 }: {
   act: CinemaAct
+  prevAct?: CinemaAct
+  theme: ActTheme
   actProgress: number
   hasEnded: boolean
-  onCloseToGuide: () => void
+  isPlaying: boolean
 }) {
-  switch (act.kind) {
-    case 'hook':
-      return <HookScene act={act} actProgress={actProgress} />
-    case 'analogy':
-      return <AnalogyScene act={act} actProgress={actProgress} />
-    case 'mechanism':
-      return <MechanismScene act={act} actProgress={actProgress} />
-    case 'payoff':
-      return <PayoffScene act={act} actProgress={actProgress} />
-    case 'takeaway':
-      return (
-        <TakeawayScene
-          act={act}
-          actProgress={actProgress}
-          hasEnded={hasEnded}
-          onCloseToGuide={onCloseToGuide}
-        />
-      )
-    default:
-      return <AnalogyScene act={act} actProgress={actProgress} />
-  }
-}
+  const headline = (act.headline || act.title || '').trim()
+  const kicker = resolveEditorialKicker(act)
+  const previousEcho = resolvePreviousEcho(act, prevAct)
+  const accentSet = useMemo(() => resolveAccentWordSet(act, headline), [act, headline])
+  const windowCaption = resolveWindowCaption(act)
 
-function VisualNodeCard({
-  node,
-  highlighted,
-  delayMs = 0,
-  extraClass = '',
-}: {
-  node: CinemaVisualNode
-  highlighted: boolean
-  delayMs?: number
-  extraClass?: string
-}) {
-  const styles = getToneClasses(node.tone, node.status)
-  const badge = statusBadgeText(node.status)
-  return (
-    <div
-      style={{ animationDelay: `${delayMs}ms` }}
-      className={`cinema-card-pop flex flex-col gap-1.5 rounded-xl border p-4 shadow-xs transition-all duration-300 ${
-        styles.card
-      } ${highlighted ? `${styles.ring} scale-[1.02]` : 'opacity-90'} ${extraClass}`}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <span className={`inline-flex items-center gap-1.5 ${styles.accent}`}>
-          <StatusIcon status={node.status} />
-          <span className="text-sm font-bold tracking-tight">{node.label}</span>
-        </span>
-        {badge && (
-          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${styles.badge}`}>
-            {badge}
-          </span>
-        )}
-      </div>
-      {node.sublabel && (
-        <p className="text-xs leading-snug opacity-85">{node.sublabel}</p>
-      )}
-    </div>
-  )
-}
-
-function AnimatedSvgConnector({ active }: { active: boolean }) {
-  return (
-    <div className="hidden shrink-0 items-center justify-center sm:flex" aria-hidden="true">
-      <svg width="44" height="24" viewBox="0 0 44 24" fill="none">
-        <path
-          d="M2 12H36"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          className={
-            active
-              ? 'cinema-dash-flow text-indigo-500 dark:text-indigo-400'
-              : 'text-slate-300 dark:text-slate-700'
-          }
-        />
-        <path
-          d="M31 7L37 12L31 17"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className={
-            active
-              ? 'text-indigo-600 dark:text-indigo-400'
-              : 'text-slate-300 dark:text-slate-700'
-          }
-        />
-        {active && (
-          <circle
-            cx="20"
-            cy="12"
-            r="3.5"
-            className="cinema-pulse-dot fill-indigo-500 dark:fill-indigo-400"
-          />
-        )}
-      </svg>
-    </div>
-  )
-}
-
-function HookScene({ act, actProgress }: { act: CinemaAct; actProgress: number }) {
-  const contrastNodes = act.nodes.slice(0, 2)
-  return (
-    <div className="flex w-full max-w-3xl flex-col items-center gap-5">
-      <h3 className="max-w-2xl text-center text-xl font-bold tracking-tight text-slate-900 sm:text-2xl dark:text-white">
-        {act.headline || act.title}
-      </h3>
-
-      {contrastNodes.length > 0 && (
-        <div className="grid w-full grid-cols-1 items-stretch gap-3 sm:grid-cols-[1fr_auto_1fr]">
-          <VisualNodeCard
-            node={contrastNodes[0]}
-            highlighted={actProgress < 0.5}
-            delayMs={60}
-          />
-          {contrastNodes[1] ? (
-            <>
-              <div className="flex items-center justify-center">
-                <span className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 bg-white text-indigo-600 shadow-2xs dark:border-slate-700 dark:bg-slate-900 dark:text-indigo-400">
-                  <ArrowRight size={15} />
-                </span>
-              </div>
-              <VisualNodeCard
-                node={contrastNodes[1]}
-                highlighted={actProgress >= 0.5}
-                delayMs={180}
-              />
-            </>
-          ) : null}
-        </div>
-      )}
-
-      {act.flow_label && (
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50/90 px-3 py-1 text-xs font-medium text-indigo-900 dark:border-indigo-800/80 dark:bg-indigo-950/50 dark:text-indigo-200">
-          <Zap size={12} className="text-indigo-500" />
-          {act.flow_label}
-        </span>
-      )}
-    </div>
-  )
-}
-
-function AnalogyScene({ act, actProgress }: { act: CinemaAct; actProgress: number }) {
-  const nodes = act.nodes.slice(0, 4)
-  const activeStep = nodes.length > 0 ? Math.min(nodes.length - 1, Math.floor(actProgress * nodes.length)) : 0
-
-  return (
-    <div className="flex w-full max-w-3xl flex-col items-center gap-5">
-      <h3 className="max-w-2xl text-center text-lg font-bold tracking-tight text-slate-900 sm:text-xl dark:text-white">
-        {act.headline || act.title}
-      </h3>
-
-      {nodes.length > 0 && (
-        <div className="flex w-full flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
-          {nodes.map((node, idx) => (
-            <div key={node.id || idx} className="flex flex-1 items-center gap-2">
-              <div className="w-full">
-                <VisualNodeCard
-                  node={node}
-                  highlighted={idx <= activeStep}
-                  delayMs={idx * 100}
-                />
-              </div>
-              {idx < nodes.length - 1 && <AnimatedSvgConnector active={idx < activeStep || actProgress > 0.15} />}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {act.flow_label && (
-        <div className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-1 text-xs font-medium text-slate-700 shadow-2xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
-          <ArrowRight size={13} className="text-indigo-500" />
-          {act.flow_label}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function MechanismScene({ act, actProgress }: { act: CinemaAct; actProgress: number }) {
   const hasCodeMorph =
     act.visual_mode === 'code_morph' &&
     Boolean(act.code_before?.trim()) &&
     Boolean(act.code_after?.trim())
 
-  if (hasCodeMorph) {
-    const showAfterFocus = actProgress >= 0.45
-    return (
-      <div className="flex w-full max-w-3xl flex-col items-center gap-4">
-        <div className="flex flex-col items-center gap-1.5 text-center">
-          <h3 className="text-lg font-bold tracking-tight text-slate-900 sm:text-xl dark:text-white">
-            {act.headline || act.title}
-          </h3>
-          {act.flow_label && (
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-0.5 text-[11px] font-semibold text-indigo-800 dark:border-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-200">
-              <Cpu size={12} />
-              {act.flow_label}
+  return (
+    <div className="grid w-full grid-cols-1 items-center gap-7 lg:grid-cols-12 lg:gap-10">
+      {/* Columna Izquierda: Tipografía Kinética */}
+      <div className="flex flex-col justify-center gap-3.5 lg:col-span-5">
+        {previousEcho && (
+          <p className="cinema-echo-fade select-none text-xs font-medium tracking-tight text-white/30 blur-[0.35px] sm:text-sm">
+            {previousEcho}
+          </p>
+        )}
+
+        <span className={`font-mono text-xs font-semibold tracking-wide sm:text-sm ${theme.text}`}>
+          {kicker}
+        </span>
+
+        <KineticHeadline
+          headline={headline}
+          accentSet={accentSet}
+          accentClass={theme.text}
+        />
+      </div>
+
+      {/* Columna Derecha: Ventana Flotante Progresiva estilo macOS */}
+      <div className="lg:col-span-7">
+        <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#0f131c]/95 shadow-2xl">
+          {/* Barra superior de ventana macOS */}
+          <div className="flex items-center justify-between gap-3 border-b border-white/[0.07] bg-white/[0.02] px-4 py-2.5">
+            <div className="flex items-center gap-1.5" aria-hidden="true">
+              <span className="h-2.5 w-2.5 rounded-full bg-white/20" />
+              <span className="h-2.5 w-2.5 rounded-full bg-white/15" />
+              <span className="h-2.5 w-2.5 rounded-full bg-white/10" />
+            </div>
+            <span className="truncate font-mono text-[11px] tracking-wide text-white/45">
+              {windowCaption}
             </span>
-          )}
-        </div>
-
-        <div className="grid w-full grid-cols-1 items-stretch gap-3 md:grid-cols-[1fr_auto_1fr]">
-          {/* Antes */}
-          <div
-            className={`flex flex-col overflow-hidden rounded-xl border transition-all duration-500 ${
-              !showAfterFocus
-                ? 'border-amber-400 bg-amber-50/70 ring-2 ring-amber-400/35 dark:border-amber-600 dark:bg-amber-950/30'
-                : 'border-rose-200 bg-rose-50/40 opacity-75 dark:border-rose-900/70 dark:bg-rose-950/20'
-            }`}
-          >
-            <div className="flex items-center justify-between border-b border-amber-200/80 bg-amber-100/70 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-amber-900 dark:border-amber-800/70 dark:bg-amber-950/60 dark:text-amber-200">
-              <span>Antes</span>
-              <AlertTriangle size={12} />
-            </div>
-            <pre className="overflow-x-auto p-3 font-mono text-xs leading-relaxed text-slate-900 dark:text-slate-100">
-              {act.code_before}
-            </pre>
+            <span className="w-8 shrink-0" aria-hidden="true" />
           </div>
 
-          <div className="flex items-center justify-center">
-            <AnimatedSvgConnector active={true} />
-            <ArrowRight
-              size={18}
-              className="text-indigo-500 sm:hidden"
-            />
-          </div>
-
-          {/* Después */}
-          <div
-            className={`flex flex-col overflow-hidden rounded-xl border transition-all duration-500 ${
-              showAfterFocus
-                ? 'scale-[1.01] border-emerald-500 bg-emerald-50/80 ring-2 ring-emerald-500/40 dark:border-emerald-500 dark:bg-emerald-950/35'
-                : 'border-slate-200 bg-slate-50/60 opacity-70 dark:border-slate-800 dark:bg-slate-900/50'
-            }`}
-          >
-            <div className="flex items-center justify-between border-b border-emerald-200/80 bg-emerald-100/70 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-900 dark:border-emerald-800/70 dark:bg-emerald-950/60 dark:text-emerald-200">
-              <span>Después</span>
-              <CheckCircle2 size={12} />
-            </div>
-            <pre className="overflow-x-auto p-3 font-mono text-xs leading-relaxed text-slate-900 dark:text-slate-100">
-              {act.code_after}
-            </pre>
+          {/* Contenido de la ventana: Code Morph o Piezas Progresivas */}
+          <div className="min-h-[230px] p-4 sm:min-h-[268px] sm:p-5">
+            {hasCodeMorph ? (
+              <CodeMorphPanel
+                codeBefore={act.code_before || ''}
+                codeAfter={act.code_after || ''}
+                actProgress={actProgress}
+                hasEnded={hasEnded}
+                theme={theme}
+              />
+            ) : (
+              <ProgressiveNodesPanel
+                nodes={act.nodes.slice(0, 4)}
+                actProgress={actProgress}
+                hasEnded={hasEnded}
+                isPlaying={isPlaying}
+                theme={theme}
+              />
+            )}
           </div>
         </div>
+      </div>
+    </div>
+  )
+}
+
+function ProgressiveNodesPanel({
+  nodes,
+  actProgress,
+  hasEnded,
+  isPlaying,
+  theme,
+}: {
+  nodes: CinemaVisualNode[]
+  actProgress: number
+  hasEnded: boolean
+  isPlaying: boolean
+  theme: ActTheme
+}) {
+  const scheduled = useMemo(
+    () =>
+      nodes.map((node, idx) => ({
+        node,
+        idx,
+        revealAt: resolveNodeRevealAt(node, idx),
+      })),
+    [nodes],
+  )
+
+  const revealedItems = scheduled.filter(
+    (entry) => hasEnded || actProgress >= entry.revealAt,
+  )
+  const latestRevealedIdx =
+    revealedItems.length > 0 ? revealedItems[revealedItems.length - 1].idx : -1
+
+  if (revealedItems.length === 0) {
+    return (
+      <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-2.5 text-center">
+        <span className={`cinema-dot-pulse h-2 w-2 rounded-full ${theme.dot}`} />
+        <span className="font-mono text-[11px] tracking-wide text-white/35">
+          {isPlaying ? 'sincronizando con la voz...' : 'presiona play para comenzar'}
+        </span>
       </div>
     )
   }
 
-  // Modo kinetic_blocks con señal animada viajando entre piezas
-  const nodes = act.nodes.slice(0, 4)
-  const signalIdx =
-    nodes.length > 0 ? Math.min(nodes.length - 1, Math.floor(actProgress * nodes.length)) : 0
-
   return (
-    <div className="flex w-full max-w-3xl flex-col items-center gap-5">
-      <h3 className="max-w-2xl text-center text-lg font-bold tracking-tight text-slate-900 sm:text-xl dark:text-white">
-        {act.headline || act.title}
-      </h3>
+    <div className="flex flex-col gap-2.5">
+      {revealedItems.map(({ node, idx }) => {
+        const isLatest = !hasEnded && idx === latestRevealedIdx
+        const toneStyle = getNodeToneStyle(node.tone, node.status)
+        return (
+          <div
+            key={node.id || idx}
+            className={`cinema-piece-reveal flex items-start gap-3.5 rounded-xl border px-4 py-3.5 transition-all duration-300 ${
+              isLatest
+                ? toneStyle.activeBorder
+                : 'border-white/[0.08] bg-white/[0.025]'
+            }`}
+          >
+            <div
+              className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] ${toneStyle.icon}`}
+            >
+              <NodeGlyph status={node.status} />
+            </div>
 
-      {nodes.length > 0 && (
-        <div className="flex w-full flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
-          {nodes.map((node, idx) => (
-            <div key={node.id || idx} className="flex flex-1 items-center gap-2">
-              <div className="relative w-full">
-                <VisualNodeCard
-                  node={node}
-                  highlighted={idx === signalIdx}
-                  delayMs={idx * 90}
-                />
-                {idx === signalIdx && (
-                  <span className="cinema-pulse-dot absolute -top-2 right-3 inline-flex h-4 w-4 items-center justify-center rounded-full bg-indigo-600 text-white shadow-xs dark:bg-indigo-400 dark:text-slate-950">
-                    <Zap size={9} />
-                  </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-bold tracking-tight text-white sm:text-[15px]">
+                  {node.label}
+                </p>
+                {isLatest && (
+                  <span
+                    aria-hidden="true"
+                    className={`cinema-dot-pulse h-2 w-2 shrink-0 rounded-full ${toneStyle.dot}`}
+                  />
                 )}
               </div>
-              {idx < nodes.length - 1 && (
-                <AnimatedSvgConnector active={idx === signalIdx || idx < signalIdx} />
+              {node.sublabel && (
+                <p className="mt-0.5 text-xs leading-snug text-white/60 sm:text-[13px]">
+                  {node.sublabel}
+                </p>
               )}
             </div>
-          ))}
-        </div>
-      )}
-
-      {act.flow_label && (
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50 px-3.5 py-1 text-xs font-medium text-indigo-900 dark:border-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-200">
-          <Cpu size={13} className="text-indigo-500" />
-          {act.flow_label}
-        </span>
-      )}
+          </div>
+        )
+      })}
     </div>
   )
 }
 
-function PayoffScene({ act, actProgress }: { act: CinemaAct; actProgress: number }) {
-  const coreNode =
-    act.nodes.find((n) => (n.status || '').toLowerCase() === 'core') ?? act.nodes[0]
-  const pluggedNodes = act.nodes.filter((n) => n !== coreNode).slice(0, 2)
-  const pluggedIn = actProgress >= 0.25
+function CodeMorphPanel({
+  codeBefore,
+  codeAfter,
+  actProgress,
+  hasEnded,
+  theme,
+}: {
+  codeBefore: string
+  codeAfter: string
+  actProgress: number
+  hasEnded: boolean
+  theme: ActTheme
+}) {
+  const showAfter = hasEnded || actProgress >= 0.48
+  const beforeLines = useMemo(() => codeBefore.split('\n'), [codeBefore])
+  const afterLines = useMemo(() => codeAfter.split('\n'), [codeAfter])
+  const beforeSet = useMemo(
+    () => new Set(beforeLines.map((l) => l.trim())),
+    [beforeLines],
+  )
+  const activeLines = showAfter ? afterLines : beforeLines
 
   return (
-    <div className="flex w-full max-w-3xl flex-col items-center gap-5">
-      <h3 className="max-w-2xl text-center text-lg font-bold tracking-tight text-slate-900 sm:text-xl dark:text-white">
-        {act.headline || act.title}
-      </h3>
-
-      {coreNode && (
-        <div className="grid w-full grid-cols-1 items-center gap-3 sm:grid-cols-[1.1fr_auto_1fr]">
-          {/* Núcleo estable protegido */}
-          <div className="rounded-2xl border-2 border-indigo-400/90 bg-indigo-50/70 p-4 shadow-sm dark:border-indigo-500/80 dark:bg-indigo-950/40">
-            <div className="flex items-center justify-between gap-2">
-              <span className="inline-flex items-center gap-1.5 text-sm font-bold text-indigo-950 dark:text-indigo-100">
-                <Shield size={16} className="text-indigo-600 dark:text-indigo-400" />
-                {coreNode.label}
-              </span>
-              <span className="rounded-full bg-indigo-600 px-2 py-0.5 text-[10px] font-semibold text-white dark:bg-indigo-500">
-                Estable
-              </span>
-            </div>
-            {coreNode.sublabel && (
-              <p className="mt-1.5 text-xs text-indigo-900/85 dark:text-indigo-200/85">
-                {coreNode.sublabel}
-              </p>
-            )}
-          </div>
-
-          <div className="flex items-center justify-center">
-            <AnimatedSvgConnector active={pluggedIn} />
-          </div>
-
-          {/* Tarjetas nuevas/resueltas enchufándose en esmeralda */}
-          <div className="flex flex-col gap-2.5">
-            {pluggedNodes.length > 0 ? (
-              pluggedNodes.map((pNode, idx) => (
-                <div
-                  key={pNode.id || idx}
-                  style={{ animationDelay: `${160 + idx * 140}ms` }}
-                  className={`cinema-plug-in rounded-xl border border-emerald-400/90 bg-emerald-50/85 p-3.5 text-emerald-950 shadow-xs transition-all dark:border-emerald-600/80 dark:bg-emerald-950/40 dark:text-emerald-100 ${
-                    pluggedIn ? 'ring-2 ring-emerald-500/35' : 'opacity-80'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="inline-flex items-center gap-1.5 text-sm font-bold">
-                      <Sparkles size={14} className="text-emerald-600 dark:text-emerald-400" />
-                      {pNode.label}
-                    </span>
-                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 dark:bg-emerald-900/70 dark:text-emerald-200">
-                      {statusBadgeText(pNode.status) ?? 'Integrado'}
-                    </span>
-                  </div>
-                  {pNode.sublabel && (
-                    <p className="mt-1 text-xs opacity-85">{pNode.sublabel}</p>
-                  )}
-                </div>
-              ))
-            ) : (
-              <div className="cinema-plug-in rounded-xl border border-emerald-400/90 bg-emerald-50/85 p-3.5 text-xs font-medium text-emerald-900 dark:border-emerald-600/80 dark:bg-emerald-950/40 dark:text-emerald-200">
-                Sistema extensible sin romper el núcleo existente.
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {act.flow_label && (
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3.5 py-1 text-xs font-medium text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200">
-          <CheckCircle2 size={13} className="text-emerald-600 dark:text-emerald-400" />
-          {act.flow_label}
+    <div className="flex h-full flex-col justify-between gap-4">
+      <div className="flex items-center justify-between gap-2">
+        <span
+          className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-[11px] font-medium transition-colors ${
+            showAfter
+              ? 'border-emerald-400/35 bg-emerald-400/10 text-emerald-300'
+              : 'border-amber-400/35 bg-amber-400/10 text-amber-300'
+          }`}
+        >
+          <Code2 size={12} />
+          {showAfter ? 'después · diseño limpio' : 'antes · patrón frágil'}
         </span>
-      )}
+
+        <div className="flex items-center gap-1.5 font-mono text-[10px] text-white/40">
+          <span className={!showAfter ? 'text-white/85' : ''}>01</span>
+          <span>/</span>
+          <span className={showAfter ? 'text-emerald-300' : ''}>02</span>
+        </div>
+      </div>
+
+      <div
+        key={showAfter ? 'after' : 'before'}
+        className="cinema-code-fade overflow-x-auto rounded-xl border border-white/[0.07] bg-[#090c12] p-3.5 font-mono text-xs leading-relaxed sm:text-[13px]"
+      >
+        {activeLines.map((line, idx) => {
+          const isImprovedLine = showAfter && !beforeSet.has(line.trim())
+          return (
+            <div
+              key={idx}
+              className={`flex gap-3 rounded px-1.5 py-0.5 ${
+                isImprovedLine
+                  ? 'bg-emerald-400/10 text-emerald-200'
+                  : showAfter
+                    ? 'text-slate-200'
+                    : 'text-amber-100/90'
+              }`}
+            >
+              <span className="w-5 shrink-0 select-none text-right text-white/25">
+                {idx + 1}
+              </span>
+              <span className="whitespace-pre">{line || ' '}</span>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Indicador sutil del morph sincronizado */}
+      <div className="h-1 w-full overflow-hidden rounded-full bg-white/[0.07]">
+        <div
+          className={`h-full rounded-full transition-[width,background-color] duration-150 ${
+            showAfter ? 'bg-emerald-400' : theme.barFill
+          }`}
+          style={{ width: `${clamp(actProgress * 100, 4, 100)}%` }}
+        />
+      </div>
     </div>
   )
 }
 
-function TakeawayScene({
+function TakeawayEditorialStage({
   act,
+  prevAct,
+  theme,
   actProgress,
   hasEnded,
   onCloseToGuide,
 }: {
   act: CinemaAct
+  prevAct?: CinemaAct
+  theme: ActTheme
   actProgress: number
   hasEnded: boolean
   onCloseToGuide: () => void
 }) {
-  const pills = (act.pills ?? []).filter((p) => p.trim().length > 0).slice(0, 3)
+  const headline = (act.headline || 'Claves para recordar').trim()
+  const kicker = resolveEditorialKicker(act)
+  const previousEcho = resolvePreviousEcho(act, prevAct)
+  const accentSet = useMemo(() => resolveAccentWordSet(act, headline), [act, headline])
+  const pills = useMemo(
+    () => (act.pills ?? []).filter((p) => p.trim().length > 0).slice(0, 3),
+    [act.pills],
+  )
+  const pillThresholds = [0.08, 0.36, 0.64]
 
   return (
-    <div className="flex w-full max-w-2xl flex-col items-center gap-5">
-      <h3 className="text-center text-xl font-bold tracking-tight text-slate-900 sm:text-2xl dark:text-white">
-        {act.headline || '3 claves para recordar'}
-      </h3>
+    <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-6 text-center">
+      <div className="flex flex-col items-center gap-3">
+        {previousEcho && (
+          <p className="cinema-echo-fade select-none text-xs font-medium tracking-tight text-white/30 blur-[0.35px] sm:text-sm">
+            {previousEcho}
+          </p>
+        )}
+
+        <span className={`font-mono text-xs font-semibold tracking-wide sm:text-sm ${theme.text}`}>
+          {kicker}
+        </span>
+
+        <KineticHeadline
+          headline={headline}
+          accentSet={accentSet}
+          accentClass={theme.text}
+          centered
+        />
+      </div>
 
       {pills.length > 0 && (
-        <div className="flex w-full flex-col gap-2.5">
+        <div className="grid w-full max-w-2xl grid-cols-1 gap-3 sm:grid-cols-3">
           {pills.map((pill, idx) => {
-            const threshold = idx === 0 ? 0 : idx === 1 ? 0.28 : 0.56
+            const threshold = pillThresholds[idx] ?? 0.7
             const revealed = hasEnded || actProgress >= threshold
+            if (!revealed) {
+              return (
+                <div
+                  key={idx}
+                  aria-hidden="true"
+                  className="h-[74px] rounded-xl border border-dashed border-white/[0.06] bg-white/[0.01]"
+                />
+              )
+            }
             return (
               <div
                 key={idx}
-                className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition-all duration-400 ${
-                  revealed
-                    ? 'translate-y-0 border-indigo-300 bg-indigo-50/80 text-slate-900 opacity-100 shadow-xs dark:border-indigo-700/80 dark:bg-indigo-950/45 dark:text-slate-100'
-                    : 'translate-y-2 border-slate-200 bg-slate-100/60 text-slate-400 opacity-40 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-600'
-                }`}
+                className="cinema-piece-reveal flex flex-col items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-[#0f131c]/90 px-4 py-3.5 text-center shadow-lg"
               >
-                <span
-                  className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full font-mono text-xs font-bold ${
-                    revealed
-                      ? 'bg-indigo-600 text-white dark:bg-indigo-500'
-                      : 'bg-slate-300 text-slate-600 dark:bg-slate-800 dark:text-slate-500'
-                  }`}
-                >
-                  {idx + 1}
+                <span className={`font-mono text-[11px] font-bold ${theme.text}`}>
+                  0{idx + 1}
                 </span>
-                <span className="text-sm font-semibold leading-snug">{pill}</span>
+                <span className="text-sm font-semibold leading-snug text-white">
+                  {pill}
+                </span>
               </div>
             )
           })}
         </div>
       )}
 
-      <button
-        type="button"
-        onClick={onCloseToGuide}
-        className={`mt-1 inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold transition-all ${
-          hasEnded
-            ? 'bg-emerald-600 text-white shadow-md ring-4 ring-emerald-500/25 hover:bg-emerald-500 dark:bg-emerald-500 dark:text-slate-950 dark:hover:bg-emerald-400'
-            : 'bg-indigo-600 text-white shadow-sm hover:bg-indigo-500 dark:bg-indigo-500 dark:hover:bg-indigo-400'
-        }`}
-      >
-        Ir a la guía y código
-        <ArrowRight size={16} />
-      </button>
+      {hasEnded && (
+        <button
+          type="button"
+          onClick={onCloseToGuide}
+          className={`cinema-piece-reveal mt-1 inline-flex items-center gap-2 rounded-xl px-6 py-3 text-sm font-bold shadow-lg transition-all ${theme.ctaBg}`}
+        >
+          Ir a la guía y código
+          <ArrowRight size={16} />
+        </button>
+      )}
     </div>
   )
 }
