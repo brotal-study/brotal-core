@@ -1,10 +1,12 @@
 """Router de estudio, evaluacion socratica, regeneracion de historia y TTS (v1.0)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,6 +22,7 @@ from app.schemas.study import (
     ExamRouteResponse,
     LanguageChatRequest,
     LanguageChatResponse,
+    NodeCinemaReelResponse,
     NodeProgress,
     NodeStoryboardResponse,
     PhraseTtsRequest,
@@ -35,6 +38,7 @@ from app.services.ai_router import (
     build_prompt_reviews_and_routing,
     evaluate_language_fallback_deterministic,
     evaluate_with_ai,
+    generate_cinema_reel_with_ai,
     generate_code_storyboard_with_ai,
     generate_exam_route_with_ai,
     regenerate_questions_with_ai,
@@ -50,8 +54,10 @@ from app.services.evaluator import (
 from app.services.pack_manager import resolve_course_row
 from app.services.tts import (
     TtsSynthesisError,
+    cinema_act_audio_path,
     clear_node_tts_cache,
     get_node_tts_timings_data,
+    synthesize_cinema_act_audios,
     synthesize_node_tts,
     synthesize_phrase_tts,
 )
@@ -696,6 +702,342 @@ def stream_node_storyboard(
         event_generator(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ---------------- Mini-Video Narrado Modo Cine de 5 Actos (v1.2.4) ----------------
+
+
+def _cinema_audio_url(course_id: str, node_id: str, act_index: int) -> str:
+    return f"/api/v1/study/{course_id}/{node_id}/cinema-reel/audio/{act_index}"
+
+
+def _attach_cinema_audio_urls(
+    course_id: str,
+    node_id: str,
+    raw_acts: list[dict[str, Any]],
+    audio_paths: list[Path | None] | None = None,
+) -> list[dict[str, Any]]:
+    updated: list[dict[str, Any]] = []
+    for i, raw_act in enumerate(raw_acts):
+        act = dict(raw_act)
+        act_idx = int(act.get("index", i))
+        narration = str(act.get("narration_es") or "")
+        if audio_paths is not None and i < len(audio_paths):
+            has_audio = audio_paths[i] is not None
+        else:
+            mp3 = cinema_act_audio_path(course_id, narration)
+            has_audio = mp3.is_file() and mp3.stat().st_size > 0
+        act["audio_url"] = _cinema_audio_url(course_id, node_id, act_idx) if has_audio else None
+        updated.append(act)
+    return updated
+
+
+def _cinema_reel_from_row(row: sqlite3.Row) -> NodeCinemaReelResponse | None:
+    """Reconstruye NodeCinemaReelResponse desde node_cinema_reels recalculando audio_url en disco."""
+    try:
+        payload = json.loads(row["reel_json"] or "{}")
+        if not isinstance(payload, dict):
+            return None
+        raw_acts = payload.get("acts")
+        if not isinstance(raw_acts, list) or not raw_acts:
+            return None
+        course_id = str(row["course_id"])
+        node_id = str(row["node_id"])
+        acts_with_audio = _attach_cinema_audio_urls(course_id, node_id, raw_acts)
+        return NodeCinemaReelResponse.model_validate(
+            {
+                **payload,
+                "acts": acts_with_audio,
+                "course_id": course_id,
+                "node_id": node_id,
+                "provider": row["provider"] or "local_fallback",
+                "updated_at": row["updated_at"],
+            }
+        )
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _read_cached_cinema_reel(
+    conn: sqlite3.Connection, course_id: str, node_id: str
+) -> NodeCinemaReelResponse | None:
+    row = conn.execute(
+        "SELECT * FROM node_cinema_reels WHERE course_id = ? AND node_id = ?;",
+        (course_id, node_id),
+    ).fetchone()
+    return _cinema_reel_from_row(row) if row is not None else None
+
+
+def _build_and_persist_cinema_reel(
+    conn: sqlite3.Connection,
+    *,
+    course_id: str,
+    node_id: str,
+    data: dict[str, Any],
+    provider: str,
+    audio_paths: list[Path | None] | None = None,
+) -> NodeCinemaReelResponse:
+    now_iso = _format_iso(datetime.now(UTC)) or datetime.now(UTC).isoformat()
+    raw_acts = data.get("acts") if isinstance(data.get("acts"), list) else []
+    acts_with_audio = _attach_cinema_audio_urls(course_id, node_id, raw_acts, audio_paths=audio_paths)
+    response = NodeCinemaReelResponse.model_validate(
+        {
+            **data,
+            "acts": acts_with_audio,
+            "course_id": course_id,
+            "node_id": node_id,
+            "provider": provider,
+            "updated_at": now_iso,
+        }
+    )
+    stored_acts = [a.model_dump(exclude={"audio_url"}) for a in response.acts]
+    stored_payload = {
+        "title": response.title,
+        "acts": stored_acts,
+    }
+    conn.execute(
+        """
+        INSERT INTO node_cinema_reels (course_id, node_id, reel_json, provider, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(course_id, node_id) DO UPDATE SET
+            reel_json = excluded.reel_json,
+            provider = excluded.provider,
+            updated_at = excluded.updated_at;
+        """,
+        (
+            course_id,
+            node_id,
+            json.dumps(stored_payload, ensure_ascii=False),
+            provider,
+            now_iso,
+        ),
+    )
+    conn.commit()
+    return response
+
+
+@router.get("/study/{course_id}/{node_id}/cinema-reel", response_model=NodeCinemaReelResponse)
+def get_node_cinema_reel(
+    course_id: str,
+    node_id: str,
+    conn: DbConn,
+) -> NodeCinemaReelResponse:
+    course_row, _node_row = _load_course_and_node(conn, course_id, node_id)
+    cached = _read_cached_cinema_reel(conn, str(course_row["id"]), node_id)
+    if cached is None:
+        raise HTTPException(status_code=404, detail="Cinema reel not generated yet")
+    return cached
+
+
+@router.post("/study/{course_id}/{node_id}/cinema-reel", response_model=NodeCinemaReelResponse)
+async def post_node_cinema_reel(
+    course_id: str,
+    node_id: str,
+    conn: DbConn,
+    force: bool = False,
+) -> NodeCinemaReelResponse:
+    course_row, node_row = _load_course_and_node(conn, course_id, node_id)
+    real_course_id = str(course_row["id"])
+    if not force:
+        cached = _read_cached_cinema_reel(conn, real_course_id, node_id)
+        if cached is not None:
+            if all(act.audio_url is not None for act in cached.acts):
+                return cached
+            audio_paths = await synthesize_cinema_act_audios(
+                real_course_id,
+                [act.narration_es for act in cached.acts],
+            )
+            updated_acts = [
+                act.model_copy(
+                    update={
+                        "audio_url": (
+                            _cinema_audio_url(real_course_id, node_id, act.index)
+                            if (i < len(audio_paths) and audio_paths[i] is not None)
+                            else act.audio_url
+                        )
+                    }
+                )
+                for i, act in enumerate(cached.acts)
+            ]
+            return cached.model_copy(update={"acts": updated_acts})
+
+    preferred_provider = _profile_ai_provider(conn)
+    data, provider = await asyncio.to_thread(
+        generate_cinema_reel_with_ai,
+        course_title=course_row["title"],
+        engine_type=course_row["engine_type"] or "concept_tree",
+        node_title=node_row["title"],
+        node_summary=node_row["summary"] or "",
+        story_script=node_row["story_script"] or "",
+        preferred_provider=preferred_provider,
+    )
+    raw_acts = data.get("acts") if isinstance(data.get("acts"), list) else []
+    audio_paths = await synthesize_cinema_act_audios(
+        real_course_id,
+        [str(act.get("narration_es") or "") for act in raw_acts],
+    )
+    return _build_and_persist_cinema_reel(
+        conn,
+        course_id=real_course_id,
+        node_id=node_id,
+        data=data,
+        provider=provider,
+        audio_paths=audio_paths,
+    )
+
+
+@router.get("/study/{course_id}/{node_id}/cinema-reel/stream")
+async def stream_node_cinema_reel(
+    course_id: str,
+    node_id: str,
+    conn: DbConn,
+    force: bool = False,
+) -> StreamingResponse:
+    # Validacion y lectura sincronas: 404 limpio antes de abrir el stream.
+    course_row, node_row = _load_course_and_node(conn, course_id, node_id)
+    real_course_id = str(course_row["id"])
+    gen_kwargs: dict[str, Any] = {
+        "course_title": course_row["title"],
+        "engine_type": course_row["engine_type"] or "concept_tree",
+        "node_title": node_row["title"],
+        "node_summary": node_row["summary"] or "",
+        "story_script": node_row["story_script"] or "",
+        "preferred_provider": _profile_ai_provider(conn),
+    }
+    cached = None if force else _read_cached_cinema_reel(conn, real_course_id, node_id)
+    # Libera cualquier transaccion implicita antes de abrir la conexion dedicada del stream.
+    conn.commit()
+
+    async def event_generator() -> AsyncIterator[str]:
+        try:
+            yield _sse(
+                {
+                    "stage": "analyzing",
+                    "pct": 15,
+                    "label": "Analizando concepto y diseñando arco de 5 actos...",
+                }
+            )
+            if cached is not None:
+                reel_to_return = cached
+                if any(act.audio_url is None for act in cached.acts):
+                    yield _sse(
+                        {
+                            "stage": "synthesizing_audio",
+                            "pct": 88,
+                            "label": "Sintetizando narración neural por acto...",
+                        }
+                    )
+                    audio_paths = await synthesize_cinema_act_audios(
+                        real_course_id,
+                        [act.narration_es for act in cached.acts],
+                    )
+                    updated_acts = [
+                        act.model_copy(
+                            update={
+                                "audio_url": (
+                                    _cinema_audio_url(real_course_id, node_id, act.index)
+                                    if (i < len(audio_paths) and audio_paths[i] is not None)
+                                    else act.audio_url
+                                )
+                            }
+                        )
+                        for i, act in enumerate(cached.acts)
+                    ]
+                    reel_to_return = cached.model_copy(update={"acts": updated_acts})
+                yield _sse(
+                    {
+                        "stage": "done",
+                        "pct": 100,
+                        "label": "Mini-video listo",
+                        "reel": reel_to_return.model_dump(),
+                    }
+                )
+                return
+
+            yield _sse(
+                {
+                    "stage": "scripting",
+                    "pct": 55,
+                    "label": "Escribiendo guion narrativo y escenas visuales...",
+                }
+            )
+            data, provider = await asyncio.to_thread(generate_cinema_reel_with_ai, **gen_kwargs)
+            yield _sse(
+                {
+                    "stage": "synthesizing_audio",
+                    "pct": 88,
+                    "label": "Sintetizando narración neural por acto...",
+                }
+            )
+            raw_acts = data.get("acts") if isinstance(data.get("acts"), list) else []
+            audio_paths = await synthesize_cinema_act_audios(
+                real_course_id,
+                [str(act.get("narration_es") or "") for act in raw_acts],
+            )
+            write_conn = _connect()
+            try:
+                response = _build_and_persist_cinema_reel(
+                    write_conn,
+                    course_id=real_course_id,
+                    node_id=node_id,
+                    data=data,
+                    provider=provider,
+                    audio_paths=audio_paths,
+                )
+            finally:
+                write_conn.close()
+            yield _sse(
+                {
+                    "stage": "done",
+                    "pct": 100,
+                    "label": "Mini-video listo",
+                    "reel": response.model_dump(),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - el stream debe cerrar con un evento de error limpio
+            yield _sse(
+                {
+                    "stage": "error",
+                    "pct": 0,
+                    "label": "No se pudo generar el mini-video",
+                    "detail": str(exc),
+                }
+            )
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/study/{course_id}/{node_id}/cinema-reel/audio/{act_index}")
+def get_node_cinema_reel_audio(
+    course_id: str,
+    node_id: str,
+    act_index: int,
+    conn: DbConn,
+) -> FileResponse:
+    course_row, _node_row = _load_course_and_node(conn, course_id, node_id)
+    real_course_id = str(course_row["id"])
+    if act_index < 0 or act_index > 4:
+        raise HTTPException(status_code=404, detail="Cinema act index out of range")
+
+    cached = _read_cached_cinema_reel(conn, real_course_id, node_id)
+    if cached is None or act_index >= len(cached.acts):
+        raise HTTPException(status_code=404, detail="Cinema reel not found")
+
+    act = cached.acts[act_index]
+    mp3_path = cinema_act_audio_path(real_course_id, act.narration_es)
+    if not mp3_path.is_file() or mp3_path.stat().st_size <= 0:
+        raise HTTPException(status_code=404, detail="Cinema act audio not available")
+
+    return FileResponse(
+        path=mp3_path,
+        media_type="audio/mpeg",
+        filename=f"{real_course_id}_{node_id}_act_{act_index}.mp3",
+        headers={"Cache-Control": "no-cache"},
     )
 
 

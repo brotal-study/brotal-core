@@ -3532,17 +3532,76 @@ def _sanitize_oop_dispatch_state(raw_state: Any) -> dict[str, Any]:
     }
 
 
-def _sanitize_error_contrast_state(raw_state: Any, max_line: int) -> dict[str, Any]:
-    st = raw_state if isinstance(raw_state, dict) else {}
-    valid_phases = ("running", "exception_thrown", "stack_unwinding", "caught", "contrast_fix")
-    raw_phase = str(st.get("phase") or "running").strip().lower()
-    phase = raw_phase if raw_phase in valid_phases else "running"
+def _derive_contrast_lines(source_code: str, fixed_code: str | None) -> tuple[str, str]:
+    """Deriva broken_line y fixed_line comparando el codigo real del storyboard sin literales hardcodeados."""
+    if not fixed_code or source_code.strip() == fixed_code.strip():
+        return ("", "")
 
+    src_lines = [ln.strip() for ln in source_code.splitlines() if ln.strip()]
+    fix_lines = [ln.strip() for ln in fixed_code.splitlines() if ln.strip()]
+    matcher = difflib.SequenceMatcher(None, src_lines, fix_lines)
+
+    broken_candidates: list[str] = []
+    fixed_candidates: list[str] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag in ("replace", "delete"):
+            for ln in src_lines[i1:i2]:
+                if ln not in ("{", "}"):
+                    broken_candidates.append(ln)
+        if tag in ("replace", "insert"):
+            for ln in fix_lines[j1:j2]:
+                if ln not in ("{", "}"):
+                    fixed_candidates.append(ln)
+            if tag == "insert" and not broken_candidates:
+                # Si la correccion inserto una guarda antes de una linea existente, toma la linea siguiente como referencia
+                if i1 < len(src_lines) and src_lines[i1] not in ("{", "}"):
+                    broken_candidates.append(src_lines[i1])
+                elif i1 > 0 and src_lines[i1 - 1] not in ("{", "}"):
+                    broken_candidates.append(src_lines[i1 - 1])
+
+    broken_line = " ".join(broken_candidates[:2])[:180].strip()
+    fixed_line = " ".join(fixed_candidates[:2])[:180].strip()
+    return (broken_line, fixed_line)
+
+
+def _sanitize_error_contrast_state(
+    raw_state: Any,
+    max_line: int,
+    *,
+    source_code: str = "",
+    fixed_code: str | None = None,
+) -> dict[str, Any]:
+    st = raw_state if isinstance(raw_state, dict) else {}
+    valid_phases = (
+        "running",
+        "buggy_run",
+        "exception_thrown",
+        "stack_unwinding",
+        "caught",
+        "contrast_fix",
+        "fixed_diff",
+    )
+    raw_phase = str(st.get("phase") or "").strip().lower()
     raw_view = str(st.get("code_view") or "").strip().lower()
-    if raw_view in ("broken", "fixed"):
+
+    if raw_phase in valid_phases:
+        phase = raw_phase
+    elif raw_view == "fixed":
+        phase = "fixed_diff"
+    else:
+        phase = "running"
+
+    is_fix_phase = phase in ("contrast_fix", "fixed_diff")
+    if is_fix_phase:
+        code_view = "fixed"
+    elif phase == "buggy_run":
+        code_view = "broken"
+    elif raw_view in ("broken", "fixed"):
         code_view = raw_view
     else:
-        code_view = "fixed" if phase == "contrast_fix" else "broken"
+        code_view = "broken"
 
     exc_out: dict[str, Any] | None = None
     raw_exc = st.get("exception")
@@ -3581,24 +3640,39 @@ def _sanitize_error_contrast_state(raw_state: Any, max_line: int) -> dict[str, A
         default_status = "ok" if code_view == "fixed" else ("crashed" if phase == "exception_thrown" else "active")
         stack_out = [{"frame": "main()", "status": default_status, "line": 1}]
 
-    raw_contrast = st.get("contrast") if isinstance(st.get("contrast"), dict) else {}
-    contrast_out = {
-        "bug_cause": str(raw_contrast.get("bug_cause") or "Falta validación previa antes de desreferenciar u operar."),
-        "broken_line": str(raw_contrast.get("broken_line") or "return texto.trim().toUpperCase();"),
-        "fixed_line": str(raw_contrast.get("fixed_line") or "if (texto == null) return \"\";"),
-        "fix_explanation": str(
-            raw_contrast.get("fix_explanation")
-            or "La guarda explícita evita disparar la excepción y mantiene el invariante seguro."
-        ),
-    }
-
-    return {
+    state_out: dict[str, Any] = {
         "phase": phase,
         "code_view": code_view,
         "exception": exc_out,
         "call_stack": stack_out,
-        "contrast": contrast_out,
     }
+
+    # Solo exponer contrast en la fase de correccion (fixed_diff / contrast_fix), nunca en buggy_run ni fases previas.
+    if is_fix_phase:
+        raw_contrast = st.get("contrast") if isinstance(st.get("contrast"), dict) else {}
+        raw_cause = str(raw_contrast.get("bug_cause") or "").strip()
+        raw_broken = str(raw_contrast.get("broken_line") or raw_contrast.get("before") or "").strip()
+        raw_fixed = str(raw_contrast.get("fixed_line") or raw_contrast.get("after") or "").strip()
+        raw_expl = str(raw_contrast.get("fix_explanation") or "").strip()
+
+        if not raw_broken or not raw_fixed:
+            derived_broken, derived_fixed = _derive_contrast_lines(source_code, fixed_code)
+            broken_line = raw_broken or derived_broken
+            fixed_line = raw_fixed or derived_fixed
+        else:
+            broken_line = raw_broken
+            fixed_line = raw_fixed
+
+        if broken_line or fixed_line or raw_cause or raw_expl:
+            state_out["contrast"] = {
+                "bug_cause": raw_cause or "La versión original no protege la condición de borde que dispara la excepción.",
+                "broken_line": broken_line,
+                "fixed_line": fixed_line,
+                "fix_explanation": raw_expl
+                or "La versión corregida valida el caso de borde antes de ejecutar la operación.",
+            }
+
+    return state_out
 
 
 def _sanitize_data_structure_state(raw_state: Any, caption: str) -> dict[str, Any]:
@@ -3751,11 +3825,19 @@ def _sanitize_state_for_variant(
     step_idx: int,
     caption: str,
     max_line: int,
+    *,
+    source_code: str = "",
+    fixed_code: str | None = None,
 ) -> dict[str, Any]:
     if variant == "oop_dispatch":
         return _sanitize_oop_dispatch_state(raw_state)
     if variant == "error_contrast":
-        return _sanitize_error_contrast_state(raw_state, max_line)
+        return _sanitize_error_contrast_state(
+            raw_state,
+            max_line,
+            source_code=source_code,
+            fixed_code=fixed_code,
+        )
     if variant == "data_structure":
         return _sanitize_data_structure_state(raw_state, caption)
     if variant == "sql_pipeline":
@@ -4292,7 +4374,6 @@ def _build_fallback_code_storyboard(
                     "call_stack": [
                         {"frame": "main(String[])", "status": "active", "line": 7},
                     ],
-                    "contrast": contrast_info,
                 },
             },
             {
@@ -4308,7 +4389,6 @@ def _build_fallback_code_storyboard(
                         {"frame": "main(String[])", "status": "active", "line": 7},
                         {"frame": "normalizar(codigo=null)", "status": "active", "line": 3},
                     ],
-                    "contrast": contrast_info,
                 },
             },
             {
@@ -4328,7 +4408,6 @@ def _build_fallback_code_storyboard(
                         {"frame": "main(String[])", "status": "active", "line": 7},
                         {"frame": "normalizar(codigo=null)", "status": "crashed", "line": 3},
                     ],
-                    "contrast": contrast_info,
                 },
             },
             {
@@ -4348,7 +4427,6 @@ def _build_fallback_code_storyboard(
                         {"frame": "main(String[])", "status": "catching", "line": 9},
                         {"frame": "normalizar(codigo=null)", "status": "unwinding", "line": 3},
                     ],
-                    "contrast": contrast_info,
                 },
             },
             {
@@ -4367,7 +4445,6 @@ def _build_fallback_code_storyboard(
                     "call_stack": [
                         {"frame": "main(String[]) [catch]", "status": "catching", "line": 10},
                     ],
-                    "contrast": contrast_info,
                 },
             },
             {
@@ -4376,7 +4453,7 @@ def _build_fallback_code_storyboard(
                 "caption": "Con guarda de null explícita el flujo termina sin excepción.",
                 "checkpoint": _disabled_checkpoint(),
                 "state": {
-                    "phase": "contrast_fix",
+                    "phase": "fixed_diff",
                     "code_view": "fixed",
                     "exception": None,
                     "call_stack": [
@@ -5009,10 +5086,7 @@ def _sanitize_storyboard_payload(
     fixed_code: str | None = None
     if variant == "error_contrast":
         cleaned_fixed = _clean_storyboard_code(parsed.get("fixed_code"), language, max_lines=22)
-        if len(cleaned_fixed.splitlines()) >= 4:
-            fixed_code = cleaned_fixed
-        else:
-            fixed_code = fallback_bundle["fixed_code"]
+        fixed_code = cleaned_fixed or None
     elif parsed.get("fixed_code"):
         cleaned_opt = _clean_storyboard_code(parsed.get("fixed_code"), language, max_lines=22)
         fixed_code = cleaned_opt or None
@@ -5067,7 +5141,15 @@ def _sanitize_storyboard_payload(
             raw_sg = subgoals[min(len(subgoals) - 1, (idx * len(subgoals)) // max(1, len(trimmed_steps)))]["id"]
 
         caption = _clean_micro_caption(st.get("caption"), f"Paso {idx + 1} de la traza.")
-        sanitized_state = _sanitize_state_for_variant(variant, st.get("state"), idx, caption, src_max_line)
+        sanitized_state = _sanitize_state_for_variant(
+            variant,
+            st.get("state"),
+            idx,
+            caption,
+            src_max_line,
+            source_code=source_code,
+            fixed_code=fixed_code,
+        )
 
         step_max_line = (
             fix_max_line
@@ -5183,10 +5265,10 @@ def generate_code_storyboard_with_ai(
         "references:[{var_name,static_type,dynamic_type,heap_id}], "
         "heap_objects:[{id,class_name,fields:[{name,value}]}], "
         "dispatch:{call_expr,static_check,lookup_path:[str],resolved_class,resolved_method,via_super}}\n"
-        "     * error_contrast: {phase:'running'|'exception_thrown'|'stack_unwinding'|'caught'|'contrast_fix', "
+        "     * error_contrast: {phase:'running'|'buggy_run'|'exception_thrown'|'stack_unwinding'|'caught'|'contrast_fix'|'fixed_diff', "
         "code_view:'broken'|'fixed', exception:{type,message,line}|null, "
         "call_stack:[{frame,status:'active'|'crashed'|'unwinding'|'catching'|'ok',line}], "
-        "contrast:{bug_cause,broken_line,fixed_line,fix_explanation}}\n"
+        "contrast:{bug_cause,broken_line,fixed_line,fix_explanation}} (incluye contrast SOLO en fase contrast_fix/fixed_diff)\n"
         "     * data_structure: {structure_type:'array'|'arraylist'|'hashmap'|'linkedlist', label, size, capacity, "
         "cells:[{index,value,state:'normal'|'active'|'changed'|'empty',next_index}], pointers:[{name,index}], "
         "buckets:[{bucket,entries:[{key,value,hash_formula,active}]}], operation}\n"
@@ -5821,3 +5903,580 @@ def run_language_practice_chat_with_ai(
         }
     except (AiProviderError, ValueError, KeyError, TypeError, json.JSONDecodeError):
         return fallback_res
+
+
+# ---------------- Mini-Video Narrado Modo Cine de 5 Actos (v1.2.4) ----------------
+
+_CINEMA_ACT_KINDS: tuple[str, ...] = ("hook", "analogy", "mechanism", "payoff", "takeaway")
+_CINEMA_VISUAL_MODES: tuple[str, ...] = ("kinetic_blocks", "code_morph")
+_CINEMA_VALID_TONES: frozenset[str] = frozenset({"indigo", "emerald", "amber", "rose", "sky", "slate"})
+_CINEMA_VALID_STATUSES: frozenset[str] = frozenset({"active", "problem", "solved", "new", "core"})
+
+
+def _estimate_cinema_sec(narration: str, raw_val: Any = None) -> float:
+    words = len((narration or "").split())
+    computed = max(6.0, round(words / 2.6, 1))
+    if raw_val is not None:
+        try:
+            fval = float(raw_val)
+            if 5.0 <= fval <= 25.0:
+                return round(fval, 1)
+        except (TypeError, ValueError):
+            pass
+    return min(25.0, computed)
+
+
+def _extract_cinema_pills(node_title: str, node_summary: str, story_script: str) -> list[str]:
+    candidates: list[str] = []
+    for match in re.findall(r"\*\*([^*\n]{2,36})\*\*", story_script or ""):
+        cleaned = re.sub(r"[`*_]", "", match).strip(" .,:;")
+        if cleaned and cleaned.lower() not in {c.lower() for c in candidates}:
+            candidates.append(cleaned)
+        if len(candidates) >= 3:
+            break
+
+    if len(candidates) < 3:
+        for part in re.split(r"[,;:/·\-()]+", f"{node_title}, {node_summary}"):
+            cleaned = part.strip(" .")
+            if 3 <= len(cleaned) <= 32 and cleaned.lower() not in {c.lower() for c in candidates}:
+                candidates.append(cleaned)
+            if len(candidates) >= 3:
+                break
+
+    defaults = ["Modelo mental claro", "Causa y efecto", "Criterio de examen"]
+    for fb in defaults:
+        if len(candidates) >= 3:
+            break
+        if fb.lower() not in {c.lower() for c in candidates}:
+            candidates.append(fb)
+    return candidates[:3]
+
+
+def _clean_cinema_code_snippet(raw_code: Any) -> str | None:
+    if not isinstance(raw_code, str):
+        return None
+    text = raw_code.strip()
+    if not text:
+        return None
+    text = re.sub(r"^```[a-zA-Z0-9_+-]*\s*\n?", "", text)
+    text = re.sub(r"\n?```\s*$", "", text).strip()
+    if not text:
+        return None
+    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()][:8]
+    return "\n".join(lines) if lines else None
+
+
+def _build_fallback_code_morph_pair(
+    *,
+    course_title: str,
+    node_title: str,
+    node_summary: str,
+    story_script: str,
+) -> tuple[str, str]:
+    lang, _variant = _detect_storyboard_language_and_variant(
+        course_title=course_title,
+        node_title=node_title,
+        node_summary=node_summary,
+        story_script=story_script,
+    )
+    ctx = _strip_accents_lower(f"{node_title} {node_summary} {story_script}")
+
+    if lang == "sql":
+        return (
+            "SELECT carrera, COUNT(*)\nFROM alumnos\nWHERE COUNT(*) > 2\nGROUP BY carrera;",
+            "SELECT carrera, COUNT(*) AS total\nFROM alumnos\nGROUP BY carrera\nHAVING COUNT(*) > 2;",
+        )
+    if lang == "python":
+        return (
+            "def procesar(valor):\n    return valor.strip().upper()",
+            "def procesar(valor: str | None) -> str:\n    if not valor:\n        return \"\"\n    return valor.strip().upper()",
+        )
+    if any(k in ctx for k in ("excepcion", "try", "catch", "null", "throw", "error", "arithmetic")):
+        return (
+            "int dividir(int a, int b) {\n    return a / b;\n}",
+            "int dividir(int a, int b) {\n    if (b == 0) throw new IllegalArgumentException(\"b=0\");\n    return a / b;\n}",
+        )
+    if any(k in ctx for k in ("herencia", "polimorfismo", "override", "interfaz", "extends", "implements")):
+        return (
+            "if (tipo.equals(\"PUSH\")) enviarPush();\nelse if (tipo.equals(\"SMS\")) enviarSms();",
+            "interface Canal { void enviar(String msg); }\n// Cada tipo implementa su propia regla\ncanal.enviar(msg);",
+        )
+
+    extracted = _extract_story_code_block(story_script, lang)
+    if extracted:
+        lines = [ln.rstrip() for ln in extracted.splitlines() if ln.strip()]
+        if len(lines) >= 3:
+            after_snippet = "\n".join(lines[:6])
+            before_snippet = (
+                "// Sin estructura clara ni validación\n"
+                + "\n".join(lines[:3])
+            )
+            return (before_snippet, after_snippet)
+
+    return (
+        "// Lógica acoplada y frágil\nvoid ejecutar(String dato) {\n    System.out.println(dato.trim());\n}",
+        "// Regla encapsulada y segura\nvoid ejecutar(String dato) {\n    if (dato != null) System.out.println(dato.trim());\n}",
+    )
+
+
+def _build_fallback_cinema_reel(
+    *,
+    course_title: str,
+    engine_type: str,
+    node_title: str,
+    node_summary: str,
+    story_script: str,
+) -> dict[str, Any]:
+    clean_title = (node_title or "Concepto Clave").strip()[:90]
+    short_label = clean_title[:28]
+    summary_clean = re.sub(r"\s+", " ", (node_summary or "").strip()).rstrip(".")
+    if not summary_clean:
+        summary_clean = f"ordenar el funcionamiento interno de {clean_title}"
+    summary_short = summary_clean[:110]
+    pills = _extract_cinema_pills(clean_title, summary_clean, story_script)
+
+    is_code_lab = engine_type == "code_lab"
+    code_before: str | None = None
+    code_after: str | None = None
+    mech_mode = "kinetic_blocks"
+    if is_code_lab:
+        code_before, code_after = _build_fallback_code_morph_pair(
+            course_title=course_title,
+            node_title=clean_title,
+            node_summary=summary_clean,
+            story_script=story_script,
+        )
+        mech_mode = "code_morph"
+
+    hook_narration = (
+        f"Muchos memorizan {clean_title} como una definición suelta, pero sin ver qué problema evita. "
+        f"Cuando el sistema crece, improvisar sin esta pieza rompe el diseño completo."
+    )
+    analogy_narration = (
+        f"Piénsalo como un tablero de conexiones claras en un taller bien organizado: "
+        f"cada módulo cumple un rol preciso y se comunica por un contrato limpio, "
+        f"permitiendo {summary_short.lower()} sin mezclar responsabilidades ni adivinar efectos ocultos."
+    )
+    mechanism_narration = (
+        f"El giro mental ocurre aquí: en lugar de parchear casos aislados cada vez que algo falla, "
+        f"{clean_title} fija una regla central verificable. "
+        f"Así el flujo pasa de una estructura frágil a un mecanismo predecible que puedes trazar paso a paso "
+        f"incluso bajo presión."
+    )
+    payoff_narration = (
+        "El impacto real se nota al escalar o rendir una prueba exigente: "
+        "el núcleo del sistema permanece intacto mientras enchufas nuevos casos, "
+        "evitando errores silenciosos y defendiendo tu diseño con criterio técnico."
+    )
+    takeaway_narration = (
+        f"Quédate con este mapa mental de {clean_title}. "
+        f"Ahora baja a la guía y al ejemplo concreto para consolidar cada detalle antes de evaluarte."
+    )
+
+    acts = [
+        {
+            "index": 0,
+            "kind": "hook",
+            "title": "El problema oculto",
+            "narration_es": hook_narration,
+            "estimated_sec": _estimate_cinema_sec(hook_narration),
+            "visual_mode": "kinetic_blocks",
+            "headline": f"¿Por qué existe {short_label}?",
+            "nodes": [
+                {
+                    "id": "n_old",
+                    "label": "Enfoque improvisado",
+                    "sublabel": "Frágil al crecer o cambiar",
+                    "tone": "rose",
+                    "status": "problem",
+                },
+                {
+                    "id": "n_new",
+                    "label": short_label,
+                    "sublabel": "Regla clara y predecible",
+                    "tone": "emerald",
+                    "status": "solved",
+                },
+            ],
+            "flow_label": "Contraste inicial: improvisación vs. modelo mental",
+            "code_before": None,
+            "code_after": None,
+            "pills": [],
+            "audio_url": None,
+        },
+        {
+            "index": 1,
+            "kind": "analogy",
+            "title": "Analogía cotidiana",
+            "narration_es": analogy_narration,
+            "estimated_sec": _estimate_cinema_sec(analogy_narration),
+            "visual_mode": "kinetic_blocks",
+            "headline": "Cómo se conectan las piezas",
+            "nodes": [
+                {
+                    "id": "a_in",
+                    "label": "Entrada / Situación",
+                    "sublabel": "Demanda real del sistema",
+                    "tone": "sky",
+                    "status": "active",
+                },
+                {
+                    "id": "a_core",
+                    "label": short_label,
+                    "sublabel": "Filtro y regla central",
+                    "tone": "indigo",
+                    "status": "core",
+                },
+                {
+                    "id": "a_out",
+                    "label": "Resultado estable",
+                    "sublabel": "Comportamiento predecible",
+                    "tone": "emerald",
+                    "status": "solved",
+                },
+            ],
+            "flow_label": "Entrada -> Regla central -> Resultado predecible",
+            "code_before": None,
+            "code_after": None,
+            "pills": [],
+            "audio_url": None,
+        },
+        {
+            "index": 2,
+            "kind": "mechanism",
+            "title": "El giro del mecanismo",
+            "narration_es": mechanism_narration,
+            "estimated_sec": _estimate_cinema_sec(mechanism_narration),
+            "visual_mode": mech_mode,
+            "headline": "De frágil a predecible",
+            "nodes": [
+                {
+                    "id": "m_prob",
+                    "label": "Punto de quiebre",
+                    "sublabel": "Parches repetidos",
+                    "tone": "rose",
+                    "status": "problem",
+                },
+                {
+                    "id": "m_turn",
+                    "label": "Giro estructural",
+                    "sublabel": pills[0],
+                    "tone": "amber",
+                    "status": "active",
+                },
+                {
+                    "id": "m_fix",
+                    "label": "Invariante firme",
+                    "sublabel": pills[1],
+                    "tone": "emerald",
+                    "status": "solved",
+                },
+            ],
+            "flow_label": "Problema -> Giro clave -> Invariante protegido",
+            "code_before": code_before,
+            "code_after": code_after,
+            "pills": [],
+            "audio_url": None,
+        },
+        {
+            "index": 3,
+            "kind": "payoff",
+            "title": "Impacto y escala",
+            "narration_es": payoff_narration,
+            "estimated_sec": _estimate_cinema_sec(payoff_narration),
+            "visual_mode": "kinetic_blocks",
+            "headline": "Núcleo intacto al escalar",
+            "nodes": [
+                {
+                    "id": "p_core",
+                    "label": "Núcleo intacto",
+                    "sublabel": f"Base de {course_title[:24]}",
+                    "tone": "indigo",
+                    "status": "core",
+                },
+                {
+                    "id": "p_new",
+                    "label": "Nuevo caso / requisito",
+                    "sublabel": "Se enchufa sin romper nada",
+                    "tone": "amber",
+                    "status": "new",
+                },
+                {
+                    "id": "p_ok",
+                    "label": "Listo para examen",
+                    "sublabel": "Criterio defendible",
+                    "tone": "emerald",
+                    "status": "solved",
+                },
+            ],
+            "flow_label": "Núcleo estable + Nuevo caso -> Diseño escalable",
+            "code_before": None,
+            "code_after": None,
+            "pills": [],
+            "audio_url": None,
+        },
+        {
+            "index": 4,
+            "kind": "takeaway",
+            "title": "Idea para llevar",
+            "narration_es": takeaway_narration,
+            "estimated_sec": _estimate_cinema_sec(takeaway_narration),
+            "visual_mode": "kinetic_blocks",
+            "headline": f"Tu mapa mental de {short_label}",
+            "nodes": [
+                {
+                    "id": "t_1",
+                    "label": pills[0],
+                    "sublabel": "Idea ancla",
+                    "tone": "indigo",
+                    "status": "core",
+                },
+                {
+                    "id": "t_2",
+                    "label": pills[1],
+                    "sublabel": "Mecanismo",
+                    "tone": "sky",
+                    "status": "active",
+                },
+                {
+                    "id": "t_3",
+                    "label": pills[2],
+                    "sublabel": "Aplicación",
+                    "tone": "emerald",
+                    "status": "solved",
+                },
+            ],
+            "flow_label": "Ahora baja a la guía para dominar los detalles",
+            "code_before": None,
+            "code_after": None,
+            "pills": pills,
+            "audio_url": None,
+        },
+    ]
+
+    return {
+        "title": f"Por qué importa {clean_title}",
+        "acts": acts,
+    }
+
+
+def _sanitize_cinema_nodes(raw_nodes: Any, fallback_nodes: list[dict[str, str]]) -> list[dict[str, str]]:
+    clean_nodes: list[dict[str, str]] = []
+    if isinstance(raw_nodes, list):
+        for idx, item in enumerate(raw_nodes[:4]):
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()[:48]
+            if not label:
+                continue
+            node_id = str(item.get("id") or f"n{idx + 1}").strip()[:24] or f"n{idx + 1}"
+            sublabel = str(item.get("sublabel") or "").strip()[:72]
+            tone = str(item.get("tone") or "indigo").strip().lower()
+            if tone not in _CINEMA_VALID_TONES:
+                tone = "indigo"
+            status = str(item.get("status") or "active").strip().lower()
+            if status not in _CINEMA_VALID_STATUSES:
+                status = "active"
+            clean_nodes.append(
+                {
+                    "id": node_id,
+                    "label": label,
+                    "sublabel": sublabel,
+                    "tone": tone,
+                    "status": status,
+                }
+            )
+    return clean_nodes if clean_nodes else [dict(n) for n in fallback_nodes]
+
+
+def _sanitize_cinema_reel_payload(
+    parsed: dict[str, Any],
+    *,
+    fallback_reel: dict[str, Any],
+) -> dict[str, Any]:
+    raw_acts = parsed.get("acts")
+    if not isinstance(raw_acts, list) or not raw_acts:
+        raise ValueError("La respuesta de IA no contiene lista de actos")
+
+    by_kind: dict[str, dict[str, Any]] = {}
+    positional: list[dict[str, Any]] = []
+    for item in raw_acts:
+        if not isinstance(item, dict):
+            continue
+        positional.append(item)
+        k = str(item.get("kind") or "").strip().lower()
+        if k in _CINEMA_ACT_KINDS and k not in by_kind:
+            by_kind[k] = item
+
+    fb_acts = fallback_reel["acts"]
+    sanitized_acts: list[dict[str, Any]] = []
+
+    for idx, kind in enumerate(_CINEMA_ACT_KINDS):
+        fb_act = fb_acts[idx]
+        candidate = by_kind.get(kind)
+        if candidate is None and idx < len(positional):
+            candidate = positional[idx]
+
+        if not isinstance(candidate, dict):
+            sanitized_acts.append(dict(fb_act))
+            continue
+
+        narration = re.sub(r"\s+", " ", str(candidate.get("narration_es") or "").strip())
+        if len(narration.split()) < 8:
+            narration = str(fb_act["narration_es"])
+
+        act_title = str(candidate.get("title") or fb_act["title"]).strip()[:70] or str(fb_act["title"])
+        headline = str(candidate.get("headline") or fb_act["headline"]).strip()[:90]
+        flow_label = str(candidate.get("flow_label") or fb_act["flow_label"]).strip()[:110]
+
+        raw_mode = str(candidate.get("visual_mode") or "kinetic_blocks").strip().lower()
+        visual_mode = raw_mode if raw_mode in _CINEMA_VISUAL_MODES else "kinetic_blocks"
+
+        code_before = _clean_cinema_code_snippet(candidate.get("code_before"))
+        code_after = _clean_cinema_code_snippet(candidate.get("code_after"))
+        if visual_mode == "code_morph":
+            if not (code_before and code_after):
+                visual_mode = "kinetic_blocks"
+                code_before = None
+                code_after = None
+        else:
+            code_before = None
+            code_after = None
+
+        nodes = _sanitize_cinema_nodes(candidate.get("nodes"), fb_act["nodes"])
+
+        raw_pills = candidate.get("pills")
+        pills: list[str] = []
+        if isinstance(raw_pills, list):
+            for p in raw_pills:
+                ps = str(p).strip()[:44]
+                if ps and ps.lower() not in {x.lower() for x in pills}:
+                    pills.append(ps)
+                if len(pills) >= 3:
+                    break
+        if kind == "takeaway":
+            for fb_pill in fb_act["pills"]:
+                if len(pills) >= 3:
+                    break
+                if fb_pill.lower() not in {x.lower() for x in pills}:
+                    pills.append(fb_pill)
+            pills = pills[:3]
+        else:
+            pills = pills[:3]
+
+        sanitized_acts.append(
+            {
+                "index": idx,
+                "kind": kind,
+                "title": act_title,
+                "narration_es": narration,
+                "estimated_sec": _estimate_cinema_sec(narration, candidate.get("estimated_sec")),
+                "visual_mode": visual_mode,
+                "headline": headline,
+                "nodes": nodes,
+                "flow_label": flow_label,
+                "code_before": code_before,
+                "code_after": code_after,
+                "pills": pills,
+                "audio_url": None,
+            }
+        )
+
+    reel_title = str(parsed.get("title") or fallback_reel["title"]).strip()[:100] or str(fallback_reel["title"])
+    return {
+        "title": reel_title,
+        "acts": sanitized_acts,
+    }
+
+
+def generate_cinema_reel_with_ai(
+    *,
+    course_title: str,
+    engine_type: str,
+    node_title: str,
+    node_summary: str,
+    story_script: str,
+    preferred_provider: str = "auto",
+) -> tuple[dict[str, Any], str]:
+    """Genera un mini-video conceptual narrado en 5 actos ('Por qué' y modelo mental) con IA o fallback determinista."""
+    fallback_reel = _build_fallback_cinema_reel(
+        course_title=course_title,
+        engine_type=engine_type,
+        node_title=node_title,
+        node_summary=node_summary,
+        story_script=story_script,
+    )
+
+    code_morph_hint = (
+        "En el acto 3 (`mechanism`), si existe un patron de codigo claro, puedes usar `visual_mode: \"code_morph\"` "
+        "con `code_before` y `code_after` concisos de 3 a 6 lineas; si no, usa `\"kinetic_blocks\"`."
+        if engine_type == "code_lab"
+        else "Usa `visual_mode: \"kinetic_blocks\"` con bloques claros y conectados (`code_before: null`, `code_after: null`)."
+    )
+
+    system_prompt = (
+        "Eres el director pedagogico del Modo Cine de Brotal. Tu mision es crear un mini-video narrado de 5 actos "
+        "que explique el **POR QUE** y el **MODELO MENTAL** del concepto antes de que el estudiante lea la guia.\n"
+        "PROHIBIDO repetir secamente el texto de la guia y PROHIBIDO usar emojis.\n"
+        "Escribe en espanol natural, claro y cinematografico (~140 a 180 palabras en TOTAL entre los 5 actos).\n"
+        "DEBE contener EXACTAMENTE 5 actos en este orden estricto de `kind` y presupuesto de palabras:\n"
+        "1. `index: 0, kind: \"hook\"` (~22-32 palabras): gancho contraintuitivo que revela el problema real que resuelve "
+        "el concepto; 2 tarjetas de contraste en `nodes` + `headline` fuerte.\n"
+        "2. `index: 1, kind: \"analogy\"` (~30-40 palabras): analogia cotidiana concreta con 2 a 4 piezas visuales "
+        "conectadas en `nodes` y `flow_label` claro.\n"
+        "3. `index: 2, kind: \"mechanism\"` (~35-48 palabras): problema -> giro / mecanismo interno. "
+        f"{code_morph_hint}\n"
+        "4. `index: 3, kind: \"payoff\"` (~25-35 palabras): impacto real, escalabilidad o caso tipico de examen; "
+        "`nodes` mostrando el nucleo intacto (`status: \"core\"`) + pieza nueva enchufandose (`status: \"new\"` / `\"solved\"`).\n"
+        "5. `index: 4, kind: \"takeaway\"` (~20-28 palabras): cierre memorable + puente natural hacia la guia/codigo de abajo, "
+        "con EXACTAMENTE 3 `pills` clave concisas.\n"
+        "REGLAS DE CAMPOS:\n"
+        "- `tone` de cada nodo en `nodes`: solo uno de `\"indigo\" | \"emerald\" | \"amber\" | \"rose\" | \"sky\" | \"slate\"`.\n"
+        "- `status` de cada nodo en `nodes`: solo uno de `\"active\" | \"problem\" | \"solved\" | \"new\" | \"core\"`.\n"
+        "- `estimated_sec`: numero en segundos acorde al largo (~palabras / 2.6, entre 6 y 20).\n"
+        "Responde UNICAMENTE JSON valido con esta estructura:\n"
+        "{\n"
+        '  "title": "Titulo atractivo del mini-video",\n'
+        '  "acts": [\n'
+        "    {\n"
+        '      "index": 0,\n'
+        '      "kind": "hook",\n'
+        '      "title": "El problema oculto",\n'
+        '      "narration_es": "...",\n'
+        '      "estimated_sec": 10.5,\n'
+        '      "visual_mode": "kinetic_blocks",\n'
+        '      "headline": "...",\n'
+        '      "nodes": [{"id": "n1", "label": "...", "sublabel": "...", "tone": "rose", "status": "problem"}],\n'
+        '      "flow_label": "...",\n'
+        '      "code_before": null,\n'
+        '      "code_after": null,\n'
+        '      "pills": []\n'
+        "    }\n"
+        "  ]\n"
+        "}"
+    )
+
+    user_payload = {
+        "course_title": course_title,
+        "engine_type": engine_type,
+        "node_title": node_title,
+        "node_summary": node_summary,
+        "story_context": (story_script or "")[:1800],
+    }
+
+    try:
+        comp = complete_chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            preferred_provider=preferred_provider,
+            json_mode=True,
+            temperature=0.45,
+            max_tokens=2200,
+        )
+        parsed = extract_json_object(comp.text)
+        sanitized = _sanitize_cinema_reel_payload(parsed, fallback_reel=fallback_reel)
+        return (sanitized, comp.provider)
+    except (AiProviderError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return (fallback_reel, "local_fallback")
